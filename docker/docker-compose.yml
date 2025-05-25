@@ -1,0 +1,30 @@
+version: '3.8'
+services:
+  ews-mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    env_file:
+      - ../.env
+    ports:
+      - "3000:${MCP_PORT:-3000}"
+    depends_on:
+      - redis
+    environment:
+      REDIS_URL: redis://ews-mcp-redis:6379/0
+    networks:
+      - mcp-network
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    networks:
+      - mcp-network
+
+volumes:
+  redis-data:
+
+networks:
+  mcp-network:
+    driver: bridge
