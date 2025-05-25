@@ -1,6 +1,8 @@
 
 # EWS-MCP Server 🚀
 
+For a detailed architecture document see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 A production-ready **Model Context Protocol (MCP)** gateway for **Microsoft Exchange Web Services**.  
 It exposes smart, versioned MCP tools (email, calendar …) over HTTP & WebSocket while handling EWS SOAP, OAuth, caching, retries and observability under the hood.
 
