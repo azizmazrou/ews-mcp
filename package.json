@@ -1,0 +1,48 @@
+{
+  "name": "ews-mcp-server",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write .",
+    "docker:build": "docker build -t ews-mcp-server -f docker/Dockerfile .",
+    "docker:run": "docker compose -f docker/docker-compose.yml up --build",
+    "docker:logs": "docker compose -f docker/docker-compose.yml logs -f"
+  },
+  "dependencies": {
+    "@anthropic/mcp": "^0.2.0",
+    "@hapi/boom": "^10.0.0",
+    "axios": "^1.6.0",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "fast-xml-parser": "^4.2.4",
+    "helmet": "^7.0.0",
+    "joi": "^17.9.2",
+    "redis": "^4.6.7",
+    "winston": "^3.10.0",
+    "ws": "^8.13.0",
+    "xmlbuilder2": "^4.3.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/ws": "^8.5.5",
+    "@types/node": "^20.5.9",
+    "@types/cors": "^2.8.12",
+    "@types/redis": "^4.0.11",
+    "@types/winston": "^2.4.4",
+    "@typescript-eslint/eslint-plugin": "^6.7.0",
+    "@typescript-eslint/parser": "^6.7.0",
+    "eslint": "^8.45.0",
+    "prettier": "^3.0.0",
+    "tsx": "^3.12.7",
+    "typescript": "^5.1.6"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

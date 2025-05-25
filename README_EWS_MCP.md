@@ -86,7 +86,8 @@ pnpm run dev     # ts-node with live reload
 ## 🔑 Configuration (.env)
 
 ```dotenv
-EWS_URL=https://mail.example.com/EWS/Exchange.asmx
+EWS_URL=https://example.com
+# The /EWS/Exchange.asmx path is added automatically
 EWS_AUTH_TYPE=OAuthApp          # Basic | OAuthApp
 EWS_USERNAME=svc@example.com    # if Basic
 EWS_PASSWORD=********           # if Basic
