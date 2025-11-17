@@ -428,7 +428,56 @@ class ResolveNamesTool(BaseTool):
             # Format results
             results = []
             for resolution in resolved:
-                if resolution:
+                # KEY FIX: result is a tuple (mailbox, contact_info)
+                if resolution and isinstance(resolution, tuple):
+                    mailbox = resolution[0]
+                    contact_info = resolution[1] if len(resolution) > 1 else None
+
+                    if mailbox:
+                        result = {
+                            "name": safe_get(mailbox, 'name', ''),
+                            "email": safe_get(mailbox, 'email_address', ''),
+                            "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
+                            "mailbox_type": safe_get(mailbox, 'mailbox_type', 'Mailbox')
+                        }
+
+                        # Add contact details if available and requested
+                        if return_full_info and contact_info:
+                            contact_details = {
+                                "given_name": safe_get(contact_info, 'given_name', ''),
+                                "surname": safe_get(contact_info, 'surname', ''),
+                                "display_name": safe_get(contact_info, 'display_name', ''),
+                                "company": safe_get(contact_info, 'company_name', ''),
+                                "job_title": safe_get(contact_info, 'job_title', ''),
+                                "department": safe_get(contact_info, 'department', ''),
+                                "office": safe_get(contact_info, 'office_location', '')
+                            }
+
+                            # Extract phone numbers properly
+                            if hasattr(contact_info, 'phone_numbers'):
+                                phone_numbers = safe_get(contact_info, 'phone_numbers', [])
+                                if phone_numbers:
+                                    contact_details["phone_numbers"] = []
+                                    for phone in phone_numbers:
+                                        if hasattr(phone, 'phone_number'):
+                                            contact_details["phone_numbers"].append({
+                                                "type": safe_get(phone, 'label', 'Unknown'),
+                                                "number": safe_get(phone, 'phone_number', '')
+                                            })
+                            else:
+                                contact_details["phone_numbers"] = []
+
+                            # Add additional phone fields if available
+                            if hasattr(contact_info, 'business_phone'):
+                                contact_details["business_phone"] = safe_get(contact_info, 'business_phone', '')
+                            if hasattr(contact_info, 'mobile_phone'):
+                                contact_details["mobile_phone"] = safe_get(contact_info, 'mobile_phone', '')
+
+                            result["contact_details"] = contact_details
+
+                        results.append(result)
+                # Fallback: Handle old format (object with .mailbox attribute)
+                elif resolution:
                     mailbox = resolution.mailbox if hasattr(resolution, 'mailbox') else None
 
                     if mailbox:
