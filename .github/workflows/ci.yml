@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'claude/**'
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  quick-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Python files exist
+        run: |
+          echo "Checking project structure..."
+          ls -la
+          ls -la src/
+          echo "✓ Project structure OK"
+
+      - name: Check Docker files
+        run: |
+          echo "Checking Docker files..."
+          test -f Dockerfile && echo "✓ Dockerfile exists"
+          test -f docker-compose.yml && echo "✓ docker-compose.yml exists"
+          test -f requirements.txt && echo "✓ requirements.txt exists"
+
+      - name: Validate Python syntax
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Python files for syntax errors
+        run: |
+          python -m py_compile src/*.py
+          python -m py_compile src/tools/*.py
+          python -m py_compile src/middleware/*.py
+          echo "✓ All Python files have valid syntax"
+
+      - name: Summary
+        run: |
+          echo "================================"
+          echo "✓ All basic checks passed!"
+          echo "================================"
