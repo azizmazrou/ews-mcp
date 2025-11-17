@@ -1,0 +1,50 @@
+name: Docker Build Test
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+      - 'requirements.txt'
+      - '.github/workflows/docker-*.yml'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ews-mcp-server:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test Python version
+        run: |
+          docker run --rm ews-mcp-server:test python --version
+
+      - name: Test Python imports (without config)
+        run: |
+          docker run --rm ews-mcp-server:test python -c "import sys; print('Python OK'); print(f'Version: {sys.version}')"
+
+      - name: Test lazy config loading
+        run: |
+          docker run --rm ews-mcp-server:test python -c "from src.config import Settings; print('Config module imports OK')"
+
+      - name: Test package structure
+        run: |
+          docker run --rm ews-mcp-server:test ls -la /app/src/
+
+      - name: Verify dependencies installed
+        run: |
+          docker run --rm ews-mcp-server:test python -c "import mcp, exchangelib, pydantic, pydantic_settings; print('All dependencies OK')"

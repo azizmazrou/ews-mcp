@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  ews-mcp-server:
+    image: ghcr.io/azizmazrou/ews-mcp:latest
+    container_name: ews-mcp-server
+    env_file:
+      - .env
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    networks:
+      - mcp-network
+    volumes:
+      - ./logs:/app/logs:rw
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+networks:
+  mcp-network:
+    driver: bridge
