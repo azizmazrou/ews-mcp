@@ -63,7 +63,7 @@ RUN find /app/src -type f -name "*.pyc" -delete && \
 
 # Verify critical code exists (build will fail if code is missing)
 RUN echo "=== Verifying deployed code ===" && \
-    grep -q "VERSION: 2025-11-17-FINAL-FIX" /app/src/tools/contact_intelligence_tools.py && echo "✓ Correct version deployed" || \
+    grep -q "VERSION: 2025-11-17-GAL-TUPLE-FIX" /app/src/tools/contact_intelligence_tools.py && echo "✓ Correct version deployed" || \
     (echo "✗ ERROR: Wrong version! Docker is using cached old code!" && exit 1)
 RUN grep -q "Method 3: Trying wildcard resolve_names" /app/src/tools/contact_intelligence_tools.py && echo "✓ Method 3 found" || \
     (echo "✗ ERROR: Method 3 code not found in container!" && exit 1)
