@@ -2,7 +2,7 @@
 
 A complete Model Context Protocol (MCP) server that interfaces with Microsoft Exchange Web Services (EWS), enabling AI assistants to interact with Exchange for email, calendar, contacts, and task operations.
 
-> **📦 Docker Images**: Pre-built images will be available at `ghcr.io/azizmazrou/ews-mcp:latest` once merged to main branch. For now, build locally with `docker build -t ews-mcp-server .` - See [GHCR_STATUS.md](GHCR_STATUS.md) for details.
+> **📦 Docker Images**: Pre-built images are available at `ghcr.io/azizmazrou/ews-mcp:latest`.
 
 ## Features
 
@@ -713,7 +713,3 @@ Contributions are welcome! Please read the contributing guidelines before submit
 ## Support
 
 For issues and feature requests, please use the GitHub issue tracker.
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for version history.
