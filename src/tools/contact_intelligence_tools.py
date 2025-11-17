@@ -5,7 +5,12 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 2025-11-17-FINAL-FIX
+VERSION: 2025-11-17-GAL-TUPLE-FIX
+CHANGES:
+- Fixed resolve_names to handle tuple format (mailbox, contact_info)
+- Added phone number extraction from GAL results
+- Added additional contact fields (office, display_name, business_phone, mobile_phone)
+- Improved contact information completeness across all search methods
 """
 
 import logging
@@ -164,6 +169,18 @@ class FindPersonTool(BaseTool):
                     result["job_title"] = contact["job_title"]
                 if contact.get("department"):
                     result["department"] = contact["department"]
+                if contact.get("display_name"):
+                    result["display_name"] = contact["display_name"]
+                if contact.get("office"):
+                    result["office"] = contact["office"]
+
+                # Add phone numbers if available
+                if contact.get("phone_numbers"):
+                    result["phone_numbers"] = contact["phone_numbers"]
+                if contact.get("business_phone"):
+                    result["business_phone"] = contact["business_phone"]
+                if contact.get("mobile_phone"):
+                    result["mobile_phone"] = contact["mobile_phone"]
 
                 # Add stats if requested
                 if include_stats:
@@ -212,7 +229,53 @@ class FindPersonTool(BaseTool):
             self.logger.info(f"  ResolveNames returned {len(resolved) if resolved else 0} results")
 
             for resolution in resolved:
-                if resolution and hasattr(resolution, 'mailbox'):
+                # KEY FIX: result is a tuple (mailbox, contact_info)
+                if resolution and isinstance(resolution, tuple):
+                    mailbox = resolution[0]
+                    contact_info = resolution[1] if len(resolution) > 1 else None
+
+                    contact = {
+                        "name": safe_get(mailbox, 'name', ''),
+                        "email": safe_get(mailbox, 'email_address', ''),
+                        "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
+                    }
+
+                    # Add additional contact details from contact_info
+                    if contact_info:
+                        if hasattr(contact_info, 'display_name'):
+                            contact["display_name"] = safe_get(contact_info, 'display_name', '')
+                        if hasattr(contact_info, 'company_name'):
+                            contact["company"] = safe_get(contact_info, 'company_name', '')
+                        if hasattr(contact_info, 'job_title'):
+                            contact["job_title"] = safe_get(contact_info, 'job_title', '')
+                        if hasattr(contact_info, 'department'):
+                            contact["department"] = safe_get(contact_info, 'department', '')
+
+                        # Extract phone numbers
+                        if hasattr(contact_info, 'phone_numbers'):
+                            phone_numbers = safe_get(contact_info, 'phone_numbers', [])
+                            if phone_numbers:
+                                contact["phone_numbers"] = []
+                                for phone in phone_numbers:
+                                    if hasattr(phone, 'phone_number'):
+                                        contact["phone_numbers"].append({
+                                            "type": safe_get(phone, 'label', 'Unknown'),
+                                            "number": safe_get(phone, 'phone_number', '')
+                                        })
+
+                        # Extract additional fields
+                        if hasattr(contact_info, 'office_location'):
+                            contact["office"] = safe_get(contact_info, 'office_location', '')
+                        if hasattr(contact_info, 'business_phone'):
+                            contact["business_phone"] = safe_get(contact_info, 'business_phone', '')
+                        if hasattr(contact_info, 'mobile_phone'):
+                            contact["mobile_phone"] = safe_get(contact_info, 'mobile_phone', '')
+
+                    # Avoid duplicates
+                    if not any(r["email"] == contact["email"] for r in results):
+                        results.append(contact)
+                # Fallback: Handle old format (object with .mailbox attribute)
+                elif resolution and hasattr(resolution, 'mailbox'):
                     mailbox = resolution.mailbox
                     contact = {
                         "name": safe_get(mailbox, 'name', ''),
@@ -300,7 +363,40 @@ class FindPersonTool(BaseTool):
                         )
 
                         for resolution in resolved:
-                            if resolution and hasattr(resolution, 'mailbox'):
+                            # KEY FIX: result is a tuple (mailbox, contact_info)
+                            if resolution and isinstance(resolution, tuple):
+                                mailbox = resolution[0]
+                                contact_info = resolution[1] if len(resolution) > 1 else None
+
+                                contact = {
+                                    "name": safe_get(mailbox, 'name', ''),
+                                    "email": safe_get(mailbox, 'email_address', ''),
+                                    "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
+                                }
+
+                                if contact_info:
+                                    contact["company"] = safe_get(contact_info, 'company_name', '')
+                                    contact["job_title"] = safe_get(contact_info, 'job_title', '')
+                                    contact["department"] = safe_get(contact_info, 'department', '')
+
+                                    # Extract phone numbers
+                                    if hasattr(contact_info, 'phone_numbers'):
+                                        phone_numbers = safe_get(contact_info, 'phone_numbers', [])
+                                        if phone_numbers:
+                                            contact["phone_numbers"] = []
+                                            for phone in phone_numbers:
+                                                if hasattr(phone, 'phone_number'):
+                                                    contact["phone_numbers"].append({
+                                                        "type": safe_get(phone, 'label', 'Unknown'),
+                                                        "number": safe_get(phone, 'phone_number', '')
+                                                    })
+
+                                # Avoid duplicates
+                                if not any(r["email"] == contact["email"] for r in results):
+                                    results.append(contact)
+                                    self.logger.info(f"Found contact via wildcard: {contact['name']} <{contact['email']}>")
+                            # Fallback for old format
+                            elif resolution and hasattr(resolution, 'mailbox'):
                                 mailbox = resolution.mailbox
                                 contact = {
                                     "name": safe_get(mailbox, 'name', ''),
@@ -341,7 +437,39 @@ class FindPersonTool(BaseTool):
                     )
 
                     for resolution in resolved:
-                        if resolution and hasattr(resolution, 'mailbox'):
+                        # KEY FIX: result is a tuple (mailbox, contact_info)
+                        if resolution and isinstance(resolution, tuple):
+                            mailbox = resolution[0]
+                            contact_info = resolution[1] if len(resolution) > 1 else None
+
+                            contact = {
+                                "name": safe_get(mailbox, 'name', ''),
+                                "email": safe_get(mailbox, 'email_address', ''),
+                                "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
+                            }
+
+                            if contact_info:
+                                contact["company"] = safe_get(contact_info, 'company_name', '')
+                                contact["job_title"] = safe_get(contact_info, 'job_title', '')
+                                contact["department"] = safe_get(contact_info, 'department', '')
+
+                                # Extract phone numbers
+                                if hasattr(contact_info, 'phone_numbers'):
+                                    phone_numbers = safe_get(contact_info, 'phone_numbers', [])
+                                    if phone_numbers:
+                                        contact["phone_numbers"] = []
+                                        for phone in phone_numbers:
+                                            if hasattr(phone, 'phone_number'):
+                                                contact["phone_numbers"].append({
+                                                    "type": safe_get(phone, 'label', 'Unknown'),
+                                                    "number": safe_get(phone, 'phone_number', '')
+                                                })
+
+                            if not any(r["email"] == contact["email"] for r in results):
+                                results.append(contact)
+                                self.logger.info(f"Found contact via AD+Contacts: {contact['name']}")
+                        # Fallback for old format
+                        elif resolution and hasattr(resolution, 'mailbox'):
                             mailbox = resolution.mailbox
                             contact = {
                                 "name": safe_get(mailbox, 'name', ''),
@@ -373,7 +501,39 @@ class FindPersonTool(BaseTool):
                             )
 
                             for resolution in resolved:
-                                if resolution and hasattr(resolution, 'mailbox'):
+                                # KEY FIX: result is a tuple (mailbox, contact_info)
+                                if resolution and isinstance(resolution, tuple):
+                                    mailbox = resolution[0]
+                                    contact_info = resolution[1] if len(resolution) > 1 else None
+
+                                    contact = {
+                                        "name": safe_get(mailbox, 'name', ''),
+                                        "email": safe_get(mailbox, 'email_address', ''),
+                                        "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
+                                    }
+
+                                    if contact_info:
+                                        contact["company"] = safe_get(contact_info, 'company_name', '')
+                                        contact["job_title"] = safe_get(contact_info, 'job_title', '')
+                                        contact["department"] = safe_get(contact_info, 'department', '')
+
+                                        # Extract phone numbers
+                                        if hasattr(contact_info, 'phone_numbers'):
+                                            phone_numbers = safe_get(contact_info, 'phone_numbers', [])
+                                            if phone_numbers:
+                                                contact["phone_numbers"] = []
+                                                for phone in phone_numbers:
+                                                    if hasattr(phone, 'phone_number'):
+                                                        contact["phone_numbers"].append({
+                                                            "type": safe_get(phone, 'label', 'Unknown'),
+                                                            "number": safe_get(phone, 'phone_number', '')
+                                                        })
+
+                                    if not any(r["email"] == contact["email"] for r in results):
+                                        results.append(contact)
+                                        self.logger.info(f"Found via AD+Contacts wildcard: {contact['name']}")
+                                # Fallback for old format
+                                elif resolution and hasattr(resolution, 'mailbox'):
                                     mailbox = resolution.mailbox
                                     contact = {
                                         "name": safe_get(mailbox, 'name', ''),
