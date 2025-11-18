@@ -111,10 +111,14 @@ class CacheAdapter:
 
         # Fetch
         try:
+            # Call the fetch function
             if asyncio.iscoroutinefunction(fetch_func):
                 value = await fetch_func()
             else:
                 value = fetch_func()
+                # If the result is a coroutine (e.g., from a lambda), await it
+                if asyncio.iscoroutine(value):
+                    value = await value
 
             # Cache
             self.set(key, value, duration)
