@@ -189,6 +189,129 @@ docker-compose up --build
    - Check recipient exists in organization
    - Verify no send restrictions
 
+### Problem: find_person returns 0 results for GAL search
+
+**Symptoms:**
+```python
+# GAL-specific search returns no results
+find_person(query="Smith", search_scope="gal")
+# Result: total_results: 0
+
+# But email_history search finds results
+find_person(query="Smith", search_scope="all")
+# Result: Found contacts in email_history
+```
+
+**Root Cause:**
+The GAL search uses `account.protocol.resolve_names()` which returns tuples in the format `(mailbox, contact_info)`. If the code doesn't properly unpack these tuples, results appear empty.
+
+**Verification:**
+Check if direct Python code works:
+```python
+from exchangelib import Account, Credentials
+
+credentials = Credentials(username="user@example.com", password="pass")
+account = Account(primary_smtp_address="user@example.com",
+                  credentials=credentials, autodiscover=True)
+
+# This should work
+results = account.protocol.resolve_names(
+    names=["Smith"],
+    return_full_contact_data=True
+)
+
+# Results are tuples: (mailbox, contact_info)
+for result in results:
+    mailbox, contact_info = result
+    print(f"Found: {mailbox.name} - {mailbox.email_address}")
+```
+
+**Solution:**
+The `_search_gal()` method in `contact_intelligence_tools.py` has been updated to properly handle tuple format:
+
+```python
+# Correct tuple unpacking
+if isinstance(result, tuple):
+    mailbox = result[0]
+    contact_info = result[1] if len(result) > 1 else None
+
+    contact = {
+        'name': getattr(mailbox, 'name', ''),
+        'email': getattr(mailbox, 'email_address', ''),
+        'routing_type': getattr(mailbox, 'routing_type', 'SMTP')
+    }
+
+    # Extract additional details from contact_info
+    if contact_info:
+        if hasattr(contact_info, 'display_name'):
+            contact['display_name'] = contact_info.display_name
+        # ... more fields
+```
+
+**Testing:**
+```python
+# Test with generic names
+find_person(query="Smith", search_scope="gal")
+# Should return results from GAL only
+
+# Test with Arabic text (UTF-8)
+find_person(query="أحمد", search_scope="gal")
+# Should handle Arabic names correctly
+
+# Test email search
+find_person(query="john@example.com", search_scope="gal")
+# Should find by email address
+```
+
+**Verify Scope Isolation:**
+```python
+# GAL-only search should NOT include email_history
+result = find_person(query="Smith", search_scope="gal")
+for contact in result['unified_results']:
+    assert 'gal' in contact['sources']
+    assert 'email_history' not in contact['sources']
+```
+
+**Debugging:**
+Enable detailed logging to see GAL search flow:
+```bash
+LOG_LEVEL=DEBUG
+```
+
+Look for these log messages:
+```
+=== GAL Search Start === Query: 'Smith'
+GAL returned 5 raw result(s)
+  GAL [1] John Smith <john.smith@company.com> @ Example Corp
+  GAL [2] Jane Smith <jane.smith@company.com> @ Acme Inc
+=== GAL Search Complete === Found 2 contact(s)
+```
+
+If you see:
+```
+GAL search returned 0 results
+```
+
+But direct Python code works, then there may be an issue with:
+1. Account initialization in the MCP server
+2. Permissions on the service account
+3. Network connectivity to Exchange server
+
+**Common Mistakes:**
+```python
+# Wrong - trying to access .mailbox.name on tuple
+name = result.mailbox.name  # AttributeError!
+
+# Correct - unpack tuple first
+mailbox, contact_info = result
+name = mailbox.name  # Works!
+
+# Also correct - check type first
+if isinstance(result, tuple):
+    mailbox = result[0]
+    name = mailbox.name
+```
+
 ## Performance Issues
 
 ### Problem: Slow response times
