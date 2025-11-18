@@ -1,7 +1,7 @@
 """Email Message model for EWS MCP v3.0."""
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Any
 from datetime import datetime
 from enum import Enum
 
