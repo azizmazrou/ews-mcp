@@ -2,6 +2,7 @@
 
 from typing import Any, Dict
 from datetime import datetime
+from decimal import Decimal
 from exchangelib import Task
 
 from .base import BaseTool
@@ -235,7 +236,7 @@ class UpdateTaskTool(BaseTool):
                     task.due_date = parse_date_tz_aware(due_date_str.isoformat())
 
             if "percent_complete" in kwargs:
-                task.percent_complete = kwargs["percent_complete"]
+                task.percent_complete = Decimal(str(kwargs["percent_complete"]))
 
             if "importance" in kwargs:
                 task.importance = kwargs["importance"]
@@ -281,7 +282,7 @@ class CompleteTaskTool(BaseTool):
         try:
             # Get and complete the task
             task = self.ews_client.account.tasks.get(id=item_id)
-            task.percent_complete = 100
+            task.percent_complete = Decimal('100')
             task.status = "Completed"
             task.is_complete = True
             task.save()
