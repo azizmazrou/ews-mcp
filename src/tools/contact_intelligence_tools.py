@@ -5,19 +5,22 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 2025-11-18-COMPLETE-REVAMP
+VERSION: 2025-11-18-ENHANCED-REVAMP
 CHANGES:
-- *** COMPLETE REVAMP *** of _search_gal() method
-- Removed ALL complex methods (Methods 1, 2, 3, 4)
-- NOW: _search_gal() is EXACT COPY of working Python reference code
-- Simple, clean implementation:
+- Enhanced _search_gal() method with phone number extraction
+- Added comprehensive error handling with per-result try/catch
+- Improved logging with clear section markers (=== GAL Search Start ===)
+- Enhanced contact data extraction:
+  * Phone numbers (phone_numbers array, business_phone, mobile_phone)
+  * Office location
+  * All contact details with None-checking
+- Better use of getattr() for safe attribute access
+- Maintains clean architecture:
   * ONE call to resolve_names() with return_full_contact_data=True
-  * NO search_scope parameter (uses exchangelib default)
   * Clean tuple handling: (mailbox, contact_info)
   * Fallback for object format
-  * Extracts: name, email, display_name, given_name, surname, company, department, job_title
-- Comprehensive logging shows each result type and details
-- Should match working Python behavior EXACTLY
+- Extracts: name, email, display_name, given_name, surname, company,
+           department, job_title, phone_numbers, office
 """
 
 import logging
@@ -212,94 +215,128 @@ class FindPersonTool(BaseTool):
             raise ToolExecutionError(f"Failed to search for person: {e}")
 
     async def _search_gal(self, query: str, include_personal_contacts: bool = False) -> List[Dict[str, Any]]:
-        """Search Global Address List - EXACT COPY of working Python code.
+        """Search Global Address List with enhanced contact data extraction.
 
-        This is a direct port of the working search_gal() function.
-        NO extra methods, NO complexity - just ONE simple resolve_names call.
+        This is a direct port of the working search_gal() function with:
+        - Simple resolve_names() call with return_full_contact_data=True
+        - Proper tuple handling: (mailbox, contact_info)
+        - Fallback for object format
+        - Enhanced phone number extraction
+        - Comprehensive logging
 
         Args:
             query: Search query string
-            include_personal_contacts: If True, also search Contacts folder (optional)
+            include_personal_contacts: If True, also search Contacts folder (currently not implemented)
         """
         contacts = []
 
         try:
-            self.logger.info(f"Searching GAL for: '{query}'")
+            self.logger.info(f"=== GAL Search Start === Query: '{query}'")
 
-            # EXACT COPY of working code - ONE simple call
+            # ONE simple call to resolve_names - matches working Python code
             results = self.ews_client.account.protocol.resolve_names(
                 names=[query],
                 return_full_contact_data=True
             )
 
             if not results:
-                self.logger.warning("No contacts found in GAL")
+                self.logger.warning("GAL search returned 0 results")
                 return contacts
 
-            self.logger.info(f"Found {len(results)} result(s)")
+            self.logger.info(f"GAL returned {len(results)} raw result(s)")
 
             for idx, result in enumerate(results):
+                try:
+                    # Handle tuple format: (mailbox, contact_info)
+                    if isinstance(result, tuple):
+                        mailbox = result[0]
+                        contact_info = result[1] if len(result) > 1 else None
 
-                # Handle tuple format: (mailbox, contact_info) - EXACT COPY
-                if isinstance(result, tuple):
-                    mailbox = result[0]
-                    contact_info = result[1] if len(result) > 1 else None
+                        contact = {
+                            'name': getattr(mailbox, 'name', 'N/A'),
+                            'email': getattr(mailbox, 'email_address', 'N/A'),
+                            'routing_type': getattr(mailbox, 'routing_type', 'SMTP'),
+                        }
 
-                    contact = {
-                        'name': mailbox.name if hasattr(mailbox, 'name') else 'N/A',
-                        'email': mailbox.email_address if hasattr(mailbox, 'email_address') else 'N/A',
-                        'routing_type': mailbox.routing_type if hasattr(mailbox, 'routing_type') else 'N/A',
-                    }
+                        # Extract additional details from contact_info
+                        if contact_info:
+                            if hasattr(contact_info, 'display_name') and contact_info.display_name:
+                                contact['display_name'] = contact_info.display_name
+                            if hasattr(contact_info, 'given_name') and contact_info.given_name:
+                                contact['given_name'] = contact_info.given_name
+                            if hasattr(contact_info, 'surname') and contact_info.surname:
+                                contact['surname'] = contact_info.surname
+                            if hasattr(contact_info, 'company_name') and contact_info.company_name:
+                                contact['company'] = contact_info.company_name
+                            if hasattr(contact_info, 'department') and contact_info.department:
+                                contact['department'] = contact_info.department
+                            if hasattr(contact_info, 'job_title') and contact_info.job_title:
+                                contact['job_title'] = contact_info.job_title
 
-                    # Get additional details from contact_info - EXACT COPY
-                    if contact_info:
-                        if hasattr(contact_info, 'display_name'):
-                            contact['display_name'] = contact_info.display_name
-                        if hasattr(contact_info, 'given_name'):
-                            contact['given_name'] = contact_info.given_name
-                        if hasattr(contact_info, 'surname'):
-                            contact['surname'] = contact_info.surname
-                        if hasattr(contact_info, 'company_name'):
-                            contact['company'] = contact_info.company_name
-                        if hasattr(contact_info, 'department'):
-                            contact['department'] = contact_info.department
-                        if hasattr(contact_info, 'job_title'):
-                            contact['job_title'] = contact_info.job_title
-                else:
-                    # Handle object format - EXACT COPY
-                    contact = {
-                        'name': result.mailbox.name if hasattr(result, 'mailbox') else 'N/A',
-                        'email': result.mailbox.email_address if hasattr(result, 'mailbox') else 'N/A',
-                        'routing_type': result.mailbox.routing_type if hasattr(result, 'mailbox') else 'N/A',
-                    }
+                            # Extract phone numbers
+                            if hasattr(contact_info, 'phone_numbers') and contact_info.phone_numbers:
+                                phones = []
+                                for phone in contact_info.phone_numbers:
+                                    phone_entry = {}
+                                    if hasattr(phone, 'label'):
+                                        phone_entry['type'] = phone.label
+                                    if hasattr(phone, 'phone_number'):
+                                        phone_entry['number'] = phone.phone_number
+                                    if phone_entry:
+                                        phones.append(phone_entry)
+                                if phones:
+                                    contact['phone_numbers'] = phones
 
-                    if hasattr(result, 'contact') and result.contact:
-                        if hasattr(result.contact, 'display_name'):
-                            contact['display_name'] = result.contact.display_name
-                        if hasattr(result.contact, 'given_name'):
-                            contact['given_name'] = result.contact.given_name
-                        if hasattr(result.contact, 'surname'):
-                            contact['surname'] = result.contact.surname
-                        if hasattr(result.contact, 'company_name'):
-                            contact['company'] = result.contact.company_name
-                        if hasattr(result.contact, 'department'):
-                            contact['department'] = result.contact.department
-                        if hasattr(result.contact, 'job_title'):
-                            contact['job_title'] = result.contact.job_title
+                            # Also check individual phone fields
+                            if hasattr(contact_info, 'business_phone') and contact_info.business_phone:
+                                contact['business_phone'] = contact_info.business_phone
+                            if hasattr(contact_info, 'mobile_phone') and contact_info.mobile_phone:
+                                contact['mobile_phone'] = contact_info.mobile_phone
+                            if hasattr(contact_info, 'office_location') and contact_info.office_location:
+                                contact['office'] = contact_info.office_location
 
-                contacts.append(contact)
+                    else:
+                        # Handle object format (fallback)
+                        contact = {
+                            'name': result.mailbox.name if hasattr(result, 'mailbox') else 'N/A',
+                            'email': result.mailbox.email_address if hasattr(result, 'mailbox') else 'N/A',
+                            'routing_type': result.mailbox.routing_type if hasattr(result, 'mailbox') else 'SMTP',
+                        }
 
-                # Log contact briefly
-                name = contact.get('name', 'N/A')
-                email = contact.get('email', 'N/A')
-                company = contact.get('company', contact.get('company_name', ''))
-                self.logger.info(f"  [{idx + 1}] {name} <{email}>" + (f" - {company}" if company else ""))
+                        if hasattr(result, 'contact') and result.contact:
+                            c = result.contact
+                            if hasattr(c, 'display_name') and c.display_name:
+                                contact['display_name'] = c.display_name
+                            if hasattr(c, 'given_name') and c.given_name:
+                                contact['given_name'] = c.given_name
+                            if hasattr(c, 'surname') and c.surname:
+                                contact['surname'] = c.surname
+                            if hasattr(c, 'company_name') and c.company_name:
+                                contact['company'] = c.company_name
+                            if hasattr(c, 'department') and c.department:
+                                contact['department'] = c.department
+                            if hasattr(c, 'job_title') and c.job_title:
+                                contact['job_title'] = c.job_title
 
-            self.logger.info(f"Total contacts found: {len(contacts)}")
+                    contacts.append(contact)
+
+                    # Log each contact found
+                    name = contact.get('name', 'N/A')
+                    email = contact.get('email', 'N/A')
+                    company = contact.get('company', '')
+                    self.logger.debug(f"  GAL [{idx + 1}] {name} <{email}>" + (f" @ {company}" if company else ""))
+
+                except Exception as e:
+                    self.logger.error(f"Error processing GAL result {idx}: {e}")
+                    import traceback
+                    self.logger.error(traceback.format_exc())
+                    continue
+
+            self.logger.info(f"=== GAL Search Complete === Found {len(contacts)} contact(s)")
             return contacts
 
         except Exception as e:
-            self.logger.error(f"✗ Search error: {e}")
+            self.logger.error(f"=== GAL Search Failed === Error: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
             return contacts
