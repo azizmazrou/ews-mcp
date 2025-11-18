@@ -5,12 +5,15 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 2025-11-17-GAL-TUPLE-FIX
+VERSION: 2025-11-18-GAL-ONLY-FIX
 CHANGES:
 - Fixed resolve_names to handle tuple format (mailbox, contact_info)
 - Added phone number extraction from GAL results
 - Added additional contact fields (office, display_name, business_phone, mobile_phone)
-- Improved contact information completeness across all search methods
+- CRITICAL: Fixed search_scope="gal" to NOT search personal contacts (Method 2)
+- Added include_personal_contacts parameter to control personal contacts search
+- Improved error logging with full tracebacks to diagnose resolve_names failures
+- Method 2 now only runs when include_personal_contacts=True
 """
 
 import logging
@@ -86,8 +89,10 @@ class FindPersonTool(BaseTool):
 
             # 1. Search GAL (Global Address List)
             if search_scope in ["all", "gal"] and not is_domain_search:
-                self.logger.info(f"Searching GAL for: {query}")
-                gal_results = await self._search_gal(query)
+                # Only include personal contacts if search_scope is "all"
+                include_personal = (search_scope == "all")
+                self.logger.info(f"Searching GAL for: {query} (include_personal_contacts={include_personal})")
+                gal_results = await self._search_gal(query, include_personal_contacts=include_personal)
                 for contact in gal_results:
                     email = contact.get("email", "").lower()
                     if email and email not in unified_results:
@@ -202,8 +207,14 @@ class FindPersonTool(BaseTool):
             self.logger.error(f"Failed to search for person: {e}")
             raise ToolExecutionError(f"Failed to search for person: {e}")
 
-    async def _search_gal(self, query: str) -> List[Dict[str, Any]]:
-        """Search Global Address List using multiple methods."""
+    async def _search_gal(self, query: str, include_personal_contacts: bool = False) -> List[Dict[str, Any]]:
+        """Search Global Address List using multiple methods.
+
+        Args:
+            query: Search query string
+            include_personal_contacts: If True, also search personal Contacts folder (Method 2)
+                                      If False, only search Active Directory GAL
+        """
         results = []
 
         # Log query details
@@ -227,6 +238,9 @@ class FindPersonTool(BaseTool):
             )
 
             self.logger.info(f"  ResolveNames returned {len(resolved) if resolved else 0} results")
+            if resolved and len(resolved) > 0:
+                self.logger.info(f"  First result type: {type(resolved[0])}")
+                self.logger.info(f"  First result content: {resolved[0]}")
 
             for resolution in resolved:
                 # KEY FIX: result is a tuple (mailbox, contact_info)
@@ -296,51 +310,57 @@ class FindPersonTool(BaseTool):
 
             self.logger.info(f"Method 1 (resolve_names): Found {len(results)} contacts")
         except Exception as e:
-            self.logger.warning(f"Method 1 (resolve_names) failed: {e}")
+            self.logger.error(f"Method 1 (resolve_names) FAILED: {type(e).__name__}: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
 
-        # METHOD 2: Try searching Contacts folder (if exists)
-        try:
-            self.logger.info("Method 2: Trying Contacts folder search")
-            contacts_folder = self.ews_client.account.contacts
+        # METHOD 2: Try searching Contacts folder (PERSONAL contacts, not GAL!)
+        # Only run this if explicitly requested
+        if include_personal_contacts:
+            try:
+                self.logger.info("Method 2: Trying Contacts folder search (PERSONAL contacts)")
+                contacts_folder = self.ews_client.account.contacts
 
-            # Search by display name or email
-            from exchangelib import Q
-            search_filter = (
-                Q(display_name__icontains=query) |
-                Q(email_addresses__contains=query) |
-                Q(given_name__icontains=query) |
-                Q(surname__icontains=query)
-            )
+                # Search by display name or email
+                from exchangelib import Q
+                search_filter = (
+                    Q(display_name__icontains=query) |
+                    Q(email_addresses__contains=query) |
+                    Q(given_name__icontains=query) |
+                    Q(surname__icontains=query)
+                )
 
-            contacts_results = contacts_folder.filter(search_filter).only(
-                'display_name', 'email_addresses', 'company_name',
-                'job_title', 'department', 'given_name', 'surname'
-            )
+                contacts_results = contacts_folder.filter(search_filter).only(
+                    'display_name', 'email_addresses', 'company_name',
+                    'job_title', 'department', 'given_name', 'surname'
+                )
 
-            for contact in contacts_results[:50]:  # Limit to 50
-                # Get primary email
-                email_addresses = safe_get(contact, 'email_addresses', [])
-                email = ""
-                if email_addresses and len(email_addresses) > 0:
-                    email = safe_get(email_addresses[0], 'email', '')
+                for contact in contacts_results[:50]:  # Limit to 50
+                    # Get primary email
+                    email_addresses = safe_get(contact, 'email_addresses', [])
+                    email = ""
+                    if email_addresses and len(email_addresses) > 0:
+                        email = safe_get(email_addresses[0], 'email', '')
 
-                if email:
-                    contact_data = {
-                        "name": safe_get(contact, 'display_name', ''),
-                        "email": email.lower(),
-                        "company": safe_get(contact, 'company_name', ''),
-                        "job_title": safe_get(contact, 'job_title', ''),
-                        "department": safe_get(contact, 'department', ''),
-                        "routing_type": "SMTP"
-                    }
+                    if email:
+                        contact_data = {
+                            "name": safe_get(contact, 'display_name', ''),
+                            "email": email.lower(),
+                            "company": safe_get(contact, 'company_name', ''),
+                            "job_title": safe_get(contact, 'job_title', ''),
+                            "department": safe_get(contact, 'department', ''),
+                            "routing_type": "SMTP"
+                        }
 
-                    # Avoid duplicates
-                    if not any(r["email"] == contact_data["email"] for r in results):
-                        results.append(contact_data)
+                        # Avoid duplicates
+                        if not any(r["email"] == contact_data["email"] for r in results):
+                            results.append(contact_data)
 
-            self.logger.info(f"Method 2 (Contacts folder): Found {len(results) - len([r for r in results if 'Method 1' in str(r)])} new contacts")
-        except Exception as e:
-            self.logger.warning(f"Method 2 (Contacts folder) failed: {e}")
+                self.logger.info(f"Method 2 (Contacts folder): Found {len(results) - len([r for r in results if 'Method 1' in str(r)])} new contacts")
+            except Exception as e:
+                self.logger.warning(f"Method 2 (Contacts folder) failed: {e}")
+        else:
+            self.logger.info("Method 2: Skipped (include_personal_contacts=False)")
 
         # METHOD 3: Try wildcard resolve_names (for partial matches)
         # Note: Exchange Server fully supports Arabic/UTF-8 wildcards
