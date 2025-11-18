@@ -408,10 +408,12 @@ class EWSMCPServer:
                     streams[1],
                     self.server.create_initialization_options(),
                 )
+            return Response()
 
         async def handle_messages(request):
             """Handle POST messages endpoint."""
             await sse.handle_post_message(request.scope, request.receive, request._send)
+            return Response()
 
         # Create Starlette app
         app = Starlette(
