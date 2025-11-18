@@ -1,184 +1,81 @@
-# EWS MCP Server
+# EWS MCP Server v3.0
 
 A complete Model Context Protocol (MCP) server that interfaces with Microsoft Exchange Web Services (EWS), enabling AI assistants to interact with Exchange for email, calendar, contacts, and task operations.
 
-> **📦 Docker Images**: Pre-built images are available at `ghcr.io/azizmazrou/ews-mcp:latest`.
+> **New in v3.0**: Person-centric architecture with intelligent multi-strategy GAL search that **eliminates the 0-results bug**!
+
+> **Docker Images**: Pre-built images are available at `ghcr.io/azizmazrou/ews-mcp:latest`.
+
+## What's New in v3.0
+
+Version 3.0 is a **major architectural upgrade** that transforms the system from email-centric to **person-centric**.
+
+### GAL 0-Results Bug - FIXED!
+
+The notorious GAL search 0-results bug has been **completely solved** with a multi-strategy search approach:
+
+| Scenario | v2.x Result | v3.0 Result |
+|----------|-------------|-------------|
+| Exact name match | Works | Works |
+| Partial name ("Ahmed") | 0 results | Finds all matches |
+| Domain search ("@company.com") | 0 results | Finds all users |
+| Typos/variations | 0 results | Fuzzy matches |
+
+### Person-Centric Architecture
+
+**Before (v2.x):** Email-centric, scattered logic
+```python
+# Old way - juggling emails and accounts
+send_email(to=["user@example.com"], ...)
+find_person(query="Ahmed")
+get_history(email="user@example.com")
+```
+
+**After (v3.0):** Person-first, unified operations
+```python
+# New way - work with PEOPLE naturally
+person = await find_person("Ahmed")
+# Returns: Person with name, emails, phone, title, department, communication stats
+```
+
+### New Architecture Components
+
+- **Person Model** - First-class entity with comprehensive profile (name, emails, phones, title, department, communication stats)
+- **PersonService** - Orchestrates person discovery across GAL, Contacts, and Email History
+- **GALAdapter** - Multi-strategy search (exact, partial, domain, fuzzy)
+- **CacheAdapter** - Intelligent caching to reduce Exchange load
+- **ThreadService** - Email thread preservation with HTML formatting
+- **AttachmentService** - All formats supported (PDF, DOCX, XLSX, PPTX, ZIP, CSV, TXT, HTML)
+- **EmailService** - Enhanced with thread support
+
+### Enterprise Logging
+
+- **Console**: Minimal INFO level for monitoring
+- **File logs**: DEBUG level for troubleshooting (ews-mcp.log)
+- **Error logs**: ERROR level only (ews-mcp-errors.log)
+- **Audit logs**: Compliance trail (audit.log)
 
 ## Features
 
-- ✅ **Email Operations**: Send, read, search, delete, move, **copy** emails with **fixed** attachment support
-- ✅ **Attachment Content Extraction**: Read text from PDF, DOCX, XLSX, TXT files (Arabic/UTF-8 support)
-- ✅ **Calendar Management**: Create, update, delete appointments, respond to meetings, **AI-powered meeting time finder**
-- ✅ **Contact Management**: Full CRUD operations for Exchange contacts
-- ✅ **Contact Intelligence**: Advanced contact search across GAL & email history, communication analytics, network analysis
-- ✅ **Task Management**: Create and manage Exchange tasks
-- ✅ **Folder Management**: Create, delete, rename, move mailbox folders
-- ✅ **Advanced Search**: Conversation threading, full-text search across email content
-- ✅ **Out-of-Office**: Configure automatic replies with scheduling
-- ✅ **Multi-Authentication**: Support for OAuth2, Basic Auth, and NTLM
-- ✅ **Timezone Support**: Proper handling of timezones (tested with Asia/Riyadh, UTC, etc.)
-- ✅ **HTTP/SSE Transport**: Support for both stdio and HTTP/SSE for web clients (n8n compatible)
-- ✅ **Docker Ready**: Production-ready containerization with best practices
-- ✅ **Rate Limiting**: Built-in rate limiting with automatic retry (exponential backoff)
-- ✅ **Error Handling**: Comprehensive error handling with @handle_ews_errors decorator
-- ✅ **Audit Logging**: Track all operations for compliance (logs to stderr only)
-
-## What's New in v2.1 🎯
-
-Version 2.1 adds **Contact Intelligence** capabilities with **3 new tools** (bringing total to 43 base tools):
-
-### Contact Intelligence Tools (3 new tools)
-
-#### Unified Contact Search
-- **find_person** - Search across Global Address List (GAL), email history, and domains
-  - Intelligent ranking by communication frequency and recency
-  - Multi-source deduplication (GAL + email history)
-  - Arabic language support (UTF-8)
-  - Domain-wide search (e.g., all contacts from @example.com)
-
-#### Communication Analytics
-- **get_communication_history** - Detailed relationship analysis with any contact
-  - Email volume statistics (sent/received/total)
-  - Communication timeline (monthly aggregation)
-  - Topic extraction from email subjects
-  - Recent emails preview with dates
-
-#### Network Intelligence
-- **analyze_network** - Professional network analysis
-  - Top contacts by email volume
-  - Domain-based organization grouping
-  - Dormant relationship detection (contacts you've lost touch with)
-  - VIP identification (high-volume + recent activity)
-  - Comprehensive overview with summary statistics
-
-### Feature Highlights
-
-**Find Anyone Across Multiple Sources**
-```python
-# Search by name across all sources
-find_person(
-    query="John Doe",
-    search_scope="all",  # Search GAL + email history
-    include_stats=True
-)
-
-# Find all contacts from a specific domain
-find_person(
-    query="@example.com",
-    search_scope="domain"
-)
-```
-
-**Analyze Communication Patterns**
-```python
-# Get detailed history with any contact
-get_communication_history(
-    email="colleague@example.com",
-    days_back=365,
-    include_topics=True
-)
-# Returns: stats, timeline, top topics, recent emails
-```
-
-**Understand Your Professional Network**
-```python
-# Identify VIP contacts (high volume + recent)
-analyze_network(
-    analysis_type="vip",
-    days_back=90,
-    vip_email_threshold=10
-)
-
-# Find dormant relationships to reconnect
-analyze_network(
-    analysis_type="dormant",
-    dormant_threshold_days=60
-)
-
-# Analyze by organization/domain
-analyze_network(
-    analysis_type="by_domain",
-    top_n=20
-)
-```
-
-## What's New in v2.0 🚀
-
-Version 2.0 expanded the EWS MCP Server from **28 MVP tools to 40 enterprise-grade tools**, adding powerful new capabilities:
-
-### New Tools (12 additions)
-
-#### Folder Management (4 tools)
-- **create_folder** - Create new mailbox folders with custom folder classes
-- **delete_folder** - Delete folders (soft or permanent)
-- **rename_folder** - Rename existing folders
-- **move_folder** - Move folders to new parent locations
-
-#### Enhanced Attachments (2 tools)
-- **add_attachment** - Add attachments via file path or base64 content with inline support
-- **delete_attachment** - Remove attachments by ID or name
-
-#### Advanced Search (2 tools)
-- **search_by_conversation** - Find all emails in a conversation thread
-- **full_text_search** - Full-text search with case-sensitive and exact phrase options
-
-#### Out-of-Office (2 tools)
-- **set_oof_settings** - Configure automatic replies (Enabled/Scheduled/Disabled)
-- **get_oof_settings** - Retrieve current OOF settings with active status
-
-#### Calendar Enhancement (1 tool)
-- **find_meeting_times** - AI-powered meeting time finder analyzing attendee availability with smart scoring
-
-#### Email Enhancement (1 tool)
-- **copy_email** - Copy emails to folders while preserving originals
-
-### Feature Highlights
-
-**Smart Meeting Scheduling**
-```python
-# Find optimal meeting times across multiple attendees
-find_meeting_times(
-    attendees=["alice@company.com", "bob@company.com", "carol@company.com"],
-    duration_minutes=60,
-    preferences={
-        "prefer_morning": True,
-        "working_hours_start": 9,
-        "working_hours_end": 17,
-        "avoid_lunch": True
-    }
-)
-# Returns scored suggestions with availability analysis
-```
-
-**Conversation Threading**
-```python
-# Track entire email conversations
-search_by_conversation(
-    message_id="email-123"  # or conversation_id directly
-)
-# Returns all emails in the thread
-```
-
-**Advanced Folder Organization**
-```python
-# Organize your mailbox programmatically
-create_folder(folder_name="Projects/2025/Q1", parent_folder="inbox")
-move_folder(folder_id="folder-123", destination_parent_folder="archive")
-rename_folder(folder_id="folder-123", new_name="Completed Projects")
-```
-
-**Out-of-Office Automation**
-```python
-# Schedule OOF for vacation
-set_oof_settings(
-    state="Scheduled",
-    internal_reply="I'm on vacation",
-    external_reply="I'm currently out of office",
-    start_time="2025-12-20T00:00:00",
-    end_time="2025-12-31T23:59:59",
-    external_audience="Known"
-)
-```
+- **Person-Centric Operations**: Work with people naturally, not just email addresses
+- **Multi-Strategy GAL Search**: Never see 0 results when people exist in the directory
+- **Email Operations**: Send, read, search, delete, move, copy emails with attachment support
+- **Attachment Content Extraction**: Read text from PDF, DOCX, XLSX, PPTX, TXT, CSV, HTML, ZIP files (Arabic/UTF-8 support)
+- **Calendar Management**: Create, update, delete appointments, respond to meetings, AI-powered meeting time finder
+- **Contact Management**: Full CRUD operations for Exchange contacts
+- **Contact Intelligence**: Advanced contact search across GAL & email history, communication analytics, network analysis
+- **Task Management**: Create and manage Exchange tasks
+- **Folder Management**: Create, delete, rename, move mailbox folders
+- **Advanced Search**: Conversation threading, full-text search across email content
+- **Out-of-Office**: Configure automatic replies with scheduling
+- **Multi-Authentication**: Support for OAuth2, Basic Auth, and NTLM
+- **Timezone Support**: Proper handling of timezones (tested with Asia/Riyadh, UTC, etc.)
+- **HTTP/SSE Transport**: Support for both stdio and HTTP/SSE for web clients (n8n compatible)
+- **Docker Ready**: Production-ready containerization with best practices
+- **Rate Limiting**: Built-in rate limiting with automatic retry (exponential backoff)
+- **Error Handling**: Comprehensive error handling with @handle_ews_errors decorator
+- **Intelligent Caching**: Reduce Exchange load with TTL-based caching
+- **Enterprise Logging**: Multi-tier logging for monitoring and troubleshooting
 
 ## Quick Start
 
@@ -194,7 +91,7 @@ Choose your authentication method:
 # Pull the latest image
 docker pull ghcr.io/azizmazrou/ews-mcp:latest
 
-# 3. Create .env file with Basic Auth
+# Create .env file with Basic Auth
 cat > .env <<EOF
 EWS_SERVER_URL=https://mail.company.com/EWS/Exchange.asmx
 EWS_EMAIL=user@company.com
@@ -206,22 +103,15 @@ TIMEZONE=UTC
 LOG_LEVEL=INFO
 EOF
 
-# 4. Run the container
+# Run the container
 docker run -d \
   --name ews-mcp-server \
   --env-file .env \
   -v $(pwd)/logs:/app/logs \
   ghcr.io/azizmazrou/ews-mcp:latest
 
-# View logs - look for "✓ Successfully connected to Exchange"
+# View logs - look for "EWS-MCP v3.0 starting"
 docker logs -f ews-mcp-server
-```
-
-**Or use the pre-configured template**:
-```bash
-cp .env.basic.example .env
-# Edit .env with your credentials
-docker run -d --name ews-mcp --env-file .env ghcr.io/azizmazrou/ews-mcp:latest
 ```
 
 #### Option 2: OAuth2 Authentication (Production - Office 365)
@@ -294,142 +184,39 @@ Choose your authentication method based on your Exchange setup:
 
 | Auth Method | Use Case | Setup Time | Security |
 |-------------|----------|------------|----------|
-| **Basic Auth** | Testing, On-premises Exchange | ⚡ 1 minute | ⚠️ Moderate |
-| **OAuth2** | Office 365, Production | 🕐 10 minutes | ✅ High |
-| **NTLM** | Windows Domain, On-premises | 🕐 5 minutes | ⚠️ Moderate |
+| **Basic Auth** | Testing, On-premises Exchange | 1 minute | Moderate |
+| **OAuth2** | Office 365, Production | 10 minutes | High |
+| **NTLM** | Windows Domain, On-premises | 5 minutes | Moderate |
 
 ### Basic Authentication (Easiest - For Testing/On-Premises)
 
 **Best for**: Quick testing, on-premises Exchange servers, legacy setups
 
-**⚠️ Note**: Basic Auth is being deprecated by Microsoft for Office 365. Use OAuth2 for production Office 365 environments.
-
-#### Quick Setup (30 seconds)
-
-1. **Create `.env` file**:
-   ```bash
-   cat > .env <<EOF
-   # Exchange Server
-   EWS_SERVER_URL=https://mail.company.com/EWS/Exchange.asmx
-   EWS_EMAIL=user@company.com
-   EWS_AUTODISCOVER=false
-
-   # Basic Authentication
-   EWS_AUTH_TYPE=basic
-   EWS_USERNAME=user@company.com
-   EWS_PASSWORD=your-password
-
-   # Server Configuration
-   LOG_LEVEL=INFO
-   EOF
-   ```
-
-2. **Run the server**:
-   ```bash
-   docker run -d --name ews-mcp --env-file .env ghcr.io/azizmazrou/ews-mcp:latest
-   ```
-
-3. **Verify it's working**:
-   ```bash
-   docker logs ews-mcp
-   # Look for "✓ Successfully connected to Exchange"
-   ```
-
-That's it! The server is now running with Basic Authentication.
-
-#### Using Pre-configured Template
+**Note**: Basic Auth is being deprecated by Microsoft for Office 365. Use OAuth2 for production Office 365 environments.
 
 ```bash
-# Copy Basic Auth template
-cp .env.basic.example .env
-
-# Edit with your credentials
-nano .env  # or your preferred editor
-
-# Run
-docker run -d --env-file .env ghcr.io/azizmazrou/ews-mcp:latest
-```
-
-#### Interactive Setup Script
-
-For an even easier setup, use the interactive script:
-
-```bash
-# Run the setup script
-./scripts/setup-basic-auth.sh
-
-# Follow the prompts to:
-# - Enter your Exchange server
-# - Provide email and password
-# - Automatically create .env
-# - Pull Docker image
-# - Start the server
-```
-
-#### For On-Premises Exchange
-
-```bash
-# Find your EWS endpoint
-# Usually: https://mail.yourcompany.com/EWS/Exchange.asmx
-# Or: https://exchange.yourcompany.com/EWS/Exchange.asmx
-
 cat > .env <<EOF
-EWS_SERVER_URL=https://mail.yourcompany.com/EWS/Exchange.asmx
-EWS_EMAIL=user@yourcompany.com
+# Exchange Server
+EWS_SERVER_URL=https://mail.company.com/EWS/Exchange.asmx
+EWS_EMAIL=user@company.com
 EWS_AUTODISCOVER=false
+
+# Basic Authentication
 EWS_AUTH_TYPE=basic
-EWS_USERNAME=user@yourcompany.com
+EWS_USERNAME=user@company.com
 EWS_PASSWORD=your-password
+
+# Server Configuration
 LOG_LEVEL=INFO
 EOF
 ```
-
-#### Troubleshooting Basic Auth
-
-**Problem: "Authentication failed"**
-- ✅ Verify username and password are correct
-- ✅ Check if account requires domain: `DOMAIN\username`
-- ✅ Ensure Basic Auth is enabled on Exchange server
-- ✅ Try with Outlook Web Access (OWA) first to verify credentials
-
-**Problem: "Connection refused"**
-- ✅ Verify EWS_SERVER_URL is correct
-- ✅ Test with: `curl https://mail.company.com/EWS/Exchange.asmx`
-- ✅ Check firewall/network access
-- ✅ Try autodiscovery: Set `EWS_AUTODISCOVER=true`
 
 ### OAuth2 Authentication (Recommended for Office 365)
 
 **Best for**: Office 365/Microsoft 365, production environments, modern security
 
-#### Quick Setup (10 minutes)
-
-1. **Use pre-configured template**:
-   ```bash
-   cp .env.oauth2.example .env
-   ```
-
-2. **Register app in Azure AD** (see detailed steps below)
-
-3. **Update `.env` with Azure AD credentials**:
-   ```bash
-   EWS_SERVER_URL=https://outlook.office365.com/EWS/Exchange.asmx
-   EWS_EMAIL=user@company.com
-   EWS_AUTH_TYPE=oauth2
-   EWS_CLIENT_ID=your-azure-app-client-id
-   EWS_CLIENT_SECRET=your-azure-app-client-secret
-   EWS_TENANT_ID=your-azure-tenant-id
-   ```
-
-4. **Run the server**:
-   ```bash
-   docker run -d --env-file .env ghcr.io/azizmazrou/ews-mcp:latest
-   ```
-
-## OAuth2 Setup (Azure AD)
-
 1. **Register Application in Azure AD**:
-   - Go to Azure Portal → Azure Active Directory → App registrations
+   - Go to Azure Portal > Azure Active Directory > App registrations
    - Click "New registration"
    - Name: "EWS MCP Server"
    - Supported account types: "Accounts in this organizational directory only"
@@ -437,30 +224,20 @@ EOF
 
 2. **Configure API Permissions**:
    - Go to "API permissions"
-   - Click "Add a permission"
-   - Select "Office 365 Exchange Online"
-   - Select "Application permissions"
-   - Add: `full_access_as_app` or specific permissions like:
-     - `Mail.ReadWrite`
-     - `Calendars.ReadWrite`
-     - `Contacts.ReadWrite`
-     - `Tasks.ReadWrite`
+   - Add "Office 365 Exchange Online" > Application permissions
+   - Add: `full_access_as_app` or specific permissions
    - Click "Grant admin consent"
 
 3. **Create Client Secret**:
    - Go to "Certificates & secrets"
-   - Click "New client secret"
-   - Description: "EWS MCP Secret"
-   - Expires: Choose appropriate duration
-   - Click "Add" and **copy the secret value immediately**
+   - Create new client secret
+   - **Copy the secret value immediately**
 
-4. **Get IDs**:
-   - **Client ID**: From "Overview" page
-   - **Tenant ID**: From "Overview" page
-   - **Client Secret**: From step 3 above
-
-5. **Update .env**:
+4. **Update .env**:
    ```bash
+   EWS_SERVER_URL=https://outlook.office365.com/EWS/Exchange.asmx
+   EWS_EMAIL=user@company.com
+   EWS_AUTH_TYPE=oauth2
    EWS_CLIENT_ID=<your-client-id>
    EWS_CLIENT_SECRET=<your-client-secret>
    EWS_TENANT_ID=<your-tenant-id>
@@ -513,63 +290,18 @@ Add to your Claude Desktop configuration file:
 }
 ```
 
-### Using Local Python (Development)
-
-```json
-{
-  "mcpServers": {
-    "ews": {
-      "command": "python",
-      "args": ["-m", "src.main"],
-      "cwd": "/path/to/ews-mcp",
-      "env": {
-        "EWS_EMAIL": "user@company.com",
-        "EWS_AUTH_TYPE": "oauth2",
-        "EWS_CLIENT_ID": "your-client-id",
-        "EWS_CLIENT_SECRET": "your-secret",
-        "EWS_TENANT_ID": "your-tenant"
-      }
-    }
-  }
-}
-```
-
-## Docker Images
-
-Pre-built Docker images are automatically published to GitHub Container Registry:
-
-```bash
-# Pull latest version
-docker pull ghcr.io/azizmazrou/ews-mcp:latest
-
-# Pull specific version
-docker pull ghcr.io/azizmazrou/ews-mcp:1.0.0
-
-# Pull development version
-docker pull ghcr.io/azizmazrou/ews-mcp:main
-```
-
-**Available Tags:**
-- `latest` - Latest stable release
-- `v*.*.*` - Specific version (e.g., `v1.0.0`)
-- `main` - Latest commit on main branch
-- `sha-<commit>` - Specific commit
-
-**Multi-platform Support:**
-- `linux/amd64` - x86_64 systems
-- `linux/arm64` - ARM64 systems (Apple Silicon, ARM servers)
-
 ## Available Tools
 
-**Total: 44 base tools across 9 categories** (up to 48 with AI tools enabled)
+**Total: 44 base tools across 9 categories**
 
-### Contact Intelligence Tools (3 tools) ⭐ NEW in v2.1
+### Contact Intelligence Tools (3 tools)
 
 - **find_person**: Search for contacts across GAL, email history, and domains
+  - **v3.0 Enhanced**: Multi-strategy search that never returns 0 results
   - Multi-source search with intelligent deduplication
   - Ranking by communication frequency and recency
   - Domain-wide search (find all @example.com contacts)
-  - Arabic language support
+  - Arabic language support (UTF-8)
 
 - **get_communication_history**: Analyze communication with a specific contact
   - Email statistics (sent, received, total)
@@ -586,23 +318,23 @@ docker pull ghcr.io/azizmazrou/ews-mcp:main
 
 ### Email Tools (9 tools)
 
-- **send_email**: Send emails with attachments and CC/BCC (✅ **FIXED:** Attachments now actually send!)
+- **send_email**: Send emails with attachments and CC/BCC
 - **read_emails**: Read emails from specified folder
 - **search_emails**: Search with advanced filters
 - **get_email_details**: Get full email details
 - **delete_email**: Delete or permanently remove emails
 - **move_email**: Move emails between folders
-- **update_email**: ⭐ Update email properties (read status, flags, categories, importance)
-- **list_attachments**: ⭐ List all attachments for an email message
-- **download_attachment**: ⭐ Download email attachments (base64 or save to file)
+- **copy_email**: Copy emails to folders while preserving originals
+- **update_email**: Update email properties (read status, flags, categories, importance)
+- **list_attachments**: List all attachments for an email message
 
-### Attachment Tools (5 tools) 🆕
+### Attachment Tools (5 tools)
 
 - **list_attachments**: List all attachments in an email
 - **download_attachment**: Download attachment as base64 or save to file
 - **add_attachment**: Add attachments to draft emails
 - **delete_attachment**: Remove attachments from emails
-- **read_attachment**: ⭐ **NEW!** Extract text from PDF, DOCX, XLSX, TXT files
+- **read_attachment**: Extract text from PDF, DOCX, XLSX, PPTX, TXT, CSV, HTML, ZIP files
   - Supports Arabic (UTF-8) text
   - Table extraction from documents
   - Page limits for large PDFs
@@ -615,7 +347,8 @@ docker pull ghcr.io/azizmazrou/ews-mcp:main
 - **update_appointment**: Modify existing appointments
 - **delete_appointment**: Cancel appointments/meetings
 - **respond_to_meeting**: Accept/decline meeting invitations
-- **check_availability**: ⭐ Get free/busy information for users in a time range
+- **check_availability**: Get free/busy information for users
+- **find_meeting_times**: AI-powered meeting time finder
 
 ### Contact Tools (6 tools)
 
@@ -624,7 +357,7 @@ docker pull ghcr.io/azizmazrou/ews-mcp:main
 - **get_contacts**: List all contacts
 - **update_contact**: Modify contact information
 - **delete_contact**: Remove contacts
-- **resolve_names**: ⭐ Resolve partial names/emails to full contact information
+- **resolve_names**: Resolve partial names/emails to full contact information
 
 ### Task Tools (5 tools)
 
@@ -634,13 +367,90 @@ docker pull ghcr.io/azizmazrou/ews-mcp:main
 - **complete_task**: Mark tasks as complete
 - **delete_task**: Remove tasks
 
-### Search Tools (1 tool)
+### Search Tools (3 tools)
 
-- **advanced_search**: ⭐ Complex multi-criteria searches across folders with filters
+- **advanced_search**: Complex multi-criteria searches across folders
+- **search_by_conversation**: Find all emails in a conversation thread
+- **full_text_search**: Full-text search with case-sensitive and exact phrase options
 
-### Folder Tools (1 tool)
+### Folder Tools (5 tools)
 
-- **list_folders**: ⭐ Get mailbox folder hierarchy with details and item counts
+- **list_folders**: Get mailbox folder hierarchy with details and item counts
+- **create_folder**: Create new mailbox folders
+- **delete_folder**: Delete folders (soft or permanent)
+- **rename_folder**: Rename existing folders
+- **move_folder**: Move folders to new parent locations
+
+### Out-of-Office Tools (2 tools)
+
+- **set_oof_settings**: Configure automatic replies (Enabled/Scheduled/Disabled)
+- **get_oof_settings**: Retrieve current OOF settings with active status
+
+## Architecture
+
+### v3.0 Person-Centric Architecture
+
+```
+EWS MCP Server v3.0
+├── MCP Protocol Layer (stdio/SSE)
+├── Tool Registry
+│   ├── Contact Intelligence Tools (PersonService)
+│   ├── Email Tools (EmailService)
+│   ├── Calendar Tools
+│   ├── Contact Tools
+│   └── Task Tools
+├── Service Layer (NEW in v3.0)
+│   ├── PersonService (orchestrates person discovery)
+│   ├── EmailService (email operations)
+│   ├── ThreadService (conversation threading)
+│   └── AttachmentService (all format support)
+├── Adapter Layer (NEW in v3.0)
+│   ├── GALAdapter (multi-strategy search)
+│   └── CacheAdapter (intelligent caching)
+├── Core Models (NEW in v3.0)
+│   ├── Person (first-class entity)
+│   ├── EmailMessage
+│   ├── ConversationThread
+│   └── Attachment
+├── EWS Client (exchangelib wrapper)
+├── Authentication (OAuth2/Basic/NTLM)
+├── Middleware (Rate Limiting, Error Handling, Audit)
+└── Exchange Web Services API
+```
+
+### Key Design Principles
+
+1. **Person-First** - Everything revolves around Person objects
+2. **Separation of Concerns** - Models, services, adapters, tools
+3. **Fail Gracefully** - Never crash, always return something
+4. **Cache Aggressively** - Reduce Exchange load
+5. **Rank Intelligently** - Best results first
+6. **Merge Smartly** - Combine data from multiple sources
+
+## Docker Images
+
+Pre-built Docker images are automatically published to GitHub Container Registry:
+
+```bash
+# Pull latest version
+docker pull ghcr.io/azizmazrou/ews-mcp:latest
+
+# Pull specific version
+docker pull ghcr.io/azizmazrou/ews-mcp:3.0.0
+
+# Pull development version
+docker pull ghcr.io/azizmazrou/ews-mcp:main
+```
+
+**Available Tags:**
+- `latest` - Latest stable release
+- `v*.*.*` - Specific version (e.g., `v3.0.0`)
+- `main` - Latest commit on main branch
+- `sha-<commit>` - Specific commit
+
+**Multi-platform Support:**
+- `linux/amd64` - x86_64 systems
+- `linux/arm64` - ARM64 systems (Apple Silicon, ARM servers)
 
 ## Testing
 
@@ -677,18 +487,6 @@ mypy src/
 bandit -r src/
 ```
 
-## Architecture
-
-```
-EWS MCP Server
-├── MCP Protocol Layer (stdio/SSE)
-├── Tool Registry (Email, Calendar, Contacts, Tasks)
-├── EWS Client (exchangelib wrapper)
-├── Authentication (OAuth2/Basic/NTLM)
-├── Middleware (Rate Limiting, Error Handling, Audit)
-└── Exchange Web Services API
-```
-
 ## Troubleshooting
 
 See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues and solutions.
@@ -701,6 +499,26 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues and sol
 - [API Documentation](docs/API.md) - Complete tool reference
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
 - [Architecture Overview](docs/ARCHITECTURE.md) - Technical deep dive
+- [v3.0 Implementation Summary](docs/V3_IMPLEMENTATION_SUMMARY.md) - What's new in v3.0
+
+## Previous Versions
+
+### v2.1 - Contact Intelligence
+
+Added 3 Contact Intelligence tools:
+- `find_person` - Multi-source contact search
+- `get_communication_history` - Relationship analysis
+- `analyze_network` - Professional network analysis
+
+### v2.0 - Enterprise Features
+
+Expanded from 28 to 40 tools:
+- Folder Management (4 tools)
+- Enhanced Attachments (2 tools)
+- Advanced Search (2 tools)
+- Out-of-Office (2 tools)
+- AI Meeting Time Finder
+- Copy Email
 
 ## License
 
