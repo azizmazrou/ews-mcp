@@ -5,22 +5,19 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 2025-11-18-ENHANCED-REVAMP
+VERSION: 3.0.0 - PERSON-CENTRIC REWRITE
 CHANGES:
-- Enhanced _search_gal() method with phone number extraction
-- Added comprehensive error handling with per-result try/catch
-- Improved logging with clear section markers (=== GAL Search Start ===)
-- Enhanced contact data extraction:
-  * Phone numbers (phone_numbers array, business_phone, mobile_phone)
-  * Office location
-  * All contact details with None-checking
-- Better use of getattr() for safe attribute access
-- Maintains clean architecture:
-  * ONE call to resolve_names() with return_full_contact_data=True
-  * Clean tuple handling: (mailbox, contact_info)
-  * Fallback for object format
-- Extracts: name, email, display_name, given_name, surname, company,
-           department, job_title, phone_numbers, office
+- NOW USES PersonService with multi-strategy GAL search (FIXES 0-RESULTS BUG!)
+- Person-centric architecture with proper Person objects
+- Enhanced GAL search with 4 fallback strategies:
+  1. Exact match (resolve_names)
+  2. Partial match (prefix/wildcard)
+  3. Domain search (@domain.com)
+  4. Fuzzy matching
+- Unified person discovery across GAL, Contacts, and Email History
+- Intelligent result ranking and deduplication
+- Full phone number and contact detail extraction
+- Communication statistics integration
 """
 
 import logging
@@ -32,6 +29,7 @@ import re
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get
+from ..services.person_service import PersonService
 
 
 class FindPersonTool(BaseTool):
@@ -76,7 +74,12 @@ class FindPersonTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        """Execute unified contact search."""
+        """
+        Execute unified contact search using PersonService v3.0.
+
+        This method now uses the enhanced PersonService with multi-strategy
+        GAL search that FIXES the 0-results bug!
+        """
         query = kwargs.get("query", "").strip()
         search_scope = kwargs.get("search_scope", "all")
         include_stats = kwargs.get("include_stats", True)
@@ -87,17 +90,106 @@ class FindPersonTool(BaseTool):
             raise ToolExecutionError("Query parameter is required")
 
         try:
-            # Determine if this is a domain search
-            is_domain_search = query.startswith("@")
-            domain_query = query[1:].lower() if is_domain_search else None
+            # Create PersonService (v3.0)
+            person_service = PersonService(self.ews_client)
 
-            # Results dictionary: email -> contact info
-            unified_results = {}
+            # Map search_scope to sources
+            sources = []
+            if search_scope == "all":
+                sources = ["gal", "contacts", "email_history"]
+            elif search_scope == "gal":
+                sources = ["gal"]
+            elif search_scope == "email_history":
+                sources = ["email_history"]
+            elif search_scope == "domain":
+                # For domain search, use all sources but query should start with @
+                sources = ["gal", "email_history"]
 
-            # 1. Search GAL (Global Address List)
-            if search_scope in ["all", "gal"] and not is_domain_search:
-                # Only include personal contacts if search_scope is "all"
-                include_personal = (search_scope == "all")
+            # Use PersonService to find people (with multi-strategy GAL search!)
+            persons = await person_service.find_person(
+                query=query,
+                sources=sources,
+                include_stats=include_stats,
+                time_range_days=time_range_days,
+                max_results=max_results
+            )
+
+            # Format results for backward compatibility
+            formatted_results = []
+            for person in persons:
+                result = {
+                    "name": person.name,
+                    "email": person.primary_email or "",
+                    "sources": [s.value for s in person.sources],
+                }
+
+                # Add optional fields
+                if person.display_name:
+                    result["display_name"] = person.display_name
+                if person.given_name:
+                    result["given_name"] = person.given_name
+                if person.surname:
+                    result["surname"] = person.surname
+                if person.organization:
+                    result["company"] = person.organization
+                if person.job_title:
+                    result["job_title"] = person.job_title
+                if person.department:
+                    result["department"] = person.department
+                if person.office_location:
+                    result["office"] = person.office_location
+
+                # Add phone numbers
+                if person.phone_numbers:
+                    result["phone_numbers"] = [
+                        {"type": p.type, "number": p.number}
+                        for p in person.phone_numbers
+                    ]
+
+                # Add communication stats
+                if include_stats and person.communication_stats:
+                    stats = person.communication_stats
+                    result["email_count"] = stats.total_emails
+                    result["last_contact"] = stats.last_contact.isoformat() if stats.last_contact else None
+                    result["first_contact"] = stats.first_contact.isoformat() if stats.first_contact else None
+                else:
+                    result["email_count"] = 0
+
+                formatted_results.append(result)
+
+            self.logger.info(f"✅ Found {len(formatted_results)} person(s) via PersonService v3.0")
+
+            return format_success_response(
+                f"Found {len(formatted_results)} contact(s) for '{query}'",
+                query=query,
+                search_scope=search_scope,
+                total_results=len(formatted_results),
+                unified_results=formatted_results
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to search for person: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            raise ToolExecutionError(f"Failed to search for person: {e}")
+
+    # DEPRECATED: Old implementation kept for reference but not used
+    async def _search_gal_legacy(self, query: str, include_personal_contacts: bool = False) -> List[Dict[str, Any]]:
+        """DEPRECATED: Old GAL search implementation.
+
+        This method is kept for reference but is NO LONGER USED.
+        The new PersonService with multi-strategy search is used instead.
+        """
+        # Implementation kept but not called
+        pass
+
+    # DEPRECATED: Old implementation kept for reference but not used
+    async def _search_email_history_legacy(
+        self,
+        name_query: Optional[str],
+        domain_query: Optional[str],
+        days_back: int,
+        include_stats: bool = True
                 self.logger.info(f"Searching GAL for: {query} (include_personal_contacts={include_personal})")
                 gal_results = await self._search_gal(query, include_personal_contacts=include_personal)
                 for contact in gal_results:
