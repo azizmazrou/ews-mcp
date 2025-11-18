@@ -190,122 +190,16 @@ class FindPersonTool(BaseTool):
         domain_query: Optional[str],
         days_back: int,
         include_stats: bool = True
-                self.logger.info(f"Searching GAL for: {query} (include_personal_contacts={include_personal})")
-                gal_results = await self._search_gal(query, include_personal_contacts=include_personal)
-                for contact in gal_results:
-                    email = contact.get("email", "").lower()
-                    if email and email not in unified_results:
-                        contact["sources"] = ["gal"]
-                        contact["email_count"] = 0
-                        unified_results[email] = contact
-                self.logger.info(f"Found {len(gal_results)} contacts in GAL")
+    ) -> List[Dict[str, Any]]:
+        """DEPRECATED: Old email history search implementation.
 
-            # 2. Search Email History
-            if search_scope in ["all", "email_history", "domain"]:
-                self.logger.info(f"Searching email history (past {time_range_days} days)")
-                email_results = await self._search_email_history(
-                    query if not is_domain_search else None,
-                    domain_query,
-                    time_range_days,
-                    include_stats
-                )
+        This method is kept for reference but is NO LONGER USED.
+        The new PersonService handles email history search.
+        """
+        # Implementation kept but not called
+        pass
 
-                for contact in email_results:
-                    email = contact.get("email", "").lower()
-                    if email:
-                        if email in unified_results:
-                            # Merge with existing
-                            if "email_history" not in unified_results[email]["sources"]:
-                                unified_results[email]["sources"].append("email_history")
-                            unified_results[email]["email_count"] = contact.get("email_count", 0)
-                            unified_results[email]["last_contact"] = contact.get("last_contact")
-                            unified_results[email]["first_contact"] = contact.get("first_contact")
-                        else:
-                            # New contact from email history
-                            contact["sources"] = ["email_history"]
-                            unified_results[email] = contact
-
-                self.logger.info(f"Found {len(email_results)} contacts in email history")
-
-            # 3. Deduplicate and rank results
-            results_list = list(unified_results.values())
-
-            # Ranking criteria:
-            # 1. Number of sources (GAL + email history = higher rank)
-            # 2. Email volume (more emails = higher rank)
-            # 3. Recency (recent contact = higher rank)
-            def rank_contact(contact):
-                source_score = len(contact.get("sources", [])) * 1000
-                email_score = contact.get("email_count", 0)
-
-                # Recency score (recent = higher)
-                last_contact = contact.get("last_contact")
-                recency_score = 0
-                if last_contact:
-                    try:
-                        if isinstance(last_contact, str):
-                            last_dt = datetime.fromisoformat(last_contact.replace('Z', '+00:00'))
-                        else:
-                            last_dt = last_contact
-                        days_ago = (datetime.now(last_dt.tzinfo) - last_dt).days
-                        recency_score = max(0, 365 - days_ago)  # 0-365 points
-                    except:
-                        pass
-
-                return source_score + email_score + recency_score
-
-            results_list.sort(key=rank_contact, reverse=True)
-            results_list = results_list[:max_results]
-
-            # 4. Format results
-            formatted_results = []
-            for contact in results_list:
-                result = {
-                    "name": contact.get("name", ""),
-                    "email": contact.get("email", ""),
-                    "sources": contact.get("sources", []),
-                }
-
-                # Add optional fields
-                if contact.get("company"):
-                    result["company"] = contact["company"]
-                if contact.get("job_title"):
-                    result["job_title"] = contact["job_title"]
-                if contact.get("department"):
-                    result["department"] = contact["department"]
-                if contact.get("display_name"):
-                    result["display_name"] = contact["display_name"]
-                if contact.get("office"):
-                    result["office"] = contact["office"]
-
-                # Add phone numbers if available
-                if contact.get("phone_numbers"):
-                    result["phone_numbers"] = contact["phone_numbers"]
-                if contact.get("business_phone"):
-                    result["business_phone"] = contact["business_phone"]
-                if contact.get("mobile_phone"):
-                    result["mobile_phone"] = contact["mobile_phone"]
-
-                # Add stats if requested
-                if include_stats:
-                    result["email_count"] = contact.get("email_count", 0)
-                    result["last_contact"] = contact.get("last_contact")
-                    result["first_contact"] = contact.get("first_contact")
-
-                formatted_results.append(result)
-
-            return format_success_response(
-                f"Found {len(formatted_results)} contact(s) for '{query}'",
-                query=query,
-                search_scope=search_scope,
-                total_results=len(formatted_results),
-                unified_results=formatted_results
-            )
-
-        except Exception as e:
-            self.logger.error(f"Failed to search for person: {e}")
-            raise ToolExecutionError(f"Failed to search for person: {e}")
-
+    # DEPRECATED: Old _search_gal implementation - NO LONGER USED
     async def _search_gal(self, query: str, include_personal_contacts: bool = False) -> List[Dict[str, Any]]:
         """Search Global Address List with enhanced contact data extraction.
 
