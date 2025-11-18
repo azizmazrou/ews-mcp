@@ -1,27 +1,85 @@
 version: '3.8'
 
+# EWS MCP v3.0 - Person-Centric Exchange Server
+# Production deployment using GHCR pre-built image
+# Image: ghcr.io/azizmazrou/ews-mcp:latest (v3.0.0)
+
 services:
   ews-mcp-server:
+    # Use pre-built image from GitHub Container Registry
     image: ghcr.io/azizmazrou/ews-mcp:latest
     container_name: ews-mcp-server
+
+    # Pull policy: Always pull latest image on restart
+    pull_policy: always
+
+    # Configuration
     env_file:
       - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    # Restart policy for production reliability
     restart: unless-stopped
+
+    # Keep container interactive for MCP stdio protocol
     stdin_open: true
     tty: true
+
+    # Networking
     networks:
       - mcp-network
+    ports:
+      # Optional: Expose port for SSE transport (if MCP_TRANSPORT=sse)
+      # - "8000:8000"
+
+    # Volume mounts
     volumes:
+      # Enterprise logging: All logs written to host for analysis/backup
+      # Logs include: ews-mcp.log (DEBUG), ews-mcp-errors.log (ERROR), audit.log
       - ./logs:/app/logs:rw
+      # Optional: Mount .env for runtime config updates
+      # - ./.env:/app/.env:ro
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Resource limits for production (adjust based on load)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Container logging (separate from application logs in /app/logs)
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    # Labels for monitoring and management
+    labels:
+      - "app=ews-mcp"
+      - "version=3.0.0"
+      - "tier=backend"
+      - "deployment=production"
+      - "image-source=ghcr"
+      - "com.ews-mcp.description=Exchange MCP Server with Person-Centric Architecture"
+      - "com.ews-mcp.features=GAL Multi-Strategy Search, Enterprise Logging, Full Attachment Support"
 
 networks:
   mcp-network:
     driver: bridge
+    labels:
+      - "app=ews-mcp"
+      - "environment=production"
