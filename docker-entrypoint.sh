@@ -1,31 +1,17 @@
 #!/bin/bash
 set -e
 
-# Ensure log directories exist with proper permissions
-echo "Setting up log directories..."
+# Enterprise-level entrypoint: minimal output, detailed logging in files
+# All troubleshooting info goes to application logs
 
-# Create main logs directory if it doesn't exist
-if [ ! -d "/app/logs" ]; then
-    echo "Creating /app/logs directory..."
-    mkdir -p /app/logs
-fi
+# Setup log directories silently
+mkdir -p /app/logs/analysis 2>/dev/null || true
+chown -R mcp:mcp /app/logs 2>/dev/null || true
+chmod -R 755 /app/logs 2>/dev/null || true
 
-# Create analysis subdirectory if it doesn't exist
-if [ ! -d "/app/logs/analysis" ]; then
-    echo "Creating /app/logs/analysis directory..."
-    mkdir -p /app/logs/analysis
-fi
+# Single startup message for monitoring
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] EWS-MCP v3.0 starting"
 
-# Set ownership to mcp user (UID 1000, GID 1000)
-echo "Setting ownership on /app/logs to mcp:mcp..."
-chown -R mcp:mcp /app/logs 2>/dev/null || echo "Warning: Could not change ownership (may not be running as root)"
-
-# Ensure proper permissions
-echo "Setting permissions on /app/logs..."
-chmod -R 755 /app/logs 2>/dev/null || echo "Warning: Could not set permissions"
-
-echo "Log directories ready."
-echo "Starting EWS MCP Server as user 'mcp'..."
-
-# Switch to mcp user and execute the main command
+# Switch to non-root user and start application
+# All runtime logs go to /app/logs via Python logging
 exec gosu mcp "$@"
