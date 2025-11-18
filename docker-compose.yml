@@ -1,29 +1,77 @@
 version: '3.8'
 
+# EWS MCP v3.0 - Person-Centric Exchange Server
+# Build from source for development/testing
+
 services:
   ews-mcp-server:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: ews-mcp-server
+
+    # Configuration
     env_file:
       - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    # Restart policy
     restart: unless-stopped
+
+    # Keep container interactive for MCP stdio
     stdin_open: true
     tty: true
+
+    # Networking
     networks:
       - mcp-network
+    ports:
+      # Optional: Expose port for SSE transport (if MCP_TRANSPORT=sse)
+      # - "8000:8000"
+
+    # Volume mounts
     volumes:
+      # Enterprise logging: All logs written to host for analysis/backup
       - ./logs:/app/logs:rw
+      # Optional: Mount .env for runtime config updates
+      # - ./.env:/app/.env:ro
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Resource limits (adjust based on your environment)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # Container logging (separate from application logs)
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+    # Labels for monitoring/management
+    labels:
+      - "app=ews-mcp"
+      - "version=3.0.0"
+      - "tier=backend"
+      - "com.ews-mcp.description=Exchange MCP Server with Person-Centric Architecture"
 
 networks:
   mcp-network:
     driver: bridge
+    labels:
+      - "app=ews-mcp"
