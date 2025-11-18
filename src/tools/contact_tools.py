@@ -2,7 +2,7 @@
 
 from typing import Any, Dict
 from exchangelib import Contact
-from exchangelib.indexed_properties import EmailAddress
+from exchangelib.indexed_properties import EmailAddress, PhoneNumber
 
 from .base import BaseTool
 from ..models import CreateContactRequest
@@ -86,7 +86,7 @@ class CreateContactTool(BaseTool):
 
             # Set optional fields
             if request.phone_number:
-                contact.phone_numbers = [{'label': 'BusinessPhone', 'phone_number': request.phone_number}]
+                contact.phone_numbers = [PhoneNumber(label='BusinessPhone', phone_number=request.phone_number)]
 
             if request.company:
                 contact.company_name = request.company
@@ -328,7 +328,7 @@ class UpdateContactTool(BaseTool):
                 ]
 
             if "phone_number" in kwargs:
-                contact.phone_numbers = [{'label': 'BusinessPhone', 'phone_number': kwargs["phone_number"]}]
+                contact.phone_numbers = [PhoneNumber(label='BusinessPhone', phone_number=kwargs["phone_number"])]
 
             if "company" in kwargs:
                 contact.company_name = kwargs["company"]

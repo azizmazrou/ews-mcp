@@ -749,7 +749,9 @@ class DeleteEmailTool(BaseTool):
                 item.delete()
                 action = "permanently deleted"
             else:
-                item.soft_delete()
+                # Move to trash folder (Deleted Items) so user can recover
+                # Note: soft_delete() makes items recoverable but not visible in Deleted Items
+                item.move(self.ews_client.account.trash)
                 action = "moved to trash"
 
             self.logger.info(f"Email {message_id} {action}")
