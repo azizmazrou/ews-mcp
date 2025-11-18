@@ -2,9 +2,25 @@
 
 from typing import Any, Dict, List
 from datetime import datetime
-from exchangelib import Message, Mailbox, FileAttachment, HTMLBody, Body, Folder
-from exchangelib.properties import Flag
+from exchangelib import Message, Mailbox, FileAttachment, HTMLBody, Body, Folder, ExtendedProperty
 from exchangelib.queryset import Q
+
+# Define Flag as ExtendedProperty for setting email flag status
+# See: https://github.com/ecederstrand/exchangelib/issues/85
+# Flag values: None = not flagged, 1 = completed, 2 = flagged
+class FlagStatus(ExtendedProperty):
+    property_tag = 0x1090
+    property_type = 'Integer'
+
+# Register the flag property on Message class
+Message.register('flag_status_value', FlagStatus)
+
+# Mapping from string flag_status to integer values
+FLAG_STATUS_MAP = {
+    'NotFlagged': None,
+    'Flagged': 2,
+    'Complete': 1,
+}
 import re
 
 from .base import BaseTool
@@ -884,9 +900,15 @@ class UpdateEmailTool(BaseTool):
                 message.categories = kwargs["categories"]
                 updates["categories"] = kwargs["categories"]
 
-            # Update flag status
+            # Update flag status using ExtendedProperty
             if "flag_status" in kwargs:
-                message.flag = Flag(flag_status=kwargs["flag_status"])
+                flag_value = FLAG_STATUS_MAP.get(kwargs["flag_status"])
+                if kwargs["flag_status"] not in FLAG_STATUS_MAP:
+                    raise ToolExecutionError(
+                        f"Invalid flag_status: {kwargs['flag_status']}. "
+                        f"Valid values: {', '.join(FLAG_STATUS_MAP.keys())}"
+                    )
+                message.flag_status_value = flag_value
                 updates["flag_status"] = kwargs["flag_status"]
 
             # Update importance
