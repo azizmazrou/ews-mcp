@@ -11,7 +11,7 @@ KEY FEATURE: Fixes GAL 0-results bug with intelligent fallback strategies.
 
 import logging
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 from ..core.person import Person, PersonSource, CommunicationStats
@@ -516,7 +516,13 @@ class PersonService:
 
             # 4. Recency bonus (0-30)
             if person.communication_stats and person.communication_stats.last_contact:
-                days_ago = (datetime.now() - person.communication_stats.last_contact).days
+                # Use timezone-aware datetime to avoid comparison errors
+                now = datetime.now(timezone.utc)
+                last_contact = person.communication_stats.last_contact
+                # Ensure last_contact is timezone-aware
+                if last_contact.tzinfo is None:
+                    last_contact = last_contact.replace(tzinfo=timezone.utc)
+                days_ago = (now - last_contact).days
                 recency_score = max(0, 30 * (1 - days_ago / 365))
                 score += recency_score
 

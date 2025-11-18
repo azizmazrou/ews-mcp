@@ -3,6 +3,7 @@
 from typing import Any, Dict, List
 from datetime import datetime
 from exchangelib import Message, Mailbox, FileAttachment, HTMLBody, Body, Folder
+from exchangelib.properties import Flag
 from exchangelib.queryset import Q
 import re
 
@@ -423,6 +424,9 @@ class ReadEmailsTool(BaseTool):
                     "message_id": safe_get(item, "id", "unknown"),
                     "subject": safe_get(item, "subject", "") or "",
                     "from": from_email,
+                    "to": [r.email_address for r in (safe_get(item, "to_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
+                    "cc": [r.email_address for r in (safe_get(item, "cc_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
+                    "bcc": [r.email_address for r in (safe_get(item, "bcc_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
                     "received_time": safe_get(item, "datetime_received", datetime.now()).isoformat(),
                     "is_read": safe_get(item, "is_read", False),
                     "has_attachments": safe_get(item, "has_attachments", False),
@@ -583,6 +587,9 @@ class SearchEmailsTool(BaseTool):
                         "message_id": safe_get(item, "id", "unknown"),
                         "subject": safe_get(item, "subject", "") or "",
                         "from": from_email,
+                        "to": [r.email_address for r in (safe_get(item, "to_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
+                        "cc": [r.email_address for r in (safe_get(item, "cc_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
+                        "bcc": [r.email_address for r in (safe_get(item, "bcc_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
                         "received_time": safe_get(item, "datetime_received", datetime.now()).isoformat(),
                         "is_read": safe_get(item, "is_read", False),
                         "has_attachments": safe_get(item, "has_attachments", False),
@@ -879,7 +886,7 @@ class UpdateEmailTool(BaseTool):
 
             # Update flag status
             if "flag_status" in kwargs:
-                message.flag.flag_status = kwargs["flag_status"]
+                message.flag = Flag(flag_status=kwargs["flag_status"])
                 updates["flag_status"] = kwargs["flag_status"]
 
             # Update importance
@@ -922,7 +929,7 @@ class CopyEmailTool(BaseTool):
                     "destination_folder": {
                         "type": "string",
                         "description": "Destination folder name",
-                        "enum": ["inbox", "sent", "drafts", "deleted", "junk", "archive"]
+                        "enum": ["inbox", "sent", "drafts", "deleted", "junk"]
                     },
                     "destination_folder_id": {
                         "type": "string",
@@ -977,13 +984,16 @@ class CopyEmailTool(BaseTool):
                     "sent": self.ews_client.account.sent,
                     "drafts": self.ews_client.account.drafts,
                     "deleted": self.ews_client.account.trash,
-                    "junk": self.ews_client.account.junk,
-                    "archive": self.ews_client.account.archive
+                    "junk": self.ews_client.account.junk
                 }
 
                 destination_folder = folder_map.get(destination_folder_name.lower())
                 if not destination_folder:
-                    raise ToolExecutionError(f"Unknown destination folder: {destination_folder_name}")
+                    available_folders = list(folder_map.keys())
+                    raise ToolExecutionError(
+                        f"Unknown destination folder: {destination_folder_name}. "
+                        f"Available folders: {', '.join(available_folders)}"
+                    )
                 dest_name = destination_folder_name
             else:
                 # Find folder by ID
