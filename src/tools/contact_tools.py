@@ -59,12 +59,24 @@ class CreateContactTool(BaseTool):
         request = self.validate_input(CreateContactRequest, **kwargs)
 
         try:
+            # Generate display_name from provided names (required by exchangelib)
+            if request.given_name and request.surname:
+                display_name = f"{request.given_name} {request.surname}"
+            elif request.given_name:
+                display_name = request.given_name
+            elif request.surname:
+                display_name = request.surname
+            else:
+                # Fallback to email username if no name provided
+                display_name = request.email_address.split('@')[0]
+
             # Create contact
             contact = Contact(
                 account=self.ews_client.account,
                 folder=self.ews_client.account.contacts,
                 given_name=request.given_name,
                 surname=request.surname,
+                display_name=display_name,
             )
 
             # Add email address
