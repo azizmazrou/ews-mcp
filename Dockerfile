@@ -63,10 +63,10 @@ RUN find /app/src -type f -name "*.pyc" -delete && \
 
 # Verify critical code exists (build will fail if code is missing)
 RUN echo "=== Verifying deployed code ===" && \
-    grep -q "VERSION: 2025-11-18-COMPLETE-REVAMP" /app/src/tools/contact_intelligence_tools.py && echo "✓ Correct version deployed" || \
+    grep -q "VERSION: 2025-11-18-ENHANCED-REVAMP" /app/src/tools/contact_intelligence_tools.py && echo "✓ Correct version deployed" || \
     (echo "✗ ERROR: Wrong version! Docker is using cached old code!" && exit 1)
-RUN grep -q "EXACT COPY of working Python code" /app/src/tools/contact_intelligence_tools.py && echo "✓ Simplified GAL search found" || \
-    (echo "✗ ERROR: Simplified GAL code not found in container!" && exit 1)
+RUN grep -q "Search Global Address List with enhanced contact data extraction" /app/src/tools/contact_intelligence_tools.py && echo "✓ Enhanced GAL search found" || \
+    (echo "✗ ERROR: Enhanced GAL code not found in container!" && exit 1)
 RUN ! grep -q "Method 3: Trying wildcard resolve_names" /app/src/tools/contact_intelligence_tools.py && echo "✓ Old Method 3 removed" || \
     (echo "✗ ERROR: Old Method 3 still in container! Docker cached old code!" && exit 1)
 RUN ! grep -q "Method 4: Trying ActiveDirectoryContacts" /app/src/tools/contact_intelligence_tools.py && echo "✓ Old Method 4 removed" || \
