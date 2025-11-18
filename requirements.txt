@@ -25,7 +25,8 @@ structlog==24.1.0
 # AI/ML (optional - for AI Intelligence Layer)
 httpx>=0.25.0  # For AI API requests
 
-# File reading (for attachment content extraction)
-pdfplumber>=0.10.0  # PDF file reading
-python-docx>=1.0.0  # Word document reading
-openpyxl>=3.1.0  # Excel file reading
+# File reading (for attachment content extraction) - v3.0 Enhanced Support
+pdfplumber>=0.10.0  # PDF file reading with tables and images
+python-docx>=1.0.0  # Word document reading (DOCX)
+openpyxl>=3.1.0  # Excel file reading (XLSX)
+python-pptx>=0.6.21  # PowerPoint file reading (PPTX)
