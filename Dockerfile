@@ -61,16 +61,17 @@ COPY --chown=mcp:mcp src/ ./src/
 RUN find /app/src -type f -name "*.pyc" -delete && \
     find /app/src -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-# Verify critical code exists (build will fail if code is missing)
-RUN echo "=== Verifying deployed code ===" && \
-    grep -q "VERSION: 2025-11-18-ENHANCED-REVAMP" /app/src/tools/contact_intelligence_tools.py && echo "✓ Correct version deployed" || \
-    (echo "✗ ERROR: Wrong version! Docker is using cached old code!" && exit 1)
-RUN grep -q "Search Global Address List with enhanced contact data extraction" /app/src/tools/contact_intelligence_tools.py && echo "✓ Enhanced GAL search found" || \
-    (echo "✗ ERROR: Enhanced GAL code not found in container!" && exit 1)
-RUN ! grep -q "Method 3: Trying wildcard resolve_names" /app/src/tools/contact_intelligence_tools.py && echo "✓ Old Method 3 removed" || \
-    (echo "✗ ERROR: Old Method 3 still in container! Docker cached old code!" && exit 1)
-RUN ! grep -q "Method 4: Trying ActiveDirectoryContacts" /app/src/tools/contact_intelligence_tools.py && echo "✓ Old Method 4 removed" || \
-    (echo "✗ ERROR: Old Method 4 still in container! Docker cached old code!" && exit 1)
+# Verify v3.0 architecture deployed correctly
+RUN grep -q "VERSION: 3.0.0 - PERSON-CENTRIC REWRITE" /app/src/tools/contact_intelligence_tools.py || \
+    (echo "ERROR: v3.0 not deployed" && exit 1) && \
+    test -f /app/src/core/person.py || \
+    (echo "ERROR: Person model missing" && exit 1) && \
+    test -f /app/src/services/person_service.py || \
+    (echo "ERROR: PersonService missing" && exit 1) && \
+    test -f /app/src/adapters/gal_adapter.py || \
+    (echo "ERROR: GAL adapter missing" && exit 1) && \
+    python -m py_compile /app/src/core/*.py /app/src/services/*.py /app/src/adapters/*.py || \
+    (echo "ERROR: Python syntax errors" && exit 1)
 
 # Copy scripts
 COPY --chown=mcp:mcp scripts/ ./scripts/
