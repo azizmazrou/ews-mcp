@@ -39,7 +39,7 @@ get_history(email="user@example.com")
 ```python
 # New way - work with PEOPLE naturally
 person = await find_person("Ahmed")
-# Returns: Person(name="Ahmed Al-Rashid", email="ahmed@sdb.gov.sa", title="Senior Analyst")
+# Returns: Person(name="Ahmed Al-mohammad", email="ahmed@company.com", title="Senior Analyst")
 
 await person_service.send_to_person(person.id, subject="...", body="...")
 history = await person_service.get_communication_history(person.primary_email)
@@ -234,7 +234,7 @@ class GALAdapter:
 |----------|-------------|-------------|--------|
 | Exact name match | ✅ Works | ✅ Works | No change |
 | Partial name ("Ahmed") | ❌ 0 results | ✅ Finds all matches | **FIXED** |
-| Domain search ("@sdb.gov.sa") | ❌ 0 results | ✅ Finds all users | **FIXED** |
+| Domain search ("@comoany.com") | ❌ 0 results | ✅ Finds all users | **FIXED** |
 | Typos/variations | ❌ 0 results | ✅ Fuzzy matches | **NEW** |
 | Contact folder search | ❌ Separate tool | ✅ Unified search | **IMPROVED** |
 | Email history search | ❌ Separate tool | ✅ Unified search | **IMPROVED** |
