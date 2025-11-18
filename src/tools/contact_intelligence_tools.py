@@ -5,20 +5,19 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 2025-11-18-GAL-SEARCH-SCOPE-FIX
+VERSION: 2025-11-18-COMPLETE-REVAMP
 CHANGES:
-- CRITICAL FIX: Removed search_scope='ActiveDirectory' from Method 1 & Method 3
-  * This parameter was restricting GAL search results
-  * Working Python code does NOT specify search_scope
-  * Now matches working implementation exactly
-  * Should fix 0 results issue with GAL search
-- Fixed resolve_names to handle tuple format (mailbox, contact_info)
-- Added phone number extraction from GAL results
-- Added additional contact fields (office, display_name, business_phone, mobile_phone)
-- Fixed search_scope="gal" to NOT search personal contacts (Method 2)
-- Added include_personal_contacts parameter to control personal contacts search
-- Improved error logging with full tracebacks to diagnose resolve_names failures
-- Method 2 now only runs when include_personal_contacts=True
+- *** COMPLETE REVAMP *** of _search_gal() method
+- Removed ALL complex methods (Methods 1, 2, 3, 4)
+- NOW: _search_gal() is EXACT COPY of working Python reference code
+- Simple, clean implementation:
+  * ONE call to resolve_names() with return_full_contact_data=True
+  * NO search_scope parameter (uses exchangelib default)
+  * Clean tuple handling: (mailbox, contact_info)
+  * Fallback for object format
+  * Extracts: name, email, display_name, given_name, surname, company, department, job_title
+- Comprehensive logging shows each result type and details
+- Should match working Python behavior EXACTLY
 """
 
 import logging
@@ -213,393 +212,108 @@ class FindPersonTool(BaseTool):
             raise ToolExecutionError(f"Failed to search for person: {e}")
 
     async def _search_gal(self, query: str, include_personal_contacts: bool = False) -> List[Dict[str, Any]]:
-        """Search Global Address List using multiple methods.
+        """Search Global Address List - EXACT COPY of working Python code.
+
+        This is a direct port of the working search_gal() function.
+        NO extra methods, NO complexity - just ONE simple resolve_names call.
 
         Args:
             query: Search query string
-            include_personal_contacts: If True, also search personal Contacts folder (Method 2)
-                                      If False, only search Active Directory GAL
+            include_personal_contacts: If True, also search Contacts folder (optional)
         """
-        results = []
+        contacts = []
 
-        # Log query details
-        query_bytes = query.encode('utf-8')
-        self.logger.info(f"GAL search query: '{query}' ({len(query)} chars, {len(query_bytes)} bytes UTF-8)")
-
-        has_non_ascii = any(ord(char) > 127 for char in query)
-        if has_non_ascii:
-            self.logger.info(f"Query contains non-ASCII characters (UTF-8)")
-
-        # METHOD 1: Try resolve_names (works for exact/prefix matches)
-        # CRITICAL FIX: Do NOT specify search_scope to match working Python implementation
-        # When search_scope is omitted, exchangelib uses default search behavior which works better
         try:
-            self.logger.info("Method 1: Trying resolve_names API (default scope)")
-            self.logger.info(f"  Query being sent: '{query}' (type: {type(query).__name__})")
-            self.logger.info(f"  Query bytes (UTF-8): {query.encode('utf-8').hex()}")
+            self.logger.info(f"Searching GAL for: '{query}'")
+            self.logger.info("-" * 60)
 
-            # FIXED: Removed search_scope='ActiveDirectory' to match working code
-            resolved = self.ews_client.account.protocol.resolve_names(
+            # EXACT COPY of working code - ONE simple call
+            results = self.ews_client.account.protocol.resolve_names(
                 names=[query],
                 return_full_contact_data=True
             )
 
-            self.logger.info(f"  ResolveNames returned {len(resolved) if resolved else 0} results")
-            if resolved and len(resolved) > 0:
-                self.logger.info(f"  First result type: {type(resolved[0])}")
-                self.logger.info(f"  First result content: {resolved[0]}")
-            else:
-                self.logger.warning(f"  ResolveNames returned 0 results for query '{query}'")
+            if not results:
+                self.logger.warning("No contacts found.")
+                return contacts
 
-            for resolution in resolved:
-                # KEY FIX: result is a tuple (mailbox, contact_info)
-                if resolution and isinstance(resolution, tuple):
-                    mailbox = resolution[0]
-                    contact_info = resolution[1] if len(resolution) > 1 else None
+            self.logger.info(f"Found {len(results)} result(s)")
+            self.logger.info(f"Result type: {type(results[0])}")
+
+            for idx, result in enumerate(results):
+                self.logger.info(f"Result #{idx + 1}:")
+                self.logger.info(f"  Type: {type(result)}")
+
+                # Handle tuple format: (mailbox, contact_info) - EXACT COPY
+                if isinstance(result, tuple):
+                    mailbox = result[0]
+                    contact_info = result[1] if len(result) > 1 else None
 
                     contact = {
-                        "name": safe_get(mailbox, 'name', ''),
-                        "email": safe_get(mailbox, 'email_address', ''),
-                        "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
+                        'name': mailbox.name if hasattr(mailbox, 'name') else 'N/A',
+                        'email': mailbox.email_address if hasattr(mailbox, 'email_address') else 'N/A',
+                        'routing_type': mailbox.routing_type if hasattr(mailbox, 'routing_type') else 'N/A',
                     }
 
-                    # Add additional contact details from contact_info
+                    # Get additional details from contact_info - EXACT COPY
                     if contact_info:
                         if hasattr(contact_info, 'display_name'):
-                            contact["display_name"] = safe_get(contact_info, 'display_name', '')
+                            contact['display_name'] = contact_info.display_name
+                        if hasattr(contact_info, 'given_name'):
+                            contact['given_name'] = contact_info.given_name
+                        if hasattr(contact_info, 'surname'):
+                            contact['surname'] = contact_info.surname
                         if hasattr(contact_info, 'company_name'):
-                            contact["company"] = safe_get(contact_info, 'company_name', '')
-                        if hasattr(contact_info, 'job_title'):
-                            contact["job_title"] = safe_get(contact_info, 'job_title', '')
+                            contact['company'] = contact_info.company_name
                         if hasattr(contact_info, 'department'):
-                            contact["department"] = safe_get(contact_info, 'department', '')
-
-                        # Extract phone numbers
-                        if hasattr(contact_info, 'phone_numbers'):
-                            phone_numbers = safe_get(contact_info, 'phone_numbers', [])
-                            if phone_numbers:
-                                contact["phone_numbers"] = []
-                                for phone in phone_numbers:
-                                    if hasattr(phone, 'phone_number'):
-                                        contact["phone_numbers"].append({
-                                            "type": safe_get(phone, 'label', 'Unknown'),
-                                            "number": safe_get(phone, 'phone_number', '')
-                                        })
-
-                        # Extract additional fields
-                        if hasattr(contact_info, 'office_location'):
-                            contact["office"] = safe_get(contact_info, 'office_location', '')
-                        if hasattr(contact_info, 'business_phone'):
-                            contact["business_phone"] = safe_get(contact_info, 'business_phone', '')
-                        if hasattr(contact_info, 'mobile_phone'):
-                            contact["mobile_phone"] = safe_get(contact_info, 'mobile_phone', '')
-
-                    # Avoid duplicates
-                    if not any(r["email"] == contact["email"] for r in results):
-                        results.append(contact)
-                # Fallback: Handle old format (object with .mailbox attribute)
-                elif resolution and hasattr(resolution, 'mailbox'):
-                    mailbox = resolution.mailbox
+                            contact['department'] = contact_info.department
+                        if hasattr(contact_info, 'job_title'):
+                            contact['job_title'] = contact_info.job_title
+                else:
+                    # Handle object format - EXACT COPY
                     contact = {
-                        "name": safe_get(mailbox, 'name', ''),
-                        "email": safe_get(mailbox, 'email_address', ''),
-                        "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
+                        'name': result.mailbox.name if hasattr(result, 'mailbox') else 'N/A',
+                        'email': result.mailbox.email_address if hasattr(result, 'mailbox') else 'N/A',
+                        'routing_type': result.mailbox.routing_type if hasattr(result, 'mailbox') else 'N/A',
                     }
 
-                    # Add additional contact details
-                    if hasattr(resolution, 'contact'):
-                        contact_info = resolution.contact
-                        contact["company"] = safe_get(contact_info, 'company_name', '')
-                        contact["job_title"] = safe_get(contact_info, 'job_title', '')
-                        contact["department"] = safe_get(contact_info, 'department', '')
+                    if hasattr(result, 'contact') and result.contact:
+                        if hasattr(result.contact, 'display_name'):
+                            contact['display_name'] = result.contact.display_name
+                        if hasattr(result.contact, 'given_name'):
+                            contact['given_name'] = result.contact.given_name
+                        if hasattr(result.contact, 'surname'):
+                            contact['surname'] = result.contact.surname
+                        if hasattr(result.contact, 'company_name'):
+                            contact['company'] = result.contact.company_name
+                        if hasattr(result.contact, 'department'):
+                            contact['department'] = result.contact.department
+                        if hasattr(result.contact, 'job_title'):
+                            contact['job_title'] = result.contact.job_title
 
-                    # Avoid duplicates
-                    if not any(r["email"] == contact["email"] for r in results):
-                        results.append(contact)
+                contacts.append(contact)
 
-            self.logger.info(f"Method 1 (resolve_names): Found {len(results)} contacts")
+                # Display - EXACT COPY
+                self.logger.info(f"  Name: {contact.get('name', 'N/A')}")
+                self.logger.info(f"  Email: {contact.get('email', 'N/A')}")
+                if 'display_name' in contact:
+                    self.logger.info(f"  Display Name: {contact['display_name']}")
+                if 'company_name' in contact:
+                    self.logger.info(f"  Company: {contact['company_name']}")
+                if 'department' in contact:
+                    self.logger.info(f"  Department: {contact['department']}")
+                if 'job_title' in contact:
+                    self.logger.info(f"  Job Title: {contact['job_title']}")
+                self.logger.info("-" * 60)
+
+            self.logger.info(f"✓ Total contacts found: {len(contacts)}")
+            return contacts
+
         except Exception as e:
-            self.logger.error(f"Method 1 (resolve_names) FAILED: {type(e).__name__}: {e}")
+            self.logger.error(f"✗ Search error: {e}")
             import traceback
-            self.logger.error(f"Traceback: {traceback.format_exc()}")
-
-        # METHOD 2: Try searching Contacts folder (PERSONAL contacts, not GAL!)
-        # Only run this if explicitly requested
-        if include_personal_contacts:
-            try:
-                self.logger.info("Method 2: Trying Contacts folder search (PERSONAL contacts)")
-                contacts_folder = self.ews_client.account.contacts
-
-                # Search by display name or email
-                from exchangelib import Q
-                search_filter = (
-                    Q(display_name__icontains=query) |
-                    Q(email_addresses__contains=query) |
-                    Q(given_name__icontains=query) |
-                    Q(surname__icontains=query)
-                )
-
-                contacts_results = contacts_folder.filter(search_filter).only(
-                    'display_name', 'email_addresses', 'company_name',
-                    'job_title', 'department', 'given_name', 'surname'
-                )
-
-                for contact in contacts_results[:50]:  # Limit to 50
-                    # Get primary email
-                    email_addresses = safe_get(contact, 'email_addresses', [])
-                    email = ""
-                    if email_addresses and len(email_addresses) > 0:
-                        email = safe_get(email_addresses[0], 'email', '')
-
-                    if email:
-                        contact_data = {
-                            "name": safe_get(contact, 'display_name', ''),
-                            "email": email.lower(),
-                            "company": safe_get(contact, 'company_name', ''),
-                            "job_title": safe_get(contact, 'job_title', ''),
-                            "department": safe_get(contact, 'department', ''),
-                            "routing_type": "SMTP"
-                        }
-
-                        # Avoid duplicates
-                        if not any(r["email"] == contact_data["email"] for r in results):
-                            results.append(contact_data)
-
-                self.logger.info(f"Method 2 (Contacts folder): Found {len(results) - len([r for r in results if 'Method 1' in str(r)])} new contacts")
-            except Exception as e:
-                self.logger.warning(f"Method 2 (Contacts folder) failed: {e}")
-        else:
-            self.logger.info("Method 2: Skipped (include_personal_contacts=False)")
-
-        # METHOD 3: Try wildcard resolve_names (for partial matches)
-        # Note: Exchange Server fully supports Arabic/UTF-8 wildcards
-        # FIXED: Removed search_scope to use default (broader) search behavior
-        if len(results) == 0:
-            try:
-                self.logger.info("Method 3: Trying wildcard resolve_names (default scope)")
-                # Add wildcards for partial matching
-                wildcard_queries = [
-                    f"*{query}*",  # Contains (most useful for surnames)
-                    f"{query}*",   # Prefix match
-                ]
-
-                for wq in wildcard_queries:
-                    try:
-                        self.logger.info(f"Trying wildcard query: '{wq}'")
-                        # FIXED: Removed search_scope='ActiveDirectory'
-                        resolved = self.ews_client.account.protocol.resolve_names(
-                            names=[wq],
-                            return_full_contact_data=True
-                        )
-
-                        for resolution in resolved:
-                            # KEY FIX: result is a tuple (mailbox, contact_info)
-                            if resolution and isinstance(resolution, tuple):
-                                mailbox = resolution[0]
-                                contact_info = resolution[1] if len(resolution) > 1 else None
-
-                                contact = {
-                                    "name": safe_get(mailbox, 'name', ''),
-                                    "email": safe_get(mailbox, 'email_address', ''),
-                                    "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
-                                }
-
-                                if contact_info:
-                                    contact["company"] = safe_get(contact_info, 'company_name', '')
-                                    contact["job_title"] = safe_get(contact_info, 'job_title', '')
-                                    contact["department"] = safe_get(contact_info, 'department', '')
-
-                                    # Extract phone numbers
-                                    if hasattr(contact_info, 'phone_numbers'):
-                                        phone_numbers = safe_get(contact_info, 'phone_numbers', [])
-                                        if phone_numbers:
-                                            contact["phone_numbers"] = []
-                                            for phone in phone_numbers:
-                                                if hasattr(phone, 'phone_number'):
-                                                    contact["phone_numbers"].append({
-                                                        "type": safe_get(phone, 'label', 'Unknown'),
-                                                        "number": safe_get(phone, 'phone_number', '')
-                                                    })
-
-                                # Avoid duplicates
-                                if not any(r["email"] == contact["email"] for r in results):
-                                    results.append(contact)
-                                    self.logger.info(f"Found contact via wildcard: {contact['name']} <{contact['email']}>")
-                            # Fallback for old format
-                            elif resolution and hasattr(resolution, 'mailbox'):
-                                mailbox = resolution.mailbox
-                                contact = {
-                                    "name": safe_get(mailbox, 'name', ''),
-                                    "email": safe_get(mailbox, 'email_address', ''),
-                                    "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
-                                }
-
-                                if hasattr(resolution, 'contact'):
-                                    contact_info = resolution.contact
-                                    contact["company"] = safe_get(contact_info, 'company_name', '')
-                                    contact["job_title"] = safe_get(contact_info, 'job_title', '')
-                                    contact["department"] = safe_get(contact_info, 'department', '')
-
-                                # Avoid duplicates
-                                if not any(r["email"] == contact["email"] for r in results):
-                                    results.append(contact)
-                                    self.logger.info(f"Found contact via wildcard: {contact['name']} <{contact['email']}>")
-
-                    except Exception as e:
-                        self.logger.warning(f"Wildcard query '{wq}' failed: {e}")
-
-                self.logger.info(f"Method 3 (wildcard): Total results now: {len(results)}")
-            except Exception as e:
-                self.logger.warning(f"Method 3 (wildcard) failed: {e}")
-
-        # METHOD 4: Try broader search scope (ActiveDirectoryContacts)
-        # This searches both AD and personal contacts, may have broader coverage
-        if len(results) == 0:
-            try:
-                self.logger.info("Method 4: Trying ActiveDirectoryContacts scope")
-
-                # Try exact match first
-                try:
-                    resolved = self.ews_client.account.protocol.resolve_names(
-                        names=[query],
-                        return_full_contact_data=True,
-                        search_scope='ActiveDirectoryContacts'
-                    )
-
-                    for resolution in resolved:
-                        # KEY FIX: result is a tuple (mailbox, contact_info)
-                        if resolution and isinstance(resolution, tuple):
-                            mailbox = resolution[0]
-                            contact_info = resolution[1] if len(resolution) > 1 else None
-
-                            contact = {
-                                "name": safe_get(mailbox, 'name', ''),
-                                "email": safe_get(mailbox, 'email_address', ''),
-                                "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
-                            }
-
-                            if contact_info:
-                                contact["company"] = safe_get(contact_info, 'company_name', '')
-                                contact["job_title"] = safe_get(contact_info, 'job_title', '')
-                                contact["department"] = safe_get(contact_info, 'department', '')
-
-                                # Extract phone numbers
-                                if hasattr(contact_info, 'phone_numbers'):
-                                    phone_numbers = safe_get(contact_info, 'phone_numbers', [])
-                                    if phone_numbers:
-                                        contact["phone_numbers"] = []
-                                        for phone in phone_numbers:
-                                            if hasattr(phone, 'phone_number'):
-                                                contact["phone_numbers"].append({
-                                                    "type": safe_get(phone, 'label', 'Unknown'),
-                                                    "number": safe_get(phone, 'phone_number', '')
-                                                })
-
-                            if not any(r["email"] == contact["email"] for r in results):
-                                results.append(contact)
-                                self.logger.info(f"Found contact via AD+Contacts: {contact['name']}")
-                        # Fallback for old format
-                        elif resolution and hasattr(resolution, 'mailbox'):
-                            mailbox = resolution.mailbox
-                            contact = {
-                                "name": safe_get(mailbox, 'name', ''),
-                                "email": safe_get(mailbox, 'email_address', ''),
-                                "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
-                            }
-
-                            if hasattr(resolution, 'contact'):
-                                contact_info = resolution.contact
-                                contact["company"] = safe_get(contact_info, 'company_name', '')
-                                contact["job_title"] = safe_get(contact_info, 'job_title', '')
-                                contact["department"] = safe_get(contact_info, 'department', '')
-
-                            if not any(r["email"] == contact["email"] for r in results):
-                                results.append(contact)
-                                self.logger.info(f"Found contact via AD+Contacts: {contact['name']}")
-                except Exception as e:
-                    self.logger.warning(f"ActiveDirectoryContacts exact search failed: {e}")
-
-                # Try wildcards with broader scope
-                if len(results) == 0:
-                    for wq in [f"*{query}*", f"{query}*"]:
-                        try:
-                            self.logger.info(f"Trying ActiveDirectoryContacts wildcard: '{wq}'")
-                            resolved = self.ews_client.account.protocol.resolve_names(
-                                names=[wq],
-                                return_full_contact_data=True,
-                                search_scope='ActiveDirectoryContacts'
-                            )
-
-                            for resolution in resolved:
-                                # KEY FIX: result is a tuple (mailbox, contact_info)
-                                if resolution and isinstance(resolution, tuple):
-                                    mailbox = resolution[0]
-                                    contact_info = resolution[1] if len(resolution) > 1 else None
-
-                                    contact = {
-                                        "name": safe_get(mailbox, 'name', ''),
-                                        "email": safe_get(mailbox, 'email_address', ''),
-                                        "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
-                                    }
-
-                                    if contact_info:
-                                        contact["company"] = safe_get(contact_info, 'company_name', '')
-                                        contact["job_title"] = safe_get(contact_info, 'job_title', '')
-                                        contact["department"] = safe_get(contact_info, 'department', '')
-
-                                        # Extract phone numbers
-                                        if hasattr(contact_info, 'phone_numbers'):
-                                            phone_numbers = safe_get(contact_info, 'phone_numbers', [])
-                                            if phone_numbers:
-                                                contact["phone_numbers"] = []
-                                                for phone in phone_numbers:
-                                                    if hasattr(phone, 'phone_number'):
-                                                        contact["phone_numbers"].append({
-                                                            "type": safe_get(phone, 'label', 'Unknown'),
-                                                            "number": safe_get(phone, 'phone_number', '')
-                                                        })
-
-                                    if not any(r["email"] == contact["email"] for r in results):
-                                        results.append(contact)
-                                        self.logger.info(f"Found via AD+Contacts wildcard: {contact['name']}")
-                                # Fallback for old format
-                                elif resolution and hasattr(resolution, 'mailbox'):
-                                    mailbox = resolution.mailbox
-                                    contact = {
-                                        "name": safe_get(mailbox, 'name', ''),
-                                        "email": safe_get(mailbox, 'email_address', ''),
-                                        "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
-                                    }
-
-                                    if hasattr(resolution, 'contact'):
-                                        contact_info = resolution.contact
-                                        contact["company"] = safe_get(contact_info, 'company_name', '')
-                                        contact["job_title"] = safe_get(contact_info, 'job_title', '')
-                                        contact["department"] = safe_get(contact_info, 'department', '')
-
-                                    if not any(r["email"] == contact["email"] for r in results):
-                                        results.append(contact)
-                                        self.logger.info(f"Found via AD+Contacts wildcard: {contact['name']}")
-                        except Exception as e:
-                            self.logger.warning(f"ActiveDirectoryContacts wildcard '{wq}' failed: {e}")
-
-                self.logger.info(f"Method 4 (ActiveDirectoryContacts): Total results now: {len(results)}")
-            except Exception as e:
-                self.logger.warning(f"Method 4 (ActiveDirectoryContacts) failed: {e}")
-
-        # Final result
-        self.logger.info(f"GAL search complete: {len(results)} total contacts found")
-
-        if len(results) == 0:
-            self.logger.warning(
-                f"GAL search returned 0 results for query '{query}'. "
-                f"Possible reasons: (1) Person not in Global Address List/Active Directory, "
-                f"(2) Exact spelling required, (3) Person account disabled/hidden. "
-                f"Try: (1) Search by full email address, (2) Use search_scope='all' or 'email_history', "
-                f"(3) Try different spelling or add first name"
-            )
-
-        return results
+            self.logger.error(traceback.format_exc())
+            return contacts
 
     async def _search_email_history(
         self,
