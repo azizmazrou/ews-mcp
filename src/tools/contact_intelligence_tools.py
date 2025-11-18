@@ -5,12 +5,17 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 2025-11-18-GAL-ONLY-FIX
+VERSION: 2025-11-18-GAL-SEARCH-SCOPE-FIX
 CHANGES:
+- CRITICAL FIX: Removed search_scope='ActiveDirectory' from Method 1 & Method 3
+  * This parameter was restricting GAL search results
+  * Working Python code does NOT specify search_scope
+  * Now matches working implementation exactly
+  * Should fix 0 results issue with GAL search
 - Fixed resolve_names to handle tuple format (mailbox, contact_info)
 - Added phone number extraction from GAL results
 - Added additional contact fields (office, display_name, business_phone, mobile_phone)
-- CRITICAL: Fixed search_scope="gal" to NOT search personal contacts (Method 2)
+- Fixed search_scope="gal" to NOT search personal contacts (Method 2)
 - Added include_personal_contacts parameter to control personal contacts search
 - Improved error logging with full tracebacks to diagnose resolve_names failures
 - Method 2 now only runs when include_personal_contacts=True
@@ -226,21 +231,25 @@ class FindPersonTool(BaseTool):
             self.logger.info(f"Query contains non-ASCII characters (UTF-8)")
 
         # METHOD 1: Try resolve_names (works for exact/prefix matches)
+        # CRITICAL FIX: Do NOT specify search_scope to match working Python implementation
+        # When search_scope is omitted, exchangelib uses default search behavior which works better
         try:
-            self.logger.info("Method 1: Trying resolve_names API")
+            self.logger.info("Method 1: Trying resolve_names API (default scope)")
             self.logger.info(f"  Query being sent: '{query}' (type: {type(query).__name__})")
             self.logger.info(f"  Query bytes (UTF-8): {query.encode('utf-8').hex()}")
 
+            # FIXED: Removed search_scope='ActiveDirectory' to match working code
             resolved = self.ews_client.account.protocol.resolve_names(
                 names=[query],
-                return_full_contact_data=True,
-                search_scope='ActiveDirectory'
+                return_full_contact_data=True
             )
 
             self.logger.info(f"  ResolveNames returned {len(resolved) if resolved else 0} results")
             if resolved and len(resolved) > 0:
                 self.logger.info(f"  First result type: {type(resolved[0])}")
                 self.logger.info(f"  First result content: {resolved[0]}")
+            else:
+                self.logger.warning(f"  ResolveNames returned 0 results for query '{query}'")
 
             for resolution in resolved:
                 # KEY FIX: result is a tuple (mailbox, contact_info)
@@ -364,9 +373,10 @@ class FindPersonTool(BaseTool):
 
         # METHOD 3: Try wildcard resolve_names (for partial matches)
         # Note: Exchange Server fully supports Arabic/UTF-8 wildcards
+        # FIXED: Removed search_scope to use default (broader) search behavior
         if len(results) == 0:
             try:
-                self.logger.info("Method 3: Trying wildcard resolve_names")
+                self.logger.info("Method 3: Trying wildcard resolve_names (default scope)")
                 # Add wildcards for partial matching
                 wildcard_queries = [
                     f"*{query}*",  # Contains (most useful for surnames)
@@ -376,10 +386,10 @@ class FindPersonTool(BaseTool):
                 for wq in wildcard_queries:
                     try:
                         self.logger.info(f"Trying wildcard query: '{wq}'")
+                        # FIXED: Removed search_scope='ActiveDirectory'
                         resolved = self.ews_client.account.protocol.resolve_names(
                             names=[wq],
-                            return_full_contact_data=True,
-                            search_scope='ActiveDirectory'
+                            return_full_contact_data=True
                         )
 
                         for resolution in resolved:
