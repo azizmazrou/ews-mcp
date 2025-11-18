@@ -225,7 +225,6 @@ class FindPersonTool(BaseTool):
 
         try:
             self.logger.info(f"Searching GAL for: '{query}'")
-            self.logger.info("-" * 60)
 
             # EXACT COPY of working code - ONE simple call
             results = self.ews_client.account.protocol.resolve_names(
@@ -234,15 +233,12 @@ class FindPersonTool(BaseTool):
             )
 
             if not results:
-                self.logger.warning("No contacts found.")
+                self.logger.warning("No contacts found in GAL")
                 return contacts
 
             self.logger.info(f"Found {len(results)} result(s)")
-            self.logger.info(f"Result type: {type(results[0])}")
 
             for idx, result in enumerate(results):
-                self.logger.info(f"Result #{idx + 1}:")
-                self.logger.info(f"  Type: {type(result)}")
 
                 # Handle tuple format: (mailbox, contact_info) - EXACT COPY
                 if isinstance(result, tuple):
@@ -293,20 +289,13 @@ class FindPersonTool(BaseTool):
 
                 contacts.append(contact)
 
-                # Display - EXACT COPY
-                self.logger.info(f"  Name: {contact.get('name', 'N/A')}")
-                self.logger.info(f"  Email: {contact.get('email', 'N/A')}")
-                if 'display_name' in contact:
-                    self.logger.info(f"  Display Name: {contact['display_name']}")
-                if 'company_name' in contact:
-                    self.logger.info(f"  Company: {contact['company_name']}")
-                if 'department' in contact:
-                    self.logger.info(f"  Department: {contact['department']}")
-                if 'job_title' in contact:
-                    self.logger.info(f"  Job Title: {contact['job_title']}")
-                self.logger.info("-" * 60)
+                # Log contact briefly
+                name = contact.get('name', 'N/A')
+                email = contact.get('email', 'N/A')
+                company = contact.get('company', contact.get('company_name', ''))
+                self.logger.info(f"  [{idx + 1}] {name} <{email}>" + (f" - {company}" if company else ""))
 
-            self.logger.info(f"✓ Total contacts found: {len(contacts)}")
+            self.logger.info(f"Total contacts found: {len(contacts)}")
             return contacts
 
         except Exception as e:
