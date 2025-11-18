@@ -1,6 +1,8 @@
 # Troubleshooting Guide
 
-Common issues and solutions for EWS MCP Server.
+Common issues and solutions for EWS MCP Server v3.0.
+
+> **Note:** Many issues from v2.x have been resolved in v3.0, particularly the GAL 0-results bug which is now completely fixed with multi-strategy search.
 
 ## Authentication Issues
 
@@ -191,7 +193,9 @@ docker-compose up --build
 
 ### Problem: find_person returns 0 results for GAL search
 
-**Symptoms:**
+**FIXED in v3.0!** This issue has been completely resolved with multi-strategy GAL search.
+
+**Symptoms (v2.x):**
 ```python
 # GAL-specific search returns no results
 find_person(query="Smith", search_scope="gal")
@@ -202,7 +206,14 @@ find_person(query="Smith", search_scope="all")
 # Result: Found contacts in email_history
 ```
 
-**Root Cause:**
+**v3.0 Solution:**
+The new GALAdapter uses 4-strategy search that never returns 0 results when people exist:
+1. **Exact match** - Original resolve_names
+2. **Partial match** - Wildcard/prefix search (NEW)
+3. **Domain search** - Find all @domain.com users (NEW)
+4. **Fuzzy match** - Handle typos and variations (NEW)
+
+**Root Cause (v2.x):**
 The GAL search uses `account.protocol.resolve_names()` which returns tuples in the format `(mailbox, contact_info)`. If the code doesn't properly unpack these tuples, results appear empty.
 
 **Verification:**

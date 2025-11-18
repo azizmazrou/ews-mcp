@@ -1,6 +1,164 @@
 # API Documentation
 
-Complete reference for all EWS MCP Server tools.
+Complete reference for all EWS MCP Server v3.0 tools.
+
+## Contact Intelligence Tools (v3.0 Enhanced)
+
+These tools leverage the new person-centric architecture with multi-strategy GAL search.
+
+### find_person
+
+Search for contacts across Global Address List (GAL), email history, and domains.
+
+**v3.0 Enhancements:**
+- Multi-strategy GAL search eliminates 0-results bug
+- Intelligent ranking by relevance
+- Smart deduplication across sources
+- Communication statistics included
+
+**Input Schema:**
+```json
+{
+  "query": "Ahmed",                    // Name, email, or @domain
+  "search_scope": "all",               // all, gal, contacts, email_history, domain
+  "include_stats": true,               // Include communication statistics
+  "time_range_days": 365,              // Days back for email history
+  "max_results": 50                    // Maximum results to return
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Found 5 contact(s)",
+  "total_results": 5,
+  "query": "Ahmed",
+  "unified_results": [
+    {
+      "id": "ahmed.rashid@company.com",
+      "name": "Ahmed Al-Rashid",
+      "email_addresses": [
+        {
+          "address": "ahmed.rashid@company.com",
+          "is_primary": true,
+          "label": "Work"
+        }
+      ],
+      "phone_numbers": [
+        {
+          "number": "+966-555-1234",
+          "type": "business"
+        }
+      ],
+      "organization": "Example Corp",
+      "department": "Engineering",
+      "job_title": "Senior Developer",
+      "office_location": "Building A",
+      "sources": ["gal", "email_history"],
+      "is_vip": false,
+      "communication_stats": {
+        "total_emails": 45,
+        "emails_sent": 20,
+        "emails_received": 25,
+        "first_contact": "2024-03-15T10:00:00",
+        "last_contact": "2025-11-15T14:30:00",
+        "emails_per_month": 3.75
+      },
+      "relationship_strength": 0.72
+    }
+  ]
+}
+```
+
+### get_communication_history
+
+Analyze communication patterns with a specific contact.
+
+**Input Schema:**
+```json
+{
+  "email": "colleague@example.com",
+  "days_back": 365,
+  "include_topics": true,
+  "include_recent_emails": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Communication history retrieved",
+  "email": "colleague@example.com",
+  "stats": {
+    "total_emails": 120,
+    "emails_sent": 55,
+    "emails_received": 65,
+    "first_contact": "2024-01-10T09:00:00",
+    "last_contact": "2025-11-17T16:45:00",
+    "emails_per_month": 10.0
+  },
+  "timeline": [
+    {"month": "2025-11", "count": 15},
+    {"month": "2025-10", "count": 12},
+    {"month": "2025-09", "count": 8}
+  ],
+  "top_topics": ["Project Update", "Meeting", "Review"],
+  "recent_emails": [
+    {
+      "subject": "RE: Q4 Budget Review",
+      "date": "2025-11-17T16:45:00",
+      "direction": "received"
+    }
+  ]
+}
+```
+
+### analyze_network
+
+Professional network analysis with multiple analysis types.
+
+**Input Schema:**
+```json
+{
+  "analysis_type": "overview",         // overview, top_contacts, by_domain, vip, dormant
+  "days_back": 90,
+  "top_n": 20,
+  "vip_email_threshold": 10,
+  "dormant_threshold_days": 60
+}
+```
+
+**Response (overview):**
+```json
+{
+  "success": true,
+  "message": "Network analysis complete",
+  "analysis_type": "overview",
+  "summary": {
+    "total_contacts": 245,
+    "total_emails": 1250,
+    "unique_domains": 35,
+    "vip_contacts": 12,
+    "dormant_contacts": 28
+  },
+  "top_contacts": [
+    {
+      "name": "John Doe",
+      "email": "john@example.com",
+      "email_count": 85
+    }
+  ],
+  "top_domains": [
+    {
+      "domain": "example.com",
+      "contact_count": 45,
+      "email_count": 320
+    }
+  ]
+}
+```
 
 ## Email Tools
 
