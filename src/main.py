@@ -410,14 +410,37 @@ class EWSMCPServer:
             """Handle POST messages endpoint."""
             await sse.handle_post_message(scope, receive, send)
 
-        # Create Starlette app using Route with app= for raw ASGI handlers
-        app = Starlette(
-            debug=True,
-            routes=[
-                Route("/sse", app=handle_sse),
-                Route("/messages", app=handle_messages, methods=["POST"]),
-            ],
-        )
+        # Create a simple ASGI router that bypasses Starlette's response handling
+        async def app(scope, receive, send):
+            """Simple ASGI router for MCP SSE transport."""
+            if scope["type"] == "http":
+                path = scope["path"]
+                method = scope["method"]
+
+                if path == "/sse" and method == "GET":
+                    await handle_sse(scope, receive, send)
+                elif path == "/messages" and method == "POST":
+                    await handle_messages(scope, receive, send)
+                else:
+                    # Return 404 for unknown routes
+                    await send({
+                        "type": "http.response.start",
+                        "status": 404,
+                        "headers": [[b"content-type", b"text/plain"]],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b"Not Found",
+                    })
+            elif scope["type"] == "lifespan":
+                # Handle lifespan events
+                while True:
+                    message = await receive()
+                    if message["type"] == "lifespan.startup":
+                        await send({"type": "lifespan.startup.complete"})
+                    elif message["type"] == "lifespan.shutdown":
+                        await send({"type": "lifespan.shutdown.complete"})
+                        return
 
         # Run with uvicorn
         config = uvicorn.Config(
