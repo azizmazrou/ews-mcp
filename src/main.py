@@ -391,36 +391,31 @@ class EWSMCPServer:
 
     async def run_sse(self):
         """Run the MCP server with SSE (HTTP) transport."""
-        from starlette.responses import Response
         import uvicorn
 
         sse = SseServerTransport("/messages")
 
-        async def handle_sse(request):
+        # Create raw ASGI handler for SSE endpoint
+        async def handle_sse(scope, receive, send):
             """Handle SSE connection endpoint."""
-            async with sse.connect_sse(
-                request.scope,
-                request.receive,
-                request._send,
-            ) as streams:
+            async with sse.connect_sse(scope, receive, send) as streams:
                 await self.server.run(
                     streams[0],
                     streams[1],
                     self.server.create_initialization_options(),
                 )
-            return Response()
 
-        async def handle_messages(request):
+        # Create raw ASGI handler for messages endpoint
+        async def handle_messages(scope, receive, send):
             """Handle POST messages endpoint."""
-            await sse.handle_post_message(request.scope, request.receive, request._send)
-            return Response()
+            await sse.handle_post_message(scope, receive, send)
 
-        # Create Starlette app
+        # Create Starlette app using Route with app= for raw ASGI handlers
         app = Starlette(
             debug=True,
             routes=[
-                Route("/sse", endpoint=handle_sse),
-                Route("/messages", endpoint=handle_messages, methods=["POST"]),
+                Route("/sse", app=handle_sse),
+                Route("/messages", app=handle_messages, methods=["POST"]),
             ],
         )
 
