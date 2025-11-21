@@ -1,0 +1,96 @@
+version: '3.8'
+
+# EWS MCP Server with built-in OpenAPI/REST support
+# This unified architecture eliminates the need for MCPO or other OpenAPI adapters
+# The server provides both MCP SSE protocol and REST API on a single port (8000)
+
+services:
+  # EWS MCP Server - Unified MCP + REST API
+  ews-mcp:
+    build: .
+    container_name: ews-mcp-server
+    ports:
+      - "8000:8000"  # Single port for both MCP SSE and REST API
+    environment:
+      # Exchange Server Configuration
+      - EWS_EMAIL=${EWS_EMAIL}
+      - EWS_PASSWORD=${EWS_PASSWORD}
+      - EWS_SERVER_URL=${EWS_SERVER_URL}
+      - EWS_AUTH_TYPE=${EWS_AUTH_TYPE:-basic}
+
+      # MCP Server Configuration
+      - MCP_TRANSPORT=sse
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+      - MCP_SERVER_NAME=ews-mcp-server
+
+      # Timezone Configuration
+      - TIMEZONE=${TIMEZONE:-Asia/Riyadh}
+
+      # Tool Categories (Optional - enable/disable specific tool groups)
+      - ENABLE_EMAIL=true
+      - ENABLE_CALENDAR=true
+      - ENABLE_CONTACTS=true
+      - ENABLE_TASKS=true
+      - ENABLE_ATTACHMENTS=true
+      - ENABLE_SEARCH=true
+      - ENABLE_FOLDERS=true
+      - ENABLE_OOF=true
+
+      # AI Tools (Optional - requires AI provider configuration)
+      - ENABLE_AI_TOOLS=${ENABLE_AI_TOOLS:-false}
+      - AI_PROVIDER=${AI_PROVIDER:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Open WebUI (Optional - uncomment to run alongside EWS MCP)
+  # Configuration for connecting to EWS MCP via REST API:
+  # 1. Access Open WebUI at http://localhost:3000
+  # 2. Go to Settings > Functions
+  # 3. Add External API: http://ews-mcp:8000
+  # 4. Auto-discovery will find all 43+ Exchange tools
+  # open-webui:
+  #   image: ghcr.io/open-webui/open-webui:main
+  #   container_name: open-webui
+  #   ports:
+  #     - "3000:8080"
+  #   volumes:
+  #     - open-webui-data:/app/backend/data
+  #   environment:
+  #     # LLM Configuration
+  #     - OLLAMA_BASE_URL=http://host.docker.internal:11434
+  #
+  #     # Open WebUI Configuration
+  #     - ENABLE_OAUTH_SIGNUP=false
+  #     - ENABLE_SIGNUP=true
+  #     - DEFAULT_USER_ROLE=user
+  #
+  #     # Optional: Add EWS MCP as default external function
+  #     - EXTERNAL_FUNCTIONS=http://ews-mcp:8000/openapi.json
+  #   networks:
+  #     - mcp-network
+  #   restart: unless-stopped
+  #   depends_on:
+  #     ews-mcp:
+  #       condition: service_healthy
+
+networks:
+  mcp-network:
+    driver: bridge
+    name: ews-mcp-network
+
+volumes:
+  open-webui-data:
+    driver: local
+    name: open-webui-data
