@@ -1,155 +1,320 @@
-# Open WebUI Integration Guide for EWS MCP Server
+# Open WebUI Integration Guide
 
 ## Overview
 
-The EWS MCP Server now has **built-in OpenAPI/REST support**, eliminating the need for MCPO as a separate bridge. The server exposes both MCP SSE endpoints (for MCP clients like Claude Desktop) and REST API endpoints (for Open WebUI and other HTTP clients) on the same port.
+EWS MCP Server now includes **built-in OpenAPI/REST support**, eliminating the need for external adapters like MCPO. This unified architecture provides both MCP SSE protocol and REST API endpoints on a single port (8000).
 
 ## Architecture
 
+### Unified Server Design
+
 ```
-Open WebUI → EWS MCP Server (Port 8000)
-             ├─ GET  /sse                    (MCP SSE connection)
-             ├─ POST /messages               (MCP messages)
-             ├─ GET  /openapi.json           (OpenAPI 3.0 schema)
-             ├─ POST /api/tools/{tool_name}  (REST tool execution)
-             └─ GET  /health                 (Health check)
+┌─────────────────────────────────────────────────────────┐
+│           EWS MCP Server (Port 8000)                    │
+│                                                         │
+│  ┌───────────────┐        ┌────────────────────────┐   │
+│  │  MCP SSE      │        │  OpenAPI/REST Adapter  │   │
+│  │  Transport    │        │  (Built-in)            │   │
+│  │               │        │                        │   │
+│  │  GET /sse     │        │  GET  /openapi.json    │   │
+│  │  POST /messages│       │  POST /api/tools/{name}│   │
+│  └───────┬───────┘        └────────┬───────────────┘   │
+│          │                         │                   │
+│          └─────────┬───────────────┘                   │
+│                    │                                   │
+│         ┌──────────▼──────────┐                        │
+│         │   43+ Exchange      │                        │
+│         │   Tools             │                        │
+│         │                     │                        │
+│         │  • Email (8)        │                        │
+│         │  • Calendar (7)     │                        │
+│         │  • Contacts (9)     │                        │
+│         │  • Tasks (5)        │                        │
+│         │  • Attachments (5)  │                        │
+│         │  • Search (3)       │                        │
+│         │  • Folders (5)      │                        │
+│         │  • Out-of-Office (2)│                        │
+│         └─────────────────────┘                        │
+└─────────────────────────────────────────────────────────┘
+           │                          │
+           ▼                          ▼
+    Claude Desktop              Open WebUI
+    (MCP SSE)                   (REST API)
 ```
 
-**Benefits:**
-- ✅ Single server for both MCP and REST protocols
-- ✅ No additional proxy needed
-- ✅ Simplified deployment
-- ✅ Direct tool invocation via REST API
-- ✅ Auto-generated OpenAPI schema
+### Key Benefits
+
+- **Single Port**: Both MCP and REST on port 8000
+- **No External Dependencies**: Built-in OpenAPI adapter
+- **Auto-Generated Schema**: OpenAPI schema generated from MCP tools
+- **Type Safe**: Full TypeScript/JSON Schema validation
+- **Hot Reload**: Schema updates automatically when tools change
 
 ## Quick Start
 
-### Using the Automated Script (Easiest)
+### 1. Setup and Start Server
 
 ```bash
-# Run the setup script
+# Clone the repository
+git clone https://github.com/azizmazrou/ews-mcp.git
+cd ews-mcp
+
+# Create .env file
+cat > .env << EOF
+EWS_EMAIL=your-email@company.com
+EWS_PASSWORD=your-password
+EWS_SERVER_URL=https://your-exchange-server/EWS/Exchange.asmx
+EWS_AUTH_TYPE=basic
+TIMEZONE=Asia/Riyadh
+EOF
+
+# Start the server
 ./start-openwebui.sh
 ```
 
-This will:
-1. Validate your `.env` file
-2. Build and start the EWS MCP server
-3. Display available endpoints
-4. Show next steps for Open WebUI configuration
-
-### Manual Setup with Docker Compose
-
-Use the provided `docker-compose.openwebui.yml`:
+### 2. Verify Server is Running
 
 ```bash
-# Start the server
-docker-compose -f docker-compose.openwebui.yml up -d
-
 # Check health
 curl http://localhost:8000/health
 
 # View OpenAPI schema
-curl http://localhost:8000/openapi.json
+curl http://localhost:8000/openapi.json | jq
 
-# View logs
-docker-compose -f docker-compose.openwebui.yml logs -f
+# List all available tools
+curl http://localhost:8000/openapi.json | jq '.paths | keys'
 ```
 
-### Using Existing Docker Setup
-
-If you already have the server running:
+### 3. Test REST API
 
 ```bash
-# The server now exposes REST endpoints by default
-# No configuration change needed!
+# Read emails
+curl -X POST http://localhost:8000/api/tools/read_emails \
+  -H 'Content-Type: application/json' \
+  -d '{"max_results": 5}' | jq
 
-# Test OpenAPI endpoint
-curl http://localhost:8000/openapi.json | jq
+# Get calendar events
+curl -X POST http://localhost:8000/api/tools/get_calendar \
+  -H 'Content-Type: application/json' \
+  -d '{"days": 7}' | jq
+
+# Search contacts
+curl -X POST http://localhost:8000/api/tools/search_contacts \
+  -H 'Content-Type: application/json' \
+  -d '{"search_term": "John"}' | jq
 ```
 
-## Configure Open WebUI
+## Open WebUI Integration
 
-### 1. Access Open WebUI Admin Panel
-- Navigate to your Open WebUI instance
-- Go to **Admin Settings** → **Connections** → **External APIs**
+### Method 1: External API Configuration (Recommended)
 
-### 2. Add EWS MCP Server
-- **API Base URL**: `http://localhost:8000` (or your server URL)
-- **Name**: `Exchange Web Services`
-- **Description**: `Microsoft Exchange operations via MCP`
+1. **Open Open WebUI** in your browser (http://localhost:3000)
 
-### 3. Auto-Discovery
-Open WebUI will automatically:
-- Fetch the OpenAPI schema from `/openapi.json`
-- Discover all 44 Exchange tools
-- Make them available in the chat interface
+2. **Navigate to Admin Settings**:
+   - Click your profile → Admin Settings
+   - Go to: Functions → External APIs
 
-### 4. Test the Connection
-Try a simple query like:
+3. **Add EWS MCP as External API**:
+   - Click "+ Add External API"
+   - Fill in the details:
+     ```
+     API Base URL: http://ews-mcp:8000
+     Name: Exchange Web Services
+     Description: Access to Exchange emails, calendar, contacts, and tasks
+     ```
+   - Click "Save"
+
+4. **Auto-Discovery**:
+   - Open WebUI will automatically fetch `/openapi.json`
+   - All 43+ tools will be discovered and made available
+   - Tools will appear in the function picker during chats
+
+5. **Start Using**:
+   - Create a new chat
+   - Type a message that requires Exchange data
+   - Open WebUI will automatically call the appropriate tools
+
+### Method 2: Docker Compose (All-in-One)
+
+Uncomment the Open WebUI section in `docker-compose.openwebui.yml`:
+
+```yaml
+services:
+  ews-mcp:
+    # ... (already configured)
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - ENABLE_OAUTH_SIGNUP=false
+      - ENABLE_SIGNUP=true
+      - EXTERNAL_FUNCTIONS=http://ews-mcp:8000/openapi.json
+    networks:
+      - mcp-network
+    restart: unless-stopped
+    depends_on:
+      ews-mcp:
+        condition: service_healthy
 ```
-"Read my last 5 emails"
-"Show me today's calendar"
-"Search my contacts for John"
+
+Then restart:
+```bash
+docker-compose -f docker-compose.openwebui.yml up -d
 ```
 
 ## Available Endpoints
 
-### MCP Protocol (for Claude Desktop, etc.)
-- `GET  /sse` - Server-Sent Events connection
-- `POST /messages` - Message handling
+### MCP SSE Endpoints (for Claude Desktop)
 
-### REST API (for Open WebUI, etc.)
-- `GET  /openapi.json` - OpenAPI 3.0 schema
-- `POST /api/tools/send_email` - Send email
-- `POST /api/tools/read_emails` - Read emails
-- `POST /api/tools/search_emails` - Search emails
-- `POST /api/tools/get_calendar` - Get calendar events
-- `POST /api/tools/create_contact` - Create contact
-- ... (44 tools total)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/sse` | SSE transport for MCP protocol |
+| POST | `/messages` | MCP message handling |
 
-### Utility
-- `GET  /health` - Health check endpoint
+### REST API Endpoints (for Open WebUI)
 
-## Testing the REST API
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check with tool count |
+| GET | `/openapi.json` | OpenAPI 3.0 schema |
+| POST | `/api/tools/{tool_name}` | Execute specific tool |
 
-### List Available Tools
+## REST API Examples
+
+### Email Tools
+
+#### Send Email
 ```bash
-# Get OpenAPI schema
-curl http://localhost:8000/openapi.json | jq '.paths | keys'
+curl -X POST http://localhost:8000/api/tools/send_email \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to_recipients": ["user@example.com"],
+    "subject": "Test Email",
+    "body": "This is a test email",
+    "body_type": "text"
+  }' | jq
 ```
 
-### Read Emails
+#### Read Emails
 ```bash
 curl -X POST http://localhost:8000/api/tools/read_emails \
   -H 'Content-Type: application/json' \
   -d '{
-    "folder": "inbox",
-    "max_results": 5,
-    "unread_only": false
-  }'
+    "folder_name": "Inbox",
+    "max_results": 10,
+    "include_body": false
+  }' | jq
 ```
 
-### Search Emails
+#### Search Emails
 ```bash
 curl -X POST http://localhost:8000/api/tools/search_emails \
   -H 'Content-Type: application/json' \
   -d '{
-    "subject_contains": "meeting",
-    "max_results": 10
-  }'
+    "search_query": "subject:meeting",
+    "max_results": 20
+  }' | jq
 ```
 
-### Get Calendar
+#### Move Email
+```bash
+curl -X POST http://localhost:8000/api/tools/move_email \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message_id": "AAMkAD...",
+    "target_folder": "Archive"
+  }' | jq
+```
+
+#### Delete Email (Soft Delete - moves to trash)
+```bash
+curl -X POST http://localhost:8000/api/tools/delete_email \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message_id": "AAMkAD..."
+  }' | jq
+```
+
+#### Update Email
+```bash
+curl -X POST http://localhost:8000/api/tools/update_email \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message_id": "AAMkAD...",
+    "is_read": true,
+    "flag_status": "Flagged"
+  }' | jq
+```
+
+### Calendar Tools
+
+#### Create Appointment
+```bash
+curl -X POST http://localhost:8000/api/tools/create_appointment \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "subject": "Team Meeting",
+    "start": "2025-01-15T10:00:00",
+    "end": "2025-01-15T11:00:00",
+    "location": "Conference Room A",
+    "body": "Quarterly planning meeting",
+    "required_attendees": ["team@example.com"]
+  }' | jq
+```
+
+#### Get Calendar Events
 ```bash
 curl -X POST http://localhost:8000/api/tools/get_calendar \
   -H 'Content-Type: application/json' \
   -d '{
-    "days_ahead": 7,
-    "max_results": 20
-  }'
+    "days": 7,
+    "start_date": "2025-01-15"
+  }' | jq
 ```
 
-### Create Contact
+#### Update Appointment
+```bash
+curl -X POST http://localhost:8000/api/tools/update_appointment \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "appointment_id": "AAMkAD...",
+    "subject": "Updated Meeting Title",
+    "start": "2025-01-15T14:00:00"
+  }' | jq
+```
+
+#### Respond to Meeting
+```bash
+curl -X POST http://localhost:8000/api/tools/respond_to_meeting \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "appointment_id": "AAMkAD...",
+    "response": "accept",
+    "message": "I will attend"
+  }' | jq
+```
+
+#### Check Availability
+```bash
+curl -X POST http://localhost:8000/api/tools/check_availability \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "attendees": ["user1@example.com", "user2@example.com"],
+    "start_time": "2025-01-15T09:00:00",
+    "end_time": "2025-01-15T17:00:00",
+    "duration_minutes": 60
+  }' | jq
+```
+
+### Contact Tools
+
+#### Create Contact
 ```bash
 curl -X POST http://localhost:8000/api/tools/create_contact \
   -H 'Content-Type: application/json' \
@@ -157,239 +322,403 @@ curl -X POST http://localhost:8000/api/tools/create_contact \
     "given_name": "John",
     "surname": "Doe",
     "email_address": "john.doe@example.com",
-    "phone_number": "+1234567890"
-  }'
+    "company_name": "Acme Corp",
+    "phone_number": "+1234567890",
+    "job_title": "Software Engineer"
+  }' | jq
 ```
 
-## Available Tools (44 Total)
+#### Search Contacts
+```bash
+curl -X POST http://localhost:8000/api/tools/search_contacts \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "search_term": "John",
+    "max_results": 20
+  }' | jq
+```
 
-### Email Tools (8)
-- `send_email` - Send email with attachments
-- `read_emails` - Read emails from folder
-- `search_emails` - Search with filters
-- `get_email_details` - Get full email details
-- `delete_email` - Delete or move to trash
-- `move_email` - Move between folders
-- `update_email` - Update flags/categories
-- `copy_email` - Copy to another folder
+#### Get Contacts
+```bash
+curl -X POST http://localhost:8000/api/tools/get_contacts \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "max_results": 50
+  }' | jq
+```
 
-### Calendar Tools (7)
-- `create_appointment` - Create calendar event
-- `get_calendar` - Retrieve events
-- `update_appointment` - Modify event
-- `delete_appointment` - Delete event
-- `respond_to_meeting` - Accept/decline
-- `check_availability` - Check free/busy
-- `find_meeting_times` - Find available slots
+#### Update Contact
+```bash
+curl -X POST http://localhost:8000/api/tools/update_contact \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "contact_id": "AAMkAD...",
+    "phone_number": "+9876543210",
+    "job_title": "Senior Engineer"
+  }' | jq
+```
 
-### Contact Tools (9)
-- `create_contact` - Create new contact
-- `search_contacts` - Search contacts
-- `get_contacts` - List contacts
-- `update_contact` - Modify contact
-- `delete_contact` - Remove contact
-- `resolve_names` - Resolve email addresses
-- `find_person` - Smart person search
-- `get_communication_history` - Email history
-- `analyze_network` - Contact relationships
+#### Resolve Names (GAL Search)
+```bash
+curl -X POST http://localhost:8000/api/tools/resolve_names \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "john.doe"
+  }' | jq
+```
 
-### Task Tools (5)
-- `create_task` - Create task
-- `get_tasks` - List tasks
-- `update_task` - Modify task
-- `complete_task` - Mark complete
-- `delete_task` - Remove task
+### Task Tools
 
-### Attachment Tools (5)
-- `list_attachments` - List email attachments
-- `download_attachment` - Download file
-- `add_attachment` - Add to email
-- `delete_attachment` - Remove attachment
-- `read_attachment` - Read attachment content
+#### Create Task
+```bash
+curl -X POST http://localhost:8000/api/tools/create_task \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "subject": "Complete project documentation",
+    "body": "Write comprehensive docs",
+    "due_date": "2025-01-20T17:00:00",
+    "importance": "high"
+  }' | jq
+```
 
-### Search Tools (3)
-- `advanced_search` - Multi-folder search
-- `search_by_conversation` - Conversation threads
-- `full_text_search` - Full-text search
+#### Get Tasks
+```bash
+curl -X POST http://localhost:8000/api/tools/get_tasks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "max_results": 20,
+    "include_completed": false
+  }' | jq
+```
 
-### Folder Tools (5)
-- `list_folders` - List all folders
-- `create_folder` - Create new folder
-- `delete_folder` - Delete folder
-- `rename_folder` - Rename folder
-- `move_folder` - Move folder
+#### Complete Task
+```bash
+curl -X POST http://localhost:8000/api/tools/complete_task \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "task_id": "AAMkAD..."
+  }' | jq
+```
 
-### Out-of-Office Tools (2)
-- `set_oof_settings` - Set OOF message
-- `get_oof_settings` - Get OOF status
+### Attachment Tools
+
+#### List Attachments
+```bash
+curl -X POST http://localhost:8000/api/tools/list_attachments \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "item_id": "AAMkAD..."
+  }' | jq
+```
+
+#### Download Attachment
+```bash
+curl -X POST http://localhost:8000/api/tools/download_attachment \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "attachment_id": "AAMkAD...",
+    "save_path": "/tmp/document.pdf"
+  }' | jq
+```
+
+#### Add Attachment
+```bash
+curl -X POST http://localhost:8000/api/tools/add_attachment \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "item_id": "AAMkAD...",
+    "file_path": "/path/to/file.pdf"
+  }' | jq
+```
+
+### Search Tools
+
+#### Advanced Search
+```bash
+curl -X POST http://localhost:8000/api/tools/advanced_search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "project proposal",
+    "item_types": ["email", "appointment"],
+    "max_results": 50
+  }' | jq
+```
+
+#### Full Text Search
+```bash
+curl -X POST http://localhost:8000/api/tools/full_text_search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "quarterly report",
+    "max_results": 30
+  }' | jq
+```
+
+### Folder Tools
+
+#### List Folders
+```bash
+curl -X POST http://localhost:8000/api/tools/list_folders \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq
+```
+
+#### Create Folder
+```bash
+curl -X POST http://localhost:8000/api/tools/create_folder \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "folder_name": "Project Archive",
+    "parent_folder": "Inbox"
+  }' | jq
+```
+
+#### Rename Folder
+```bash
+curl -X POST http://localhost:8000/api/tools/rename_folder \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "folder_name": "Old Name",
+    "new_folder_name": "New Name"
+  }' | jq
+```
+
+### Out-of-Office Tools
+
+#### Set Out-of-Office
+```bash
+curl -X POST http://localhost:8000/api/tools/set_oof_settings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "state": "enabled",
+    "internal_reply": "I am out of office",
+    "external_reply": "I am currently unavailable",
+    "start_time": "2025-01-20T00:00:00",
+    "end_time": "2025-01-25T23:59:59"
+  }' | jq
+```
+
+#### Get Out-of-Office Settings
+```bash
+curl -X POST http://localhost:8000/api/tools/get_oof_settings \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq
+```
+
+## Response Format
+
+All REST API endpoints return JSON responses in this format:
+
+### Success Response
+```json
+{
+  "success": true,
+  "data": {
+    // Tool-specific response data
+  },
+  "message": "Operation completed successfully"
+}
+```
+
+### Error Response
+```json
+{
+  "success": false,
+  "error": "Error message describing what went wrong",
+  "tool": "tool_name",
+  "status": 500
+}
+```
+
+## Migration from MCPO
+
+If you were previously using MCPO, here's how to migrate:
+
+### Before (with MCPO)
+```
+Open WebUI → MCPO (port 9000) → EWS MCP (port 8001)
+```
+
+### After (unified server)
+```
+Open WebUI → EWS MCP (port 8000)
+```
+
+### Migration Steps
+
+1. **Stop old services**:
+   ```bash
+   docker-compose down
+   ```
+
+2. **Update to latest code**:
+   ```bash
+   git pull origin main
+   ```
+
+3. **Update Open WebUI configuration**:
+   - Remove old MCPO API configuration
+   - Add new EWS MCP API: `http://ews-mcp:8000`
+
+4. **Restart services**:
+   ```bash
+   ./start-openwebui.sh
+   ```
+
+5. **Verify**:
+   - Check that Open WebUI discovers all tools
+   - Test a few operations to ensure they work
 
 ## Troubleshooting
 
-### OpenAPI Schema Not Loading
+### Server won't start
 
-**Problem**: Open WebUI can't fetch schema
 ```bash
-# Check if server is running
+# Check logs
+docker-compose -f docker-compose.openwebui.yml logs ews-mcp
+
+# Verify .env file exists and has correct credentials
+cat .env
+
+# Test Exchange connection manually
+docker-compose -f docker-compose.openwebui.yml exec ews-mcp python -c "
+from src.ews_client import EWSClient
+from src.config import get_settings
+client = EWSClient(get_settings())
+print(client.test_connection())
+"
+```
+
+### Open WebUI can't discover tools
+
+```bash
+# Verify OpenAPI endpoint is accessible
+curl http://localhost:8000/openapi.json | jq
+
+# Check if running in Docker network
+docker network ls | grep mcp-network
+
+# Verify Open WebUI can reach EWS MCP
+docker-compose -f docker-compose.openwebui.yml exec open-webui curl http://ews-mcp:8000/health
+```
+
+### Tool execution fails
+
+```bash
+# Check tool availability
 curl http://localhost:8000/health
 
-# Check OpenAPI endpoint
-curl http://localhost:8000/openapi.json
+# Test tool directly via REST API
+curl -X POST http://localhost:8000/api/tools/read_emails \
+  -H 'Content-Type: application/json' \
+  -d '{"max_results": 1}' | jq
+
+# Check server logs for detailed error
+docker-compose -f docker-compose.openwebui.yml logs -f ews-mcp
 ```
 
-**Solution**: Ensure server is running and accessible from Open WebUI container
+### Performance issues
 
-### Tools Not Appearing in Open WebUI
-
-**Problem**: Tools don't show up after adding connection
-
-**Check**:
-1. Verify OpenAPI schema is valid: `curl http://localhost:8000/openapi.json | jq`
-2. Check Open WebUI logs for errors
-3. Restart Open WebUI to force re-fetch
-
-### Network Connectivity
-
-If using Docker networks:
 ```bash
-# Check connectivity from Open WebUI container
-docker exec open-webui curl http://ews-mcp:8000/health
+# Check resource usage
+docker stats ews-mcp-server
 
-# Or use host network mode
-docker run --network host ...
+# Reduce tool load by disabling categories
+# In .env:
+ENABLE_AI_TOOLS=false
+
+# Restart
+docker-compose -f docker-compose.openwebui.yml restart ews-mcp
 ```
 
-### REST API Returns 404
+## Advanced Configuration
 
-**Problem**: `/api/tools/tool_name` returns 404
+### Custom Port
 
-**Check**:
-- Tool name is correct (use `/openapi.json` to list available tools)
-- Using POST method (not GET)
-- Server is fully started and tools are registered
+Edit `docker-compose.openwebui.yml`:
+
+```yaml
+services:
+  ews-mcp:
+    ports:
+      - "9000:8000"  # Map external port 9000 to internal 8000
+    environment:
+      - MCP_PORT=8000  # Keep internal port as 8000
+```
+
+### Enable AI Tools
+
+Add to `.env`:
+
+```env
+ENABLE_AI_TOOLS=true
+AI_PROVIDER=openai
+AI_API_KEY=sk-...
+```
+
+### Custom Timezone
+
+Add to `.env`:
+
+```env
+TIMEZONE=America/New_York
+```
+
+### Logging Level
+
+Add to `.env`:
+
+```env
+LOG_LEVEL=DEBUG  # DEBUG, INFO, WARNING, ERROR
+```
 
 ## Security Considerations
 
-### Authentication
+1. **Never expose port 8000 to the public internet** without proper authentication
+2. **Use HTTPS** in production with a reverse proxy (nginx, Caddy)
+3. **Rotate credentials** regularly in your `.env` file
+4. **Monitor logs** for suspicious activity
+5. **Use network isolation** - keep EWS MCP in private Docker network
 
-Currently, the REST API doesn't require authentication. For production:
+## Production Deployment
 
-```python
-# Add API key middleware
-# In src/main.py, check for Authorization header
-```
+### With Nginx Reverse Proxy
 
-### Network Security
-
-1. **Use TLS/SSL**: Put server behind reverse proxy with TLS
-2. **Firewall**: Only allow connections from Open WebUI
-3. **Rate Limiting**: Enable rate limiting in config
-
-Example Nginx config:
 ```nginx
 server {
-    listen 443 ssl;
-    server_name ews-mcp.yourdomain.com;
+    listen 443 ssl http2;
+    server_name ews-api.example.com;
 
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
 
     location / {
         proxy_pass http://localhost:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE support
+        proxy_buffering off;
+        proxy_cache off;
     }
 }
 ```
 
-## Performance Tips
+### With Authentication
 
-### Connection Pooling
-The server reuses Exchange connections. Monitor with:
-```bash
-curl http://localhost:8000/health
-```
-
-### Request Timeout
-Adjust timeout for large operations:
-```env
-REQUEST_TIMEOUT=300  # 5 minutes
-```
-
-### Concurrent Requests
-The async server handles concurrent requests efficiently. No special configuration needed.
-
-## Monitoring
-
-### Health Check
-```bash
-# Simple health check
-curl http://localhost:8000/health
-
-# Should return:
-# {"status":"ok","tools":44}
-```
-
-### Server Logs
-```bash
-# View logs
-docker-compose -f docker-compose.openwebui.yml logs -f ews-mcp
-
-# Filter for errors
-docker-compose -f docker-compose.openwebui.yml logs ews-mcp | grep ERROR
-```
-
-### Metrics
-Enable structured logging in `.env`:
-```env
-LOG_LEVEL=INFO
-ENABLE_AUDIT_LOG=true
-```
-
-## Migration from MCPO
-
-If you were using MCPO before:
-
-### What Changed
-- ✅ No separate MCPO container needed
-- ✅ Port changed from 9000 → 8000
-- ✅ Direct connection to EWS MCP
-- ✅ Same functionality, simpler setup
-
-### Update Open WebUI
-1. Remove old MCPO connection
-2. Add new connection pointing to `http://localhost:8000`
-3. Tools will auto-discover
-
-### Update Docker Compose
-```bash
-# Stop old setup
-docker-compose -f docker-compose.openwebui.yml down
-
-# Pull latest code
-git pull
-
-# Start new setup
-./start-openwebui.sh
-```
+Consider adding API key authentication at the reverse proxy level or implementing OAuth2.
 
 ## Support
 
-### Resources
-- [MCP Protocol Specification](https://spec.modelcontextprotocol.io/)
-- [Open WebUI Documentation](https://docs.openwebui.com/)
-- [EWS MCP GitHub](https://github.com/azizmazrou/ews-mcp)
+- **GitHub Issues**: [https://github.com/azizmazrou/ews-mcp/issues](https://github.com/azizmazrou/ews-mcp/issues)
+- **Documentation**: See README.md for general MCP usage
+- **OpenAPI Spec**: `http://localhost:8000/openapi.json`
 
-### Common Issues
-See [Troubleshooting](#troubleshooting) section above
+## License
 
-## Next Steps
-
-1. **Test the REST API** with curl commands above
-2. **Configure Open WebUI** to connect to the server
-3. **Try sample queries** in Open WebUI chat
-4. **Enable monitoring** with health checks and logs
-5. **Set up TLS** for production deployments
-
----
-
-**Note**: The server now provides both MCP SSE and REST API on port 8000. No separate MCPO proxy is needed!
+MIT License - see LICENSE file for details.
