@@ -173,10 +173,13 @@ class GetCalendarTool(BaseTool):
 
             max_results = kwargs.get("max_results", 50)
 
-            # Query calendar
+            # Query calendar - use only() to fetch specific fields and avoid timezone parsing warnings
             items = self.ews_client.account.calendar.view(
                 start=start_date,
                 end=end_date
+            ).only(
+                'id', 'subject', 'start', 'end', 'location',
+                'organizer', 'is_all_day', 'required_attendees'
             ).order_by('start')
 
             # Format events
