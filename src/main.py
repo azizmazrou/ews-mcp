@@ -398,17 +398,53 @@ class EWSMCPServer:
         # Create raw ASGI handler for SSE endpoint
         async def handle_sse(scope, receive, send):
             """Handle SSE connection endpoint."""
-            async with sse.connect_sse(scope, receive, send) as streams:
-                await self.server.run(
-                    streams[0],
-                    streams[1],
-                    self.server.create_initialization_options(),
-                )
+            try:
+                async with sse.connect_sse(scope, receive, send) as streams:
+                    await self.server.run(
+                        streams[0],
+                        streams[1],
+                        self.server.create_initialization_options(),
+                    )
+            except Exception as e:
+                # Log but don't crash - client may have disconnected
+                self.logger.warning(f"SSE connection closed: {type(e).__name__}: {e}")
+                # Don't try to send error response if connection is broken
+                if "BrokenResource" not in str(type(e).__name__):
+                    try:
+                        await send({
+                            "type": "http.response.start",
+                            "status": 500,
+                            "headers": [[b"content-type", b"text/plain"]],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": b"Internal Server Error",
+                        })
+                    except Exception:
+                        pass  # Connection already broken
 
         # Create raw ASGI handler for messages endpoint
         async def handle_messages(scope, receive, send):
             """Handle POST messages endpoint."""
-            await sse.handle_post_message(scope, receive, send)
+            try:
+                await sse.handle_post_message(scope, receive, send)
+            except Exception as e:
+                # Log but don't crash - client may have disconnected
+                self.logger.warning(f"Message handling failed: {type(e).__name__}: {e}")
+                # Don't try to send error response if connection is broken
+                if "BrokenResource" not in str(type(e).__name__):
+                    try:
+                        await send({
+                            "type": "http.response.start",
+                            "status": 500,
+                            "headers": [[b"content-type", b"application/json"]],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": b'{"error": "Internal Server Error"}',
+                        })
+                    except Exception:
+                        pass  # Connection already broken
 
         # Create a simple ASGI router that bypasses Starlette's response handling
         async def app(scope, receive, send):
