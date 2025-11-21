@@ -69,6 +69,20 @@ class OpenAPIAdapter:
                                 }
                             }
                         },
+                        "404": {
+                            "description": "Tool not found",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "error": {"type": "string"},
+                                            "available_tools": {"type": "array", "items": {"type": "string"}}
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         "500": {
                             "description": "Internal server error",
                             "content": {
@@ -76,7 +90,8 @@ class OpenAPIAdapter:
                                     "schema": {
                                         "type": "object",
                                         "properties": {
-                                            "error": {"type": "string"}
+                                            "error": {"type": "string"},
+                                            "tool": {"type": "string"}
                                         }
                                     }
                                 }
@@ -91,7 +106,9 @@ class OpenAPIAdapter:
             "openapi": "3.0.0",
             "info": {
                 "title": "Exchange Web Services (EWS) MCP API",
-                "description": "REST API for Exchange operations via Model Context Protocol",
+                "description": "REST API for Exchange operations via Model Context Protocol. "
+                              "This API exposes all EWS MCP tools as REST endpoints, eliminating "
+                              "the need for external OpenAPI adapters like MCPO.",
                 "version": "3.0.0",
                 "contact": {
                     "name": "EWS MCP Server",
@@ -102,42 +119,83 @@ class OpenAPIAdapter:
                 {
                     "url": "http://localhost:8000",
                     "description": "Local development server"
+                },
+                {
+                    "url": "http://ews-mcp:8000",
+                    "description": "Docker container"
                 }
             ],
             "paths": paths,
             "tags": [
-                {"name": "Email", "description": "Email operations"},
-                {"name": "Calendar", "description": "Calendar operations"},
-                {"name": "Contacts", "description": "Contact operations"},
-                {"name": "Tasks", "description": "Task operations"},
-                {"name": "Attachments", "description": "Attachment operations"},
-                {"name": "Search", "description": "Search operations"},
-                {"name": "Folders", "description": "Folder operations"},
-                {"name": "Out-of-Office", "description": "Out-of-office settings"}
+                {"name": "Email", "description": "Email operations - send, read, search, update, delete"},
+                {"name": "Calendar", "description": "Calendar operations - appointments, meetings, availability"},
+                {"name": "Contacts", "description": "Contact management - create, search, update"},
+                {"name": "Tasks", "description": "Task operations - create, update, complete"},
+                {"name": "Attachments", "description": "File attachment operations"},
+                {"name": "Search", "description": "Advanced search and full-text search"},
+                {"name": "Folders", "description": "Folder management operations"},
+                {"name": "Out-of-Office", "description": "Out-of-office automatic replies"}
+            ],
+            "components": {
+                "securitySchemes": {
+                    "basicAuth": {
+                        "type": "http",
+                        "scheme": "basic",
+                        "description": "Exchange credentials passed via environment variables"
+                    }
+                }
+            },
+            "security": [
+                {"basicAuth": []}
             ]
         }
 
     def _convert_input_schema(self, mcp_schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert MCP input schema to OpenAPI schema."""
+        """Convert MCP input schema to OpenAPI schema.
+
+        Args:
+            mcp_schema: MCP JSON Schema input schema
+
+        Returns:
+            OpenAPI-compatible schema
+        """
         # MCP schemas are already JSON Schema compatible
+        # Just ensure we have the right structure
+        if not mcp_schema:
+            return {"type": "object", "properties": {}}
         return mcp_schema
 
     def _get_tool_category(self, tool_name: str) -> str:
-        """Determine tool category from tool name."""
-        if any(x in tool_name for x in ["email", "send", "read", "search_email", "move_email", "delete_email", "update_email", "copy_email"]):
+        """Determine tool category from tool name.
+
+        Args:
+            tool_name: Name of the tool
+
+        Returns:
+            Category name for grouping in OpenAPI docs
+        """
+        # Email tools
+        if any(x in tool_name for x in ["email", "send", "read", "search_emails", "move_email", "delete_email", "update_email", "copy_email", "get_email_details"]):
             return "Email"
-        elif any(x in tool_name for x in ["appointment", "calendar", "meeting", "availability"]):
+        # Calendar tools
+        elif any(x in tool_name for x in ["appointment", "calendar", "meeting", "availability", "respond_to_meeting", "find_meeting_times"]):
             return "Calendar"
-        elif any(x in tool_name for x in ["contact", "person", "communication", "network"]):
+        # Contact tools
+        elif any(x in tool_name for x in ["contact", "person", "resolve_names", "search_contacts", "get_contacts"]):
             return "Contacts"
+        # Task tools
         elif any(x in tool_name for x in ["task", "complete"]):
             return "Tasks"
-        elif any(x in tool_name for x in ["attachment", "download", "upload"]):
+        # Attachment tools
+        elif any(x in tool_name for x in ["attachment", "download", "upload", "read_attachment"]):
             return "Attachments"
-        elif any(x in tool_name for x in ["search", "conversation", "full_text"]):
+        # Search tools
+        elif any(x in tool_name for x in ["advanced_search", "conversation", "full_text"]):
             return "Search"
-        elif any(x in tool_name for x in ["folder", "rename", "move_folder"]):
+        # Folder tools
+        elif any(x in tool_name for x in ["folder", "rename", "move_folder", "list_folders"]):
             return "Folders"
+        # Out-of-Office tools
         elif any(x in tool_name for x in ["oof", "out_of_office"]):
             return "Out-of-Office"
         return "Other"
@@ -150,15 +208,18 @@ class OpenAPIAdapter:
             body: Request body bytes
 
         Returns:
-            Response dictionary
+            Response dictionary with status code
         """
         try:
             # Parse request body
             try:
-                arguments = json.loads(body.decode('utf-8'))
+                if body:
+                    arguments = json.loads(body.decode('utf-8'))
+                else:
+                    arguments = {}
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 return {
-                    "error": f"Invalid JSON in request body: {e}",
+                    "error": f"Invalid JSON in request body: {str(e)}",
                     "status": 400
                 }
 
@@ -174,6 +235,7 @@ class OpenAPIAdapter:
             tool = self.tools[tool_name]
             result = await tool.safe_execute(**arguments)
 
+            # Return successful response
             return {
                 "success": result.get("success", False),
                 "data": result,
@@ -182,6 +244,7 @@ class OpenAPIAdapter:
             }
 
         except Exception as e:
+            # Return error response
             return {
                 "error": f"Tool execution failed: {str(e)}",
                 "tool": tool_name,
