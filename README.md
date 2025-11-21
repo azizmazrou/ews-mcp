@@ -324,8 +324,29 @@ EOF
 |----------|---------|-------------|
 | `EWS_SERVER_URL` | autodiscover | Exchange EWS endpoint |
 | `EWS_AUTODISCOVER` | `true` | Use autodiscovery |
-| `TIMEZONE` | `UTC` | Timezone for operations |
+| `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio` (Claude Desktop) or `sse` (HTTP/REST) |
+| `MCP_HOST` | `0.0.0.0` | Host for SSE server (when MCP_TRANSPORT=sse) |
+| `MCP_PORT` | `8000` | Port for SSE server (when MCP_TRANSPORT=sse) |
+| `TIMEZONE` | `UTC` | Timezone for operations (use IANA names: UTC, America/New_York) |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+
+### OpenAPI/REST API Variables (Optional)
+
+> **Note:** Only needed when using MCP_TRANSPORT=sse or integrating with Open WebUI
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `API_BASE_URL` | `http://localhost:{MCP_PORT}` | External URL for API access (e.g., `https://ews-api.company.com`) |
+| `API_BASE_URL_INTERNAL` | `http://ews-mcp:{MCP_PORT}` | Internal Docker network URL |
+| `API_TITLE` | `Exchange Web Services (EWS) MCP API` | Customize API title in OpenAPI schema |
+| `API_DESCRIPTION` | Auto-generated | Customize API description |
+| `API_VERSION` | `3.0.0` | API version number |
+
+**Use Cases for Custom URLs:**
+- Behind reverse proxy: `API_BASE_URL=https://api.company.com/ews`
+- Cloud deployment: `API_BASE_URL=https://ews-api.us-east-1.mycloud.com`
+- Custom Docker network: `API_BASE_URL_INTERNAL=http://my-service:9000`
+- See [OPENWEBUI_SETUP.md](OPENWEBUI_SETUP.md) for detailed examples
 
 ### Optional Variables
 
@@ -849,12 +870,22 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed solutions.
 
 ## Documentation
 
+### Core Documentation
 - [Setup Guide](docs/SETUP.md) - Step-by-step setup instructions
 - [Deployment Guide](docs/DEPLOYMENT.md) - Deploy to various platforms
 - [GHCR Guide](docs/GHCR.md) - Using pre-built Docker images
 - [API Documentation](docs/API.md) - Complete tool reference
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
 - [Architecture Overview](docs/ARCHITECTURE.md) - Technical deep dive
+
+### Integration Guides
+- **[Open WebUI Setup](OPENWEBUI_SETUP.md)** - Integrate with Open WebUI via REST API
+  - Built-in OpenAPI/REST support (no MCPO needed!)
+  - Configurable API URLs for any deployment
+  - Auto-discovery of all 43+ Exchange tools
+  - Production deployment examples
+
+### Version History
 - [v3.0 Implementation Summary](docs/V3_IMPLEMENTATION_SUMMARY.md) - What's new in v3.0
 
 ---
