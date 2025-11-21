@@ -21,6 +21,7 @@ from .middleware.error_handler import ErrorHandler
 from .middleware.rate_limiter import RateLimiter
 from .exceptions import EWSMCPException
 from .logging_system import get_logger
+from .openapi_adapter import OpenAPIAdapter
 
 # Import all tool classes (up to 47 tools total: 43 base + 4 AI)
 from .tools import (
@@ -94,6 +95,9 @@ class EWSMCPServer:
 
         # Tool registry
         self.tools = {}
+
+        # OpenAPI adapter (initialized after tools are registered)
+        self.openapi_adapter = None
 
         # Register handlers
         self._register_handlers()
@@ -313,6 +317,10 @@ class EWSMCPServer:
 
         self.logger.info(f"Registered {len(self.tools)} tools: {', '.join(self.tools.keys())}")
 
+        # Initialize OpenAPI adapter
+        self.openapi_adapter = OpenAPIAdapter(self.server, self.tools)
+        self.logger.info("OpenAPI adapter initialized")
+
     async def run(self):
         """Run the MCP server with comprehensive logging."""
         try:
@@ -446,17 +454,84 @@ class EWSMCPServer:
                     except Exception:
                         pass  # Connection already broken
 
-        # Create a simple ASGI router that bypasses Starlette's response handling
+        # Create a simple ASGI router that handles both MCP and REST endpoints
         async def app(scope, receive, send):
-            """Simple ASGI router for MCP SSE transport."""
+            """ASGI router for MCP SSE transport + REST API."""
             if scope["type"] == "http":
                 path = scope["path"]
                 method = scope["method"]
 
+                # MCP SSE endpoints
                 if path == "/sse" and method == "GET":
                     await handle_sse(scope, receive, send)
                 elif path == "/messages" and method == "POST":
                     await handle_messages(scope, receive, send)
+
+                # OpenAPI/REST endpoints
+                elif path == "/openapi.json" and method == "GET":
+                    # Return OpenAPI schema
+                    import json
+                    schema = self.openapi_adapter.generate_openapi_schema()
+                    body = json.dumps(schema, indent=2).encode('utf-8')
+                    await send({
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(body)).encode()],
+                        ],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": body,
+                    })
+
+                elif path.startswith("/api/tools/") and method == "POST":
+                    # Execute tool via REST API
+                    tool_name = path.replace("/api/tools/", "")
+
+                    # Read request body
+                    body_parts = []
+                    while True:
+                        message = await receive()
+                        if message["type"] == "http.request":
+                            body_parts.append(message.get("body", b""))
+                            if not message.get("more_body", False):
+                                break
+                    body = b"".join(body_parts)
+
+                    # Execute tool
+                    result = await self.openapi_adapter.handle_rest_request(tool_name, body)
+                    status = result.pop("status", 200)
+
+                    # Send response
+                    import json
+                    response_body = json.dumps(result).encode('utf-8')
+                    await send({
+                        "type": "http.response.start",
+                        "status": status,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(response_body)).encode()],
+                        ],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": response_body,
+                    })
+
+                elif path == "/health" and method == "GET":
+                    # Health check
+                    await send({
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [[b"content-type", b"application/json"]],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"status":"ok","tools":' + str(len(self.tools)).encode() + b'}',
+                    })
+
                 else:
                     # Return 404 for unknown routes
                     await send({
