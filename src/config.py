@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     timezone: str = "UTC"
     log_level: str = "INFO"
 
+    # OpenAPI/REST API Configuration
+    api_base_url: Optional[str] = None  # External URL for API (e.g., https://api.example.com)
+    api_base_url_internal: Optional[str] = None  # Internal Docker URL (e.g., http://ews-mcp:8000)
+    api_title: str = "Exchange Web Services (EWS) MCP API"
+    api_description: str = "REST API for Exchange operations via Model Context Protocol"
+    api_version: str = "3.0.0"
+
     # Performance
     enable_cache: bool = True
     cache_ttl: int = 300
@@ -104,6 +111,43 @@ class Settings(BaseSettings):
                     self.ai_embedding_model = "text-embedding-3-small"
 
         return self
+
+    def get_api_base_urls(self) -> list[dict[str, str]]:
+        """Get API base URLs for OpenAPI schema.
+
+        Returns list of server URLs with descriptions.
+        Falls back to default localhost/docker URLs if not configured.
+        """
+        servers = []
+
+        # Add external URL if configured
+        if self.api_base_url:
+            servers.append({
+                "url": self.api_base_url,
+                "description": "External API endpoint"
+            })
+
+        # Add internal Docker URL if configured
+        if self.api_base_url_internal:
+            servers.append({
+                "url": self.api_base_url_internal,
+                "description": "Internal Docker network"
+            })
+
+        # If no URLs configured, use defaults
+        if not servers:
+            servers = [
+                {
+                    "url": f"http://localhost:{self.mcp_port}",
+                    "description": "Local development server"
+                },
+                {
+                    "url": f"http://ews-mcp:{self.mcp_port}",
+                    "description": "Docker container (internal network)"
+                }
+            ]
+
+        return servers
 
 
 # Singleton instance - lazy loading

@@ -24,6 +24,15 @@ services:
       - MCP_PORT=8000
       - MCP_SERVER_NAME=ews-mcp-server
 
+      # OpenAPI/REST API Configuration (Optional - customize API URLs)
+      # External URL for accessing API from outside (e.g., https://api.example.com)
+      - API_BASE_URL=${API_BASE_URL:-}
+      # Internal Docker network URL (e.g., http://ews-mcp:8000)
+      - API_BASE_URL_INTERNAL=${API_BASE_URL_INTERNAL:-}
+      # Customize API metadata
+      - API_TITLE=${API_TITLE:-Exchange Web Services (EWS) MCP API}
+      - API_VERSION=${API_VERSION:-3.0.0}
+
       # Timezone Configuration
       - TIMEZONE=${TIMEZONE:-Asia/Riyadh}
 
