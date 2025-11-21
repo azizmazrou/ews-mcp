@@ -1,22 +1,24 @@
 """OpenAPI adapter for MCP tools - provides REST API compatibility."""
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 
 class OpenAPIAdapter:
     """Converts MCP tools to OpenAPI/REST endpoints."""
 
-    def __init__(self, server, tools: Dict[str, Any]):
+    def __init__(self, server, tools: Dict[str, Any], settings: Optional[Any] = None):
         """Initialize OpenAPI adapter.
 
         Args:
             server: MCP server instance
             tools: Dictionary of tool name -> tool instance
+            settings: Application settings (optional, for URL configuration)
         """
         self.server = server
         self.tools = tools
+        self.settings = settings
 
     def generate_openapi_schema(self) -> Dict[str, Any]:
         """Generate OpenAPI 3.0 schema from MCP tools."""
@@ -102,29 +104,42 @@ class OpenAPIAdapter:
                 }
             }
 
-        return {
-            "openapi": "3.0.0",
-            "info": {
-                "title": "Exchange Web Services (EWS) MCP API",
-                "description": "REST API for Exchange operations via Model Context Protocol. "
-                              "This API exposes all EWS MCP tools as REST endpoints, eliminating "
-                              "the need for external OpenAPI adapters like MCPO.",
-                "version": "3.0.0",
-                "contact": {
-                    "name": "EWS MCP Server",
-                    "url": "https://github.com/azizmazrou/ews-mcp"
-                }
-            },
-            "servers": [
+        # Get server URLs from settings or use defaults
+        if self.settings:
+            servers = self.settings.get_api_base_urls()
+            api_title = self.settings.api_title
+            api_description = self.settings.api_description
+            api_version = self.settings.api_version
+        else:
+            # Fallback defaults if no settings provided
+            servers = [
                 {
                     "url": "http://localhost:8000",
                     "description": "Local development server"
                 },
                 {
                     "url": "http://ews-mcp:8000",
-                    "description": "Docker container"
+                    "description": "Docker container (internal network)"
                 }
-            ],
+            ]
+            api_title = "Exchange Web Services (EWS) MCP API"
+            api_description = "REST API for Exchange operations via Model Context Protocol"
+            api_version = "3.0.0"
+
+        return {
+            "openapi": "3.0.0",
+            "info": {
+                "title": api_title,
+                "description": f"{api_description}. "
+                              "This API exposes all EWS MCP tools as REST endpoints, eliminating "
+                              "the need for external OpenAPI adapters like MCPO.",
+                "version": api_version,
+                "contact": {
+                    "name": "EWS MCP Server",
+                    "url": "https://github.com/azizmazrou/ews-mcp"
+                }
+            },
+            "servers": servers,
             "paths": paths,
             "tags": [
                 {"name": "Email", "description": "Email operations - send, read, search, update, delete"},
