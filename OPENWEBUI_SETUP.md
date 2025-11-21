@@ -2,303 +2,394 @@
 
 ## Overview
 
-Open WebUI doesn't natively support SSE-based MCP servers. You need to use **MCPO** (MCP-to-OpenAPI proxy) as a bridge to translate your SSE-based EWS MCP server into OpenAPI-compatible endpoints.
+The EWS MCP Server now has **built-in OpenAPI/REST support**, eliminating the need for MCPO as a separate bridge. The server exposes both MCP SSE endpoints (for MCP clients like Claude Desktop) and REST API endpoints (for Open WebUI and other HTTP clients) on the same port.
 
 ## Architecture
 
 ```
-Open WebUI → MCPO (Port 8000) → EWS MCP Server (Port 8000 internally)
+Open WebUI → EWS MCP Server (Port 8000)
+             ├─ GET  /sse                    (MCP SSE connection)
+             ├─ POST /messages               (MCP messages)
+             ├─ GET  /openapi.json           (OpenAPI 3.0 schema)
+             ├─ POST /api/tools/{tool_name}  (REST tool execution)
+             └─ GET  /health                 (Health check)
 ```
 
-## Setup Options
+**Benefits:**
+- ✅ Single server for both MCP and REST protocols
+- ✅ No additional proxy needed
+- ✅ Simplified deployment
+- ✅ Direct tool invocation via REST API
+- ✅ Auto-generated OpenAPI schema
 
-### Option 1: Using Docker Compose (Recommended)
+## Quick Start
 
-Create `docker-compose.openwebui.yml`:
+### Using the Automated Script (Easiest)
 
-```yaml
-version: '3.8'
-
-services:
-  # Your EWS MCP Server
-  ews-mcp:
-    build: .
-    container_name: ews-mcp-server
-    ports:
-      - "8001:8000"  # Expose on port 8001 externally
-    environment:
-      - EWS_EMAIL=${EWS_EMAIL}
-      - EWS_PASSWORD=${EWS_PASSWORD}
-      - EWS_SERVER_URL=${EWS_SERVER_URL}
-      - EWS_AUTH_TYPE=${EWS_AUTH_TYPE}
-      - MCP_TRANSPORT=sse
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=8000
-    networks:
-      - mcp-network
-    restart: unless-stopped
-
-  # MCPO Proxy (Bridge to Open WebUI)
-  mcpo:
-    image: openwebui/mcpo:latest
-    container_name: mcpo-proxy
-    ports:
-      - "9000:8000"  # MCPO on port 9000
-    command: >
-      --port 8000
-      --api-key "${MCPO_API_KEY:-your-secret-key}"
-      --server-type "sse"
-      --
-      http://ews-mcp:8000/sse
-    networks:
-      - mcp-network
-    depends_on:
-      - ews-mcp
-    restart: unless-stopped
-
-  # Open WebUI (Optional - if you don't have it running)
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    ports:
-      - "3000:8080"
-    volumes:
-      - open-webui-data:/app/backend/data
-    environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-    networks:
-      - mcp-network
-    restart: unless-stopped
-
-networks:
-  mcp-network:
-    driver: bridge
-
-volumes:
-  open-webui-data:
-```
-
-**Start the stack:**
 ```bash
+# Run the setup script
+./start-openwebui.sh
+```
+
+This will:
+1. Validate your `.env` file
+2. Build and start the EWS MCP server
+3. Display available endpoints
+4. Show next steps for Open WebUI configuration
+
+### Manual Setup with Docker Compose
+
+Use the provided `docker-compose.openwebui.yml`:
+
+```bash
+# Start the server
 docker-compose -f docker-compose.openwebui.yml up -d
+
+# Check health
+curl http://localhost:8000/health
+
+# View OpenAPI schema
+curl http://localhost:8000/openapi.json
+
+# View logs
+docker-compose -f docker-compose.openwebui.yml logs -f
 ```
 
-### Option 2: Manual Setup with MCPO
+### Using Existing Docker Setup
 
-#### 1. Start your EWS MCP Server
+If you already have the server running:
+
 ```bash
-# Make sure your server is running on port 8001
-docker-compose up -d
-```
+# The server now exposes REST endpoints by default
+# No configuration change needed!
 
-#### 2. Run MCPO
-```bash
-# Using Docker
-docker run -d \
-  --name mcpo-proxy \
-  --network host \
-  -p 9000:8000 \
-  openwebui/mcpo:latest \
-  --port 8000 \
-  --api-key "your-secret-key" \
-  --server-type "sse" \
-  -- \
-  http://localhost:8001/sse
-
-# Or using npx (if you have Node.js)
-npx @openwebui/mcpo \
-  --port 9000 \
-  --api-key "your-secret-key" \
-  --server-type "sse" \
-  -- \
-  http://localhost:8001/sse
-```
-
-### Option 3: MCPO with Configuration File
-
-Create `mcpo-config.json`:
-
-```json
-{
-  "mcpServers": {
-    "ews-exchange": {
-      "type": "sse",
-      "url": "http://localhost:8001/sse",
-      "headers": {
-        "Authorization": "Bearer your-token-if-needed"
-      }
-    }
-  }
-}
-```
-
-Run MCPO with config:
-```bash
-docker run -d \
-  --name mcpo-proxy \
-  --network host \
-  -v $(pwd)/mcpo-config.json:/app/config.json \
-  -p 9000:8000 \
-  openwebui/mcpo:latest \
-  --config /app/config.json \
-  --port 8000 \
-  --api-key "your-secret-key"
+# Test OpenAPI endpoint
+curl http://localhost:8000/openapi.json | jq
 ```
 
 ## Configure Open WebUI
 
 ### 1. Access Open WebUI Admin Panel
-- Navigate to: `http://localhost:3000` (or your Open WebUI URL)
-- Go to **Admin Settings** → **Connections**
+- Navigate to your Open WebUI instance
+- Go to **Admin Settings** → **Connections** → **External APIs**
 
-### 2. Add MCPO as an External API
-- **API Base URL**: `http://localhost:9000` (or your MCPO URL)
-- **API Key**: `your-secret-key` (same as MCPO_API_KEY)
+### 2. Add EWS MCP Server
+- **API Base URL**: `http://localhost:8000` (or your server URL)
 - **Name**: `Exchange Web Services`
+- **Description**: `Microsoft Exchange operations via MCP`
 
-### 3. Test the Connection
-Open WebUI will fetch the OpenAPI schema from MCPO and discover all 44 EWS tools.
+### 3. Auto-Discovery
+Open WebUI will automatically:
+- Fetch the OpenAPI schema from `/openapi.json`
+- Discover all 44 Exchange tools
+- Make them available in the chat interface
 
-## Available Tools in Open WebUI
+### 4. Test the Connection
+Try a simple query like:
+```
+"Read my last 5 emails"
+"Show me today's calendar"
+"Search my contacts for John"
+```
 
-Once configured, you'll have access to 44 Exchange tools:
+## Available Endpoints
+
+### MCP Protocol (for Claude Desktop, etc.)
+- `GET  /sse` - Server-Sent Events connection
+- `POST /messages` - Message handling
+
+### REST API (for Open WebUI, etc.)
+- `GET  /openapi.json` - OpenAPI 3.0 schema
+- `POST /api/tools/send_email` - Send email
+- `POST /api/tools/read_emails` - Read emails
+- `POST /api/tools/search_emails` - Search emails
+- `POST /api/tools/get_calendar` - Get calendar events
+- `POST /api/tools/create_contact` - Create contact
+- ... (44 tools total)
+
+### Utility
+- `GET  /health` - Health check endpoint
+
+## Testing the REST API
+
+### List Available Tools
+```bash
+# Get OpenAPI schema
+curl http://localhost:8000/openapi.json | jq '.paths | keys'
+```
+
+### Read Emails
+```bash
+curl -X POST http://localhost:8000/api/tools/read_emails \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "folder": "inbox",
+    "max_results": 5,
+    "unread_only": false
+  }'
+```
+
+### Search Emails
+```bash
+curl -X POST http://localhost:8000/api/tools/search_emails \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "subject_contains": "meeting",
+    "max_results": 10
+  }'
+```
+
+### Get Calendar
+```bash
+curl -X POST http://localhost:8000/api/tools/get_calendar \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "days_ahead": 7,
+    "max_results": 20
+  }'
+```
+
+### Create Contact
+```bash
+curl -X POST http://localhost:8000/api/tools/create_contact \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "given_name": "John",
+    "surname": "Doe",
+    "email_address": "john.doe@example.com",
+    "phone_number": "+1234567890"
+  }'
+```
+
+## Available Tools (44 Total)
 
 ### Email Tools (8)
-- send_email
-- read_emails
-- search_emails
-- get_email_details
-- delete_email
-- move_email
-- update_email
-- copy_email
+- `send_email` - Send email with attachments
+- `read_emails` - Read emails from folder
+- `search_emails` - Search with filters
+- `get_email_details` - Get full email details
+- `delete_email` - Delete or move to trash
+- `move_email` - Move between folders
+- `update_email` - Update flags/categories
+- `copy_email` - Copy to another folder
 
 ### Calendar Tools (7)
-- create_appointment
-- get_calendar
-- update_appointment
-- delete_appointment
-- respond_to_meeting
-- check_availability
-- find_meeting_times
+- `create_appointment` - Create calendar event
+- `get_calendar` - Retrieve events
+- `update_appointment` - Modify event
+- `delete_appointment` - Delete event
+- `respond_to_meeting` - Accept/decline
+- `check_availability` - Check free/busy
+- `find_meeting_times` - Find available slots
 
 ### Contact Tools (9)
-- create_contact
-- search_contacts
-- get_contacts
-- update_contact
-- delete_contact
-- resolve_names
-- find_person
-- get_communication_history
-- analyze_network
+- `create_contact` - Create new contact
+- `search_contacts` - Search contacts
+- `get_contacts` - List contacts
+- `update_contact` - Modify contact
+- `delete_contact` - Remove contact
+- `resolve_names` - Resolve email addresses
+- `find_person` - Smart person search
+- `get_communication_history` - Email history
+- `analyze_network` - Contact relationships
 
 ### Task Tools (5)
-- create_task
-- get_tasks
-- update_task
-- complete_task
-- delete_task
+- `create_task` - Create task
+- `get_tasks` - List tasks
+- `update_task` - Modify task
+- `complete_task` - Mark complete
+- `delete_task` - Remove task
 
-### Other Tools (15)
-- Attachments (5 tools)
-- Search (3 tools)
-- Folders (5 tools)
-- Out-of-Office (2 tools)
+### Attachment Tools (5)
+- `list_attachments` - List email attachments
+- `download_attachment` - Download file
+- `add_attachment` - Add to email
+- `delete_attachment` - Remove attachment
+- `read_attachment` - Read attachment content
+
+### Search Tools (3)
+- `advanced_search` - Multi-folder search
+- `search_by_conversation` - Conversation threads
+- `full_text_search` - Full-text search
+
+### Folder Tools (5)
+- `list_folders` - List all folders
+- `create_folder` - Create new folder
+- `delete_folder` - Delete folder
+- `rename_folder` - Rename folder
+- `move_folder` - Move folder
+
+### Out-of-Office Tools (2)
+- `set_oof_settings` - Set OOF message
+- `get_oof_settings` - Get OOF status
 
 ## Troubleshooting
 
-### MCPO Connection Issues
+### OpenAPI Schema Not Loading
 
-**Problem**: MCPO can't connect to EWS MCP server
+**Problem**: Open WebUI can't fetch schema
 ```bash
-# Check EWS MCP is running
-curl http://localhost:8001/sse
+# Check if server is running
+curl http://localhost:8000/health
 
-# Check MCPO logs
-docker logs mcpo-proxy
+# Check OpenAPI endpoint
+curl http://localhost:8000/openapi.json
 ```
 
-**Problem**: Open WebUI can't connect to MCPO
+**Solution**: Ensure server is running and accessible from Open WebUI container
+
+### Tools Not Appearing in Open WebUI
+
+**Problem**: Tools don't show up after adding connection
+
+**Check**:
+1. Verify OpenAPI schema is valid: `curl http://localhost:8000/openapi.json | jq`
+2. Check Open WebUI logs for errors
+3. Restart Open WebUI to force re-fetch
+
+### Network Connectivity
+
+If using Docker networks:
 ```bash
-# Check MCPO is running and accessible
-curl http://localhost:9000/openapi.json
+# Check connectivity from Open WebUI container
+docker exec open-webui curl http://ews-mcp:8000/health
 
-# Should return OpenAPI schema with all 44 tools
+# Or use host network mode
+docker run --network host ...
 ```
 
-### Network Issues
+### REST API Returns 404
 
-If using Docker networks, ensure all services are on the same network:
-```bash
-# Check network connectivity
-docker exec mcpo-proxy ping ews-mcp
-```
+**Problem**: `/api/tools/tool_name` returns 404
 
-### Authentication Issues
-
-If your EWS server requires authentication headers:
-```json
-{
-  "mcpServers": {
-    "ews-exchange": {
-      "type": "sse",
-      "url": "http://ews-mcp:8000/sse",
-      "headers": {
-        "Authorization": "Bearer ${YOUR_TOKEN}"
-      }
-    }
-  }
-}
-```
+**Check**:
+- Tool name is correct (use `/openapi.json` to list available tools)
+- Using POST method (not GET)
+- Server is fully started and tools are registered
 
 ## Security Considerations
 
-1. **API Key**: Use a strong API key for MCPO
-   ```bash
-   export MCPO_API_KEY=$(openssl rand -hex 32)
-   ```
+### Authentication
 
-2. **Network Isolation**: Run all services in a private Docker network
+Currently, the REST API doesn't require authentication. For production:
 
-3. **TLS/SSL**: For production, put MCPO behind a reverse proxy with TLS:
-   ```nginx
-   server {
-       listen 443 ssl;
-       server_name mcpo.yourdomain.com;
+```python
+# Add API key middleware
+# In src/main.py, check for Authorization header
+```
 
-       ssl_certificate /path/to/cert.pem;
-       ssl_certificate_key /path/to/key.pem;
+### Network Security
 
-       location / {
-           proxy_pass http://localhost:9000;
-           proxy_set_header Host $host;
-           proxy_set_header X-Real-IP $remote_addr;
-       }
-   }
-   ```
+1. **Use TLS/SSL**: Put server behind reverse proxy with TLS
+2. **Firewall**: Only allow connections from Open WebUI
+3. **Rate Limiting**: Enable rate limiting in config
+
+Example Nginx config:
+```nginx
+server {
+    listen 443 ssl;
+    server_name ews-mcp.yourdomain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://localhost:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+## Performance Tips
+
+### Connection Pooling
+The server reuses Exchange connections. Monitor with:
+```bash
+curl http://localhost:8000/health
+```
+
+### Request Timeout
+Adjust timeout for large operations:
+```env
+REQUEST_TIMEOUT=300  # 5 minutes
+```
+
+### Concurrent Requests
+The async server handles concurrent requests efficiently. No special configuration needed.
 
 ## Monitoring
 
-Check MCPO metrics and health:
+### Health Check
 ```bash
-# Health check
-curl http://localhost:9000/health
+# Simple health check
+curl http://localhost:8000/health
 
-# Metrics (if enabled)
-curl http://localhost:9000/metrics
+# Should return:
+# {"status":"ok","tools":44}
 ```
+
+### Server Logs
+```bash
+# View logs
+docker-compose -f docker-compose.openwebui.yml logs -f ews-mcp
+
+# Filter for errors
+docker-compose -f docker-compose.openwebui.yml logs ews-mcp | grep ERROR
+```
+
+### Metrics
+Enable structured logging in `.env`:
+```env
+LOG_LEVEL=INFO
+ENABLE_AUDIT_LOG=true
+```
+
+## Migration from MCPO
+
+If you were using MCPO before:
+
+### What Changed
+- ✅ No separate MCPO container needed
+- ✅ Port changed from 9000 → 8000
+- ✅ Direct connection to EWS MCP
+- ✅ Same functionality, simpler setup
+
+### Update Open WebUI
+1. Remove old MCPO connection
+2. Add new connection pointing to `http://localhost:8000`
+3. Tools will auto-discover
+
+### Update Docker Compose
+```bash
+# Stop old setup
+docker-compose -f docker-compose.openwebui.yml down
+
+# Pull latest code
+git pull
+
+# Start new setup
+./start-openwebui.sh
+```
+
+## Support
+
+### Resources
+- [MCP Protocol Specification](https://spec.modelcontextprotocol.io/)
+- [Open WebUI Documentation](https://docs.openwebui.com/)
+- [EWS MCP GitHub](https://github.com/azizmazrou/ews-mcp)
+
+### Common Issues
+See [Troubleshooting](#troubleshooting) section above
 
 ## Next Steps
 
-1. Start your EWS MCP server
-2. Start MCPO with your configuration
-3. Configure Open WebUI to connect to MCPO
-4. Test a simple tool like `read_emails` or `get_calendar`
-5. Monitor logs for any issues
+1. **Test the REST API** with curl commands above
+2. **Configure Open WebUI** to connect to the server
+3. **Try sample queries** in Open WebUI chat
+4. **Enable monitoring** with health checks and logs
+5. **Set up TLS** for production deployments
 
-## Resources
+---
 
-- [Open WebUI MCP Documentation](https://docs.openwebui.com/features/mcp/)
-- [MCPO GitHub Repository](https://github.com/open-webui/mcpo)
-- [MCP Protocol Specification](https://spec.modelcontextprotocol.io/)
+**Note**: The server now provides both MCP SSE and REST API on port 8000. No separate MCPO proxy is needed!

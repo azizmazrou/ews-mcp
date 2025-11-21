@@ -1,12 +1,12 @@
 version: '3.8'
 
 services:
-  # EWS MCP Server
+  # EWS MCP Server with built-in OpenAPI/REST support
   ews-mcp:
     build: .
     container_name: ews-mcp-server
     ports:
-      - "8001:8000"
+      - "8000:8000"  # Single port for both MCP SSE and REST API
     environment:
       # Exchange credentials
       - EWS_EMAIL=${EWS_EMAIL}
@@ -29,30 +29,6 @@ services:
       - ENABLE_TASKS=true
     networks:
       - mcp-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/sse"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # MCPO - Bridge between EWS MCP and Open WebUI
-  mcpo:
-    image: openwebui/mcpo:latest
-    container_name: mcpo-proxy
-    ports:
-      - "9000:8000"
-    command: >
-      --port 8000
-      --api-key "${MCPO_API_KEY:-change-this-secret-key}"
-      --server-type "sse"
-      --
-      http://ews-mcp:8000/sse
-    networks:
-      - mcp-network
-    depends_on:
-      ews-mcp:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
