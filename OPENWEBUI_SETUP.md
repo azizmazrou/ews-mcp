@@ -118,10 +118,15 @@ curl -X POST http://localhost:8000/api/tools/search_contacts \
    - Click "+ Add External API"
    - Fill in the details:
      ```
-     API Base URL: http://ews-mcp:8000
+     API Base URL: http://ews-mcp:8000  (or your custom API_BASE_URL)
      Name: Exchange Web Services
      Description: Access to Exchange emails, calendar, contacts, and tasks
      ```
+   - **Note**: If you configured `API_BASE_URL` in your `.env`, use that URL instead
+   - **Examples**:
+     - Docker: `http://ews-mcp:8000`
+     - Localhost: `http://localhost:8000`
+     - Custom domain: `https://ews-api.company.com`
    - Click "Save"
 
 4. **Auto-Discovery**:
@@ -645,6 +650,75 @@ services:
     environment:
       - MCP_PORT=8000  # Keep internal port as 8000
 ```
+
+### Configurable API URLs
+
+**NEW!** You can now customize the API base URLs shown in the OpenAPI schema. This is useful for:
+- Production deployments behind reverse proxies
+- Custom domains (e.g., https://ews-api.company.com)
+- Different network configurations
+- Kubernetes or cloud deployments
+
+Add to `.env`:
+
+```env
+# External URL (shown in OpenAPI schema for public access)
+API_BASE_URL=https://ews-api.example.com
+
+# Internal Docker network URL (for container-to-container communication)
+API_BASE_URL_INTERNAL=http://ews-mcp:8000
+
+# Customize API metadata (optional)
+API_TITLE=My Company Exchange API
+API_VERSION=1.0.0
+API_DESCRIPTION=Internal Exchange Web Services API
+```
+
+Or set in `docker-compose.openwebui.yml`:
+
+```yaml
+services:
+  ews-mcp:
+    environment:
+      - API_BASE_URL=https://ews-api.example.com
+      - API_BASE_URL_INTERNAL=http://ews-mcp:8000
+      - API_TITLE=My Company Exchange API
+```
+
+**Defaults if not configured:**
+- `http://localhost:8000` (Local development)
+- `http://ews-mcp:8000` (Docker internal network)
+
+**Use Cases:**
+
+1. **Behind Nginx Reverse Proxy:**
+   ```env
+   API_BASE_URL=https://api.company.com/ews
+   ```
+
+2. **Custom Docker Network:**
+   ```env
+   API_BASE_URL_INTERNAL=http://exchange-api:9000
+   ```
+
+3. **Cloud Deployment:**
+   ```env
+   API_BASE_URL=https://ews-api.us-east-1.mycloud.com
+   ```
+
+4. **Multiple Environments:**
+   ```env
+   # Development
+   API_BASE_URL=http://localhost:8000
+
+   # Staging
+   API_BASE_URL=https://ews-api-staging.company.com
+
+   # Production
+   API_BASE_URL=https://ews-api.company.com
+   ```
+
+The OpenAPI schema at `/openapi.json` will automatically use these configured URLs, making it easy for Open WebUI and other clients to discover the correct endpoints.
 
 ### Enable AI Tools
 

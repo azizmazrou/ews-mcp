@@ -317,9 +317,9 @@ class EWSMCPServer:
 
         self.logger.info(f"Registered {len(self.tools)} tools: {', '.join(self.tools.keys())}")
 
-        # Initialize OpenAPI adapter
-        self.openapi_adapter = OpenAPIAdapter(self.server, self.tools)
-        self.logger.info("OpenAPI adapter initialized")
+        # Initialize OpenAPI adapter with settings for configurable URLs
+        self.openapi_adapter = OpenAPIAdapter(self.server, self.tools, self.settings)
+        self.logger.info("OpenAPI adapter initialized with dynamic configuration")
 
     async def run(self):
         """Run the MCP server with comprehensive logging."""
