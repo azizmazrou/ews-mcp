@@ -5,7 +5,7 @@ from exchangelib.queryset import Q
 
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders
+from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, ews_id_to_str
 
 
 class AdvancedSearchTool(BaseTool):
@@ -369,7 +369,7 @@ class SearchByConversationTool(BaseTool):
 
                     for item in items:
                         result = {
-                            "id": safe_get(item, 'id', ''),
+                            "id": ews_id_to_str(safe_get(item, 'id', None)) or '',
                             "subject": safe_get(item, 'subject', ''),
                             "from": safe_get(safe_get(item, 'sender', {}), 'email_address', ''),
                             "to": [r.email_address for r in safe_get(item, 'to_recipients', []) if hasattr(r, 'email_address')],
@@ -542,7 +542,7 @@ class FullTextSearchTool(BaseTool):
                                 continue
 
                             result = {
-                                "id": safe_get(item, 'id', ''),
+                                "id": ews_id_to_str(safe_get(item, 'id', None)) or '',
                                 "subject": safe_get(item, 'subject', ''),
                                 "from": safe_get(safe_get(item, 'sender', {}), 'email_address', ''),
                                 "to": [r.email_address for r in safe_get(item, 'to_recipients', []) if hasattr(r, 'email_address')],

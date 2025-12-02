@@ -5,7 +5,7 @@ from exchangelib import Folder
 
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get
+from ..utils import format_success_response, safe_get, ews_id_to_str
 
 
 class ListFoldersTool(BaseTool):
@@ -80,11 +80,11 @@ class ListFoldersTool(BaseTool):
                 if current_depth > max_depth:
                     return None
 
-                # Get folder info
+                # Get folder info - use ews_id_to_str for ID fields to ensure JSON serializability
                 folder_info = {
-                    "id": safe_get(folder, 'id', ''),
+                    "id": ews_id_to_str(safe_get(folder, 'id', None)) or '',
                     "name": safe_get(folder, 'name', ''),
-                    "parent_folder_id": safe_get(folder, 'parent_folder_id', ''),
+                    "parent_folder_id": ews_id_to_str(safe_get(folder, 'parent_folder_id', None)) or '',
                     "folder_class": safe_get(folder, 'folder_class', ''),
                     "child_folder_count": safe_get(folder, 'child_folder_count', 0)
                 }
@@ -244,7 +244,7 @@ class CreateFolderTool(BaseTool):
 
             return format_success_response(
                 f"Folder '{folder_name}' created successfully",
-                folder_id=new_folder.id,
+                folder_id=ews_id_to_str(new_folder.id),
                 folder_name=folder_name,
                 parent_folder=parent_folder_name,
                 folder_class=folder_class
@@ -296,7 +296,8 @@ class DeleteFolderTool(BaseTool):
 
             def find_folder_by_id(parent, target_id):
                 """Recursively search for folder by ID."""
-                if safe_get(parent, 'id', '') == target_id:
+                parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
+                if parent_id == target_id:
                     return parent
 
                 if hasattr(parent, 'children') and parent.children:
@@ -373,7 +374,8 @@ class RenameFolderTool(BaseTool):
             # Find the folder by ID
             def find_folder_by_id(parent, target_id):
                 """Recursively search for folder by ID."""
-                if safe_get(parent, 'id', '') == target_id:
+                parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
+                if parent_id == target_id:
                     return parent
 
                 if hasattr(parent, 'children') and parent.children:
@@ -454,7 +456,8 @@ class MoveFolderTool(BaseTool):
             # Find the folder to move
             def find_folder_by_id(parent, target_id):
                 """Recursively search for folder by ID."""
-                if safe_get(parent, 'id', '') == target_id:
+                parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
+                if parent_id == target_id:
                     return parent
 
                 if hasattr(parent, 'children') and parent.children:

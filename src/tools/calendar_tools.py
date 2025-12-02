@@ -7,7 +7,7 @@ from exchangelib import CalendarItem, Mailbox, Attendee
 from .base import BaseTool
 from ..models import CreateAppointmentRequest, MeetingResponse
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime
+from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str
 
 
 class CreateAppointmentTool(BaseTool):
@@ -105,7 +105,7 @@ class CreateAppointmentTool(BaseTool):
 
             return format_success_response(
                 "Appointment created successfully",
-                item_id=item.id if hasattr(item, "id") else None,
+                item_id=ews_id_to_str(item.id) if hasattr(item, "id") else None,
                 subject=request.subject,
                 start_time=request.start_time.isoformat(),
                 end_time=request.end_time.isoformat()
@@ -200,7 +200,7 @@ class GetCalendarTool(BaseTool):
                 ]
 
                 event_data = {
-                    "item_id": safe_get(item, "id", "unknown"),
+                    "item_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                     "subject": safe_get(item, "subject", "") or "",
                     "start": safe_get(item, "start", datetime.now()).isoformat(),
                     "end": safe_get(item, "end", datetime.now()).isoformat(),

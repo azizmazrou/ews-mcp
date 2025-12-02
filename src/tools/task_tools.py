@@ -8,7 +8,7 @@ from exchangelib import Task
 from .base import BaseTool
 from ..models import CreateTaskRequest
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, parse_date_tz_aware
+from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, parse_date_tz_aware, ews_id_to_str
 
 
 class CreateTaskTool(BaseTool):
@@ -90,7 +90,7 @@ class CreateTaskTool(BaseTool):
 
             return format_success_response(
                 "Task created successfully",
-                item_id=task.id if hasattr(task, "id") else None,
+                item_id=ews_id_to_str(task.id) if hasattr(task, "id") else None,
                 subject=request.subject
             )
 
@@ -142,7 +142,7 @@ class GetTasksTool(BaseTool):
             tasks = []
             for item in items[:max_results]:
                 task_data = {
-                    "item_id": safe_get(item, "id", "unknown"),
+                    "item_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                     "subject": safe_get(item, "subject", "") or "",
                     "status": safe_get(item, "status", "NotStarted") or "NotStarted",
                     "percent_complete": safe_get(item, "percent_complete", 0),

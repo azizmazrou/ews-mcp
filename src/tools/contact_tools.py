@@ -7,7 +7,7 @@ from exchangelib.indexed_properties import EmailAddress, PhoneNumber
 from .base import BaseTool
 from ..models import CreateContactRequest
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get
+from ..utils import format_success_response, safe_get, ews_id_to_str
 
 
 class CreateContactTool(BaseTool):
@@ -104,7 +104,7 @@ class CreateContactTool(BaseTool):
 
             return format_success_response(
                 "Contact created successfully",
-                item_id=contact.id if hasattr(contact, "id") else None,
+                item_id=ews_id_to_str(contact.id) if hasattr(contact, "id") else None,
                 display_name=f"{request.given_name} {request.surname}",
                 email=request.email_address
             )
@@ -178,7 +178,7 @@ class SearchContactsTool(BaseTool):
                     query_lower in email.lower()):
 
                     contact_data = {
-                        "item_id": safe_get(item, "id", "unknown"),
+                        "item_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                         "display_name": display_name or f"{given_name} {surname}".strip(),
                         "given_name": given_name,
                         "surname": surname,
@@ -242,7 +242,7 @@ class GetContactsTool(BaseTool):
                 email = email or ""  # Ensure email is never None
 
                 contact_data = {
-                    "item_id": safe_get(item, "id", "unknown"),
+                    "item_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                     "display_name": display_name or f"{given_name} {surname}".strip(),
                     "given_name": given_name,
                     "surname": surname,
