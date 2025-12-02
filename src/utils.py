@@ -1,10 +1,11 @@
 """Utility functions for EWS MCP Server."""
 
 from datetime import datetime
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, Union
 import logging
 import os
 import functools
+import json
 from exchangelib import EWSTimeZone, EWSDateTime, EWSDate
 from exchangelib.errors import (
     RateLimitError,
@@ -161,6 +162,142 @@ def safe_get(obj: Any, attr: str, default: Any = None) -> Any:
         return getattr(obj, attr, default)
     except Exception:
         return default
+
+
+def ews_id_to_str(ews_id: Any) -> Optional[str]:
+    """Convert an EWS ID object to a string.
+
+    EWS objects like FolderId, ItemId, ParentFolderId have an 'id' attribute
+    that contains the actual string ID. This function safely extracts that string.
+
+    Args:
+        ews_id: An EWS ID object or string
+
+    Returns:
+        String representation of the ID, or None if conversion fails
+    """
+    if ews_id is None:
+        return None
+
+    # Already a string
+    if isinstance(ews_id, str):
+        return ews_id
+
+    # EWS ID objects have an 'id' attribute with the string value
+    if hasattr(ews_id, 'id'):
+        return str(ews_id.id) if ews_id.id is not None else None
+
+    # Try converting to string as last resort
+    try:
+        return str(ews_id)
+    except Exception:
+        return None
+
+
+def make_json_serializable(obj: Any) -> Any:
+    """Recursively convert an object to be JSON serializable.
+
+    Handles EWS objects, datetime objects, and nested structures.
+
+    Args:
+        obj: Any object that needs to be JSON serializable
+
+    Returns:
+        JSON-serializable version of the object
+    """
+    if obj is None:
+        return None
+
+    # Already JSON-serializable primitives
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    # Handle datetime objects
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+
+    # Handle EWSDateTime and EWSDate
+    if isinstance(obj, (EWSDateTime, EWSDate)):
+        return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+
+    # Handle lists/tuples
+    if isinstance(obj, (list, tuple)):
+        return [make_json_serializable(item) for item in obj]
+
+    # Handle dictionaries
+    if isinstance(obj, dict):
+        return {str(k): make_json_serializable(v) for k, v in obj.items()}
+
+    # Handle EWS ID-like objects (FolderId, ItemId, ParentFolderId, etc.)
+    # These have an 'id' attribute containing the actual string ID
+    if hasattr(obj, 'id'):
+        return ews_id_to_str(obj)
+
+    # Handle objects with __dict__ (convert to dict)
+    if hasattr(obj, '__dict__'):
+        try:
+            return make_json_serializable(vars(obj))
+        except Exception:
+            pass
+
+    # Last resort: convert to string
+    try:
+        return str(obj)
+    except Exception:
+        return f"<non-serializable: {type(obj).__name__}>"
+
+
+class EWSJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles EWS objects.
+
+    Use this encoder when calling json.dumps on data that may contain
+    EWS objects like FolderId, ItemId, ParentFolderId, etc.
+
+    Example:
+        json.dumps(data, cls=EWSJSONEncoder)
+    """
+
+    def default(self, obj: Any) -> Any:
+        """Convert non-serializable objects to serializable format."""
+        # Handle datetime objects
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+
+        # Handle EWSDateTime and EWSDate
+        if isinstance(obj, (EWSDateTime, EWSDate)):
+            return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+
+        # Handle EWS ID-like objects
+        if hasattr(obj, 'id'):
+            result = ews_id_to_str(obj)
+            if result is not None:
+                return result
+
+        # Handle objects with __dict__
+        if hasattr(obj, '__dict__'):
+            try:
+                return make_json_serializable(vars(obj))
+            except Exception:
+                pass
+
+        # Try string conversion
+        try:
+            return str(obj)
+        except Exception:
+            return f"<non-serializable: {type(obj).__name__}>"
+
+
+def safe_json_dumps(obj: Any, **kwargs) -> str:
+    """Safely serialize an object to JSON, handling EWS objects.
+
+    Args:
+        obj: Object to serialize
+        **kwargs: Additional arguments to pass to json.dumps
+
+    Returns:
+        JSON string representation
+    """
+    return json.dumps(obj, cls=EWSJSONEncoder, **kwargs)
 
 
 def format_error_response(error: Exception, context: str = "") -> Dict[str, Any]:
