@@ -26,7 +26,7 @@ import re
 from .base import BaseTool
 from ..models import SendEmailRequest, EmailSearchRequest, EmailDetails
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders
+from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, ews_id_to_str
 
 
 async def resolve_folder(ews_client, folder_identifier: str):
@@ -67,7 +67,8 @@ async def resolve_folder(ews_client, folder_identifier: str):
         def find_folder_by_id(parent, target_id):
             """Recursively search for folder by ID."""
             try:
-                if safe_get(parent, 'id', '') == target_id:
+                parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
+                if parent_id == target_id:
                     return parent
                 if hasattr(parent, 'children') and parent.children:
                     for child in parent.children:
@@ -367,7 +368,7 @@ class SendEmailTool(BaseTool):
 
             return format_success_response(
                 "Email sent successfully",
-                message_id=message.id if hasattr(message, 'id') else None,
+                message_id=ews_id_to_str(message.id) if hasattr(message, 'id') else None,
                 sent_time=datetime.now().isoformat(),
                 recipients=request.to
             )
@@ -437,7 +438,7 @@ class ReadEmailsTool(BaseTool):
                 text_body = safe_get(item, "text_body", "") or ""
 
                 email_data = {
-                    "message_id": safe_get(item, "id", "unknown"),
+                    "message_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                     "subject": safe_get(item, "subject", "") or "",
                     "from": from_email,
                     "to": [r.email_address for r in (safe_get(item, "to_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
@@ -600,7 +601,7 @@ class SearchEmailsTool(BaseTool):
                     text_body = safe_get(item, "text_body", "") or ""
 
                     email_data = {
-                        "message_id": safe_get(item, "id", "unknown"),
+                        "message_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                         "subject": safe_get(item, "subject", "") or "",
                         "from": from_email,
                         "to": [r.email_address for r in (safe_get(item, "to_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
@@ -687,7 +688,7 @@ class GetEmailDetailsTool(BaseTool):
             attachment_names = [att.name for att in attachments if att and hasattr(att, "name") and att.name]
 
             email_details = {
-                "message_id": safe_get(item, "id", "unknown"),
+                "message_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                 "subject": safe_get(item, "subject", "") or "",
                 "from": from_email,
                 "to": to_emails,
@@ -1023,7 +1024,8 @@ class CopyEmailTool(BaseTool):
                 # Find folder by ID
                 def find_folder_by_id(parent, target_id):
                     """Recursively search for folder by ID."""
-                    if safe_get(parent, 'id', '') == target_id:
+                    parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
+                    if parent_id == target_id:
                         return parent
 
                     if hasattr(parent, 'children') and parent.children:
@@ -1048,7 +1050,7 @@ class CopyEmailTool(BaseTool):
             return format_success_response(
                 f"Email copied from {source_folder_name} to {dest_name}",
                 message_id=message_id,
-                copied_message_id=safe_get(copied_message, 'id', '') if copied_message else '',
+                copied_message_id=ews_id_to_str(safe_get(copied_message, 'id', None)) or '' if copied_message else '',
                 subject=subject,
                 source_folder=source_folder_name,
                 destination_folder=dest_name

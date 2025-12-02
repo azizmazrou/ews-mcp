@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import uuid
 
+from .utils import EWSJSONEncoder, make_json_serializable
+
 
 class LogManager:
     """Central logging management for EWS MCP Server."""
@@ -72,7 +74,7 @@ class LogManager:
 
         try:
             with open(self.context_file, 'w') as f:
-                json.dump(self.conversation_context, f, indent=2)
+                json.dump(self.conversation_context, f, indent=2, cls=EWSJSONEncoder)
         except Exception as e:
             # Don't let context saving errors crash the app
             logging.error(f"Failed to save context: {e}")
@@ -105,10 +107,10 @@ class LogManager:
             "context": context or {}
         }
 
-        # Write to activity log
+        # Write to activity log - use EWSJSONEncoder for safe serialization
         try:
             with open(self.activity_log, 'a') as f:
-                f.write(json.dumps(log_entry) + '\n')
+                f.write(json.dumps(log_entry, cls=EWSJSONEncoder) + '\n')
         except Exception as e:
             logging.error(f"Failed to write activity log: {e}")
 
@@ -116,7 +118,7 @@ class LogManager:
         if level in ["ERROR", "CRITICAL"]:
             try:
                 with open(self.error_log, 'a') as f:
-                    f.write(json.dumps(log_entry) + '\n')
+                    f.write(json.dumps(log_entry, cls=EWSJSONEncoder) + '\n')
             except Exception as e:
                 logging.error(f"Failed to write error log: {e}")
 
@@ -136,7 +138,7 @@ class LogManager:
 
         try:
             with open(self.performance_log, 'a') as f:
-                f.write(json.dumps(perf_entry) + '\n')
+                f.write(json.dumps(perf_entry, cls=EWSJSONEncoder) + '\n')
         except Exception as e:
             logging.error(f"Failed to write performance log: {e}")
 
@@ -171,7 +173,7 @@ class LogManager:
 
         try:
             with open(self.test_log, 'a') as f:
-                f.write(json.dumps(test_entry) + '\n')
+                f.write(json.dumps(test_entry, cls=EWSJSONEncoder) + '\n')
         except Exception as e:
             logging.error(f"Failed to write test log: {e}")
 
@@ -238,21 +240,27 @@ class LogManager:
 
         try:
             with open(self.audit_log, 'a') as f:
-                f.write(json.dumps(audit_entry) + '\n')
+                f.write(json.dumps(audit_entry, cls=EWSJSONEncoder) + '\n')
         except Exception as e:
             logging.error(f"Failed to write audit log: {e}")
 
     def _sanitize_data(self, data: Any) -> Any:
         """Sanitize data to remove sensitive information before logging.
 
+        Also converts EWS objects to JSON-serializable format.
+
         Args:
             data: Data to sanitize
 
         Returns:
-            Sanitized data
+            Sanitized data that is JSON-serializable
         """
+        if data is None:
+            return None
+
         if not isinstance(data, dict):
-            return data
+            # Use make_json_serializable for non-dict types to handle EWS objects
+            return make_json_serializable(data)
 
         sanitized = {}
         sensitive_keys = ['password', 'secret', 'token', 'api_key', 'credential']
@@ -263,7 +271,8 @@ class LogManager:
             elif isinstance(value, dict):
                 sanitized[key] = self._sanitize_data(value)
             else:
-                sanitized[key] = value
+                # Ensure value is JSON-serializable
+                sanitized[key] = make_json_serializable(value)
 
         return sanitized
 
