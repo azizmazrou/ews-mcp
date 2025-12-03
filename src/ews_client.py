@@ -77,31 +77,39 @@ class EWSClient:
 
                 self.logger.info(f"Using manual configuration: {self.config.ews_server_url}")
 
-                # Determine if ews_server_url is a full EWS endpoint or just a server hostname
-                # Full endpoint: https://mail.example.com/EWS/Exchange.asmx
-                # Server only: mail.example.com or outlook.office365.com
-                ews_url = self.config.ews_server_url
+                # Construct the full EWS endpoint URL
+                # Users can provide:
+                #   - Full URL: https://mail.company.com/EWS/Exchange.asmx
+                #   - Partial URL: https://mail.company.com
+                #   - Just hostname: mail.company.com
+                ews_input = self.config.ews_server_url.strip()
 
-                if '/EWS/' in ews_url or ews_url.endswith('.asmx'):
-                    # Full EWS endpoint URL - use service_endpoint
-                    self.logger.info(f"Using full EWS endpoint: {ews_url}")
-                    config = Configuration(
-                        service_endpoint=ews_url,
-                        credentials=credentials,
-                        retry_policy=None,  # Disable built-in retry, we handle it
-                        max_connections=self.config.connection_pool_size
-                    )
+                # Normalize the URL to always be a full EWS endpoint
+                if ews_input.endswith('/EWS/Exchange.asmx'):
+                    # Already a full endpoint
+                    ews_url = ews_input
+                elif '/EWS/' in ews_input:
+                    # Has /EWS/ but might be missing Exchange.asmx
+                    if not ews_input.endswith('.asmx'):
+                        ews_url = ews_input.rstrip('/') + '/Exchange.asmx'
+                    else:
+                        ews_url = ews_input
                 else:
-                    # Just a server hostname - let exchangelib construct the URL
-                    # Strip protocol if present
-                    server = ews_url.replace('https://', '').replace('http://', '').rstrip('/')
-                    self.logger.info(f"Using server hostname: {server}")
-                    config = Configuration(
-                        server=server,
-                        credentials=credentials,
-                        retry_policy=None,  # Disable built-in retry, we handle it
-                        max_connections=self.config.connection_pool_size
-                    )
+                    # Just a hostname or URL without /EWS/ path
+                    # Strip protocol and trailing slashes
+                    server = ews_input.replace('https://', '').replace('http://', '').rstrip('/')
+                    # Construct full EWS endpoint URL
+                    ews_url = f"https://{server}/EWS/Exchange.asmx"
+
+                self.logger.info(f"Using EWS endpoint: {ews_url}")
+
+                # Always use service_endpoint to bypass autodiscovery completely
+                config = Configuration(
+                    service_endpoint=ews_url,
+                    credentials=credentials,
+                    retry_policy=None,  # Disable built-in retry, we handle it
+                    max_connections=self.config.connection_pool_size
+                )
 
                 # Set timeout on the protocol
                 BaseProtocol.TIMEOUT = self.config.request_timeout
