@@ -77,20 +77,34 @@ class EWSClient:
 
                 self.logger.info(f"Using manual configuration: {self.config.ews_server_url}")
 
-                # Create configuration with timeout
-                config = Configuration(
-                    server=self.config.ews_server_url,
-                    credentials=credentials,
-                    # Set timeout for EWS requests (in seconds)
-                    retry_policy=None,  # Disable built-in retry, we handle it
-                    max_connections=self.config.connection_pool_size
-                )
+                # Determine if ews_server_url is a full EWS endpoint or just a server hostname
+                # Full endpoint: https://mail.example.com/EWS/Exchange.asmx
+                # Server only: mail.example.com or outlook.office365.com
+                ews_url = self.config.ews_server_url
+
+                if '/EWS/' in ews_url or ews_url.endswith('.asmx'):
+                    # Full EWS endpoint URL - use service_endpoint
+                    self.logger.info(f"Using full EWS endpoint: {ews_url}")
+                    config = Configuration(
+                        service_endpoint=ews_url,
+                        credentials=credentials,
+                        retry_policy=None,  # Disable built-in retry, we handle it
+                        max_connections=self.config.connection_pool_size
+                    )
+                else:
+                    # Just a server hostname - let exchangelib construct the URL
+                    # Strip protocol if present
+                    server = ews_url.replace('https://', '').replace('http://', '').rstrip('/')
+                    self.logger.info(f"Using server hostname: {server}")
+                    config = Configuration(
+                        server=server,
+                        credentials=credentials,
+                        retry_policy=None,  # Disable built-in retry, we handle it
+                        max_connections=self.config.connection_pool_size
+                    )
 
                 # Set timeout on the protocol
-                # exchangelib uses requests library, configure timeout via session
-                if hasattr(config.protocol, 'HTTP_ADAPTER_CLS'):
-                    # Configure HTTP adapter with timeout
-                    BaseProtocol.TIMEOUT = self.config.request_timeout
+                BaseProtocol.TIMEOUT = self.config.request_timeout
 
                 account = Account(
                     primary_smtp_address=self.config.ews_email,
