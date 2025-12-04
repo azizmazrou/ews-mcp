@@ -141,7 +141,8 @@ docker pull ghcr.io/azizmazrou/ews-mcp:latest
 
 # Create .env file with Basic Auth
 cat > .env <<EOF
-EWS_SERVER_URL=https://mail.company.com/EWS/Exchange.asmx
+# Just provide hostname - the server constructs the full EWS URL automatically
+EWS_SERVER_URL=mail.company.com
 EWS_EMAIL=user@company.com
 EWS_AUTODISCOVER=false
 EWS_AUTH_TYPE=basic
@@ -172,9 +173,10 @@ docker pull ghcr.io/azizmazrou/ews-mcp:latest
 
 # Create .env file with OAuth2
 cat > .env <<EOF
-EWS_SERVER_URL=https://outlook.office365.com/EWS/Exchange.asmx
+# Just provide hostname - the server constructs the full EWS URL automatically
+EWS_SERVER_URL=outlook.office365.com
 EWS_EMAIL=user@company.com
-EWS_AUTODISCOVER=true
+EWS_AUTODISCOVER=false
 EWS_AUTH_TYPE=oauth2
 EWS_CLIENT_ID=your-azure-app-client-id
 EWS_CLIENT_SECRET=your-azure-app-client-secret
@@ -248,7 +250,8 @@ python -m src.main
 
 ```bash
 cat > .env <<EOF
-EWS_SERVER_URL=https://mail.company.com/EWS/Exchange.asmx
+# Just provide hostname - the server constructs https://mail.company.com/EWS/Exchange.asmx
+EWS_SERVER_URL=mail.company.com
 EWS_EMAIL=user@company.com
 EWS_AUTODISCOVER=false
 EWS_AUTH_TYPE=basic
@@ -284,8 +287,10 @@ EOF
 
 4. **Update .env**:
    ```bash
-   EWS_SERVER_URL=https://outlook.office365.com/EWS/Exchange.asmx
+   # Just provide hostname - the server constructs the full EWS URL automatically
+   EWS_SERVER_URL=outlook.office365.com
    EWS_EMAIL=user@company.com
+   EWS_AUTODISCOVER=false
    EWS_AUTH_TYPE=oauth2
    EWS_CLIENT_ID=<your-client-id>
    EWS_CLIENT_SECRET=<your-client-secret>
@@ -322,13 +327,22 @@ EOF
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EWS_SERVER_URL` | autodiscover | Exchange EWS endpoint |
-| `EWS_AUTODISCOVER` | `true` | Use autodiscovery |
+| `EWS_SERVER_URL` | autodiscover | Exchange server (hostname or full URL - see below) |
+| `EWS_AUTODISCOVER` | `false` | Use autodiscovery (not recommended - set to false with explicit server) |
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio` (Claude Desktop) or `sse` (HTTP/REST) |
 | `MCP_HOST` | `0.0.0.0` | Host for SSE server (when MCP_TRANSPORT=sse) |
 | `MCP_PORT` | `8000` | Port for SSE server (when MCP_TRANSPORT=sse) |
 | `TIMEZONE` | `UTC` | Timezone for operations (use IANA names: UTC, America/New_York) |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+
+**EWS_SERVER_URL Formats** - The server automatically constructs the full EWS endpoint:
+
+| You Provide | Server Constructs |
+|-------------|-------------------|
+| `mail.company.com` | `https://mail.company.com/EWS/Exchange.asmx` |
+| `https://mail.company.com` | `https://mail.company.com/EWS/Exchange.asmx` |
+| `https://mail.company.com/EWS/Exchange.asmx` | (used as-is) |
+| `outlook.office365.com` | `https://outlook.office365.com/EWS/Exchange.asmx` |
 
 ### OpenAPI/REST API Variables (Optional)
 
@@ -860,7 +874,9 @@ bandit -r src/
 
 **Authentication failed**: Check credentials, verify OAuth2 permissions, ensure admin consent granted.
 
-**Connection timeout**: Verify server URL, check network, try autodiscovery.
+**Autodiscovery timeout**: Set `EWS_AUTODISCOVER=false` and provide explicit server URL. Just provide the hostname (e.g., `mail.company.com`) - the server automatically constructs the full EWS endpoint (`https://mail.company.com/EWS/Exchange.asmx`).
+
+**Connection timeout**: Verify server URL, check network. If using autodiscovery, switch to explicit server URL.
 
 **Rate limited**: Wait 60 seconds, reduce request frequency.
 
