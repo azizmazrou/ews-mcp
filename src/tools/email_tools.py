@@ -29,6 +29,30 @@ from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, ews_id_to_str
 
 
+def is_exchange_folder_id(identifier: str) -> bool:
+    """
+    Check if the identifier looks like an Exchange folder/item ID.
+
+    Exchange IDs are base64-encoded strings that typically start with 'AAMk'.
+    Base64 can contain '/' characters, so we need to detect IDs before
+    attempting to parse as folder paths.
+
+    Args:
+        identifier: The folder identifier string
+
+    Returns:
+        True if it looks like an Exchange ID, False otherwise
+    """
+    # Exchange folder/item IDs start with 'AAMk' (base64 encoded)
+    # They are typically 100+ characters long
+    if identifier.startswith('AAMk') and len(identifier) > 50:
+        return True
+    # Also check for other common Exchange ID patterns
+    if identifier.startswith('AAE') and len(identifier) > 50:
+        return True
+    return False
+
+
 async def resolve_folder(ews_client, folder_identifier: str):
     """
     Resolve folder from name, path, or ID.
@@ -36,7 +60,7 @@ async def resolve_folder(ews_client, folder_identifier: str):
     Supports:
     - Standard names: inbox, sent, drafts, deleted, junk
     - Folder paths: Inbox/CC, Inbox/Projects/2024
-    - Folder IDs: AAMkADc3MWUy...
+    - Folder IDs: AAMkADc3MWUy... (base64 encoded, may contain '/' characters)
     - Custom folder names: CC, Archive, Projects
     """
     folder_identifier = folder_identifier.strip()
@@ -59,10 +83,9 @@ async def resolve_folder(ews_client, folder_identifier: str):
     if folder_lower in folder_map:
         return folder_map[folder_lower]
 
-    # Try 2: Folder ID (starts with AAM or similar Exchange ID pattern)
-    # Note: Direct folder ID access requires navigating the folder tree to find matching ID
-    # This is a TODO for future enhancement - for now, use folder paths or names
-    if len(folder_identifier) > 50 and not '/' in folder_identifier:
+    # Try 2: Folder ID (starts with AAMk or similar Exchange ID pattern)
+    # IMPORTANT: Check this BEFORE path parsing, as base64 IDs can contain '/'
+    if is_exchange_folder_id(folder_identifier):
         # Folder ID detection - try to find in tree
         def find_folder_by_id(parent, target_id):
             """Recursively search for folder by ID."""
@@ -83,8 +106,14 @@ async def resolve_folder(ews_client, folder_identifier: str):
         found_folder = find_folder_by_id(ews_client.account.root, folder_identifier)
         if found_folder:
             return found_folder
+        # If not found as folder ID, don't fall through to path parsing
+        raise ToolExecutionError(
+            f"Folder ID '{folder_identifier[:20]}...' not found. "
+            f"The ID appears to be an Exchange folder ID but could not be located in your mailbox."
+        )
 
     # Try 3: Folder path (e.g., "Inbox/CC" or "Inbox/Projects/2024")
+    # Only parse as path if NOT an Exchange ID (which may contain '/')
     if '/' in folder_identifier:
         parts = folder_identifier.split('/')
         parent_name = parts[0].strip().lower()
