@@ -84,17 +84,33 @@ ConnectionError: Failed to connect to Exchange
    REQUEST_TIMEOUT=60
    ```
 
-### Problem: "Autodiscovery failed"
+### Problem: "Autodiscovery failed" or "Autodiscovery timeout"
+
+**Symptoms:**
+```
+AutoDiscoverFailed: Autodiscovery failed with error
+ConnectionError: Autodiscovery timed out
+```
 
 **Solutions:**
 
-1. **Use Manual Configuration:**
+1. **Use Manual Configuration (Recommended):**
    ```bash
    EWS_AUTODISCOVER=false
-   EWS_SERVER_URL=https://mail.company.com/EWS/Exchange.asmx
+   # Just provide hostname - the server constructs the full EWS URL automatically
+   EWS_SERVER_URL=mail.company.com
+   # This becomes: https://mail.company.com/EWS/Exchange.asmx
    ```
 
-2. **Check DNS:**
+   You can provide any of these formats:
+   | You Provide | Server Constructs |
+   |-------------|-------------------|
+   | `mail.company.com` | `https://mail.company.com/EWS/Exchange.asmx` |
+   | `https://mail.company.com` | `https://mail.company.com/EWS/Exchange.asmx` |
+   | `https://mail.company.com/EWS/Exchange.asmx` | (used as-is) |
+   | `outlook.office365.com` | `https://outlook.office365.com/EWS/Exchange.asmx` |
+
+2. **Check DNS (if autodiscovery is required):**
    ```bash
    # Should return autodiscover endpoint
    nslookup autodiscover.company.com
@@ -103,6 +119,11 @@ ConnectionError: Failed to connect to Exchange
 3. **Verify Email Domain:**
    - Ensure EWS_EMAIL matches your Exchange domain
    - Check for typos
+
+4. **Network/Firewall Issues:**
+   - Autodiscovery endpoints may be blocked by firewall
+   - Using explicit EWS_SERVER_URL bypasses autodiscovery completely
+   - This is the recommended approach for most deployments
 
 ## Docker Issues
 
