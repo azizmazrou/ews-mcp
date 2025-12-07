@@ -1532,6 +1532,26 @@ class ReplyEmailTool(BaseTool):
                         except Exception as e:
                             self.logger.warning(f"Failed to attach file {file_path}: {e}")
 
+            # Post-process: Add sender email to From header if missing
+            # Native EWS reply may only show name for internal senders
+            body_str = str(reply.body) if reply.body else ""
+            if '<b>From:</b>' in body_str or '<b>From:<' in body_str:
+                # Get sender email from original message
+                sender_email = ""
+                if original_message.sender and hasattr(original_message.sender, 'email_address'):
+                    sender_email = original_message.sender.email_address or ""
+
+                # Only add if email exists and not already in body
+                if sender_email and sender_email not in body_str and f"&lt;{sender_email}&gt;" not in body_str:
+                    # Find: <b>From:</b> Name<br> or <b>From:</b> Name</span>
+                    # Add email after name using HTML entities for angle brackets
+                    pattern = r'(<b>From:</b>\s*)([^<]+?)(\s*<)'
+                    replacement = rf'\1\2 &lt;{sender_email}&gt;\3'
+                    modified_body = re.sub(pattern, replacement, body_str, count=1)
+                    if modified_body != body_str:
+                        reply.body = HTMLBody(modified_body)
+                        self.logger.info(f"Added sender email to From header: {sender_email}")
+
             # Send the reply
             reply.send()
             self.logger.info(f"Reply sent successfully to {original_from_email}")
@@ -1689,6 +1709,26 @@ class ForwardEmailTool(BaseTool):
                         raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
                     except Exception as e:
                         self.logger.warning(f"Failed to attach file {file_path}: {e}")
+
+            # Post-process: Add sender email to From header if missing
+            # Native EWS forward may only show name for internal senders
+            body_str = str(forward.body) if forward.body else ""
+            if '<b>From:</b>' in body_str or '<b>From:<' in body_str:
+                # Get sender email from original message
+                sender_email = ""
+                if original_message.sender and hasattr(original_message.sender, 'email_address'):
+                    sender_email = original_message.sender.email_address or ""
+
+                # Only add if email exists and not already in body
+                if sender_email and sender_email not in body_str and f"&lt;{sender_email}&gt;" not in body_str:
+                    # Find: <b>From:</b> Name<br> or <b>From:</b> Name</span>
+                    # Add email after name using HTML entities for angle brackets
+                    pattern = r'(<b>From:</b>\s*)([^<]+?)(\s*<)'
+                    replacement = rf'\1\2 &lt;{sender_email}&gt;\3'
+                    modified_body = re.sub(pattern, replacement, body_str, count=1)
+                    if modified_body != body_str:
+                        forward.body = HTMLBody(modified_body)
+                        self.logger.info(f"Added sender email to From header: {sender_email}")
 
             # Send the forward
             forward.send()
