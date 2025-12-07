@@ -1544,6 +1544,10 @@ class ReplyEmailTool(BaseTool):
                 original_body_html = extract_body_html(original_message)
                 self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
+                # Clean original body - rename WordSection1 to OriginalSection
+                # This prevents Exclaimer from placing signature after the original content
+                original_body_html = clean_original_body_for_signature(original_body_html)
+
                 # 4. Build headers block
                 headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
 <b>From:</b> {header['from']}<br/>
@@ -1789,6 +1793,10 @@ class ForwardEmailTool(BaseTool):
                 # 3. Get the original email body HTML
                 original_body_html = extract_body_html(original_message)
                 self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
+
+                # Clean original body - rename WordSection1 to OriginalSection
+                # This prevents Exclaimer from placing signature after the original content
+                original_body_html = clean_original_body_for_signature(original_body_html)
 
                 # 4. Build headers block
                 headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
