@@ -77,16 +77,19 @@ def format_forward_header(message) -> dict:
     sender_name = ""
     sender_email = ""
     if sender:
-        sender_name = sender.name if hasattr(sender, "name") else ""
-        sender_email = sender.email_address if hasattr(sender, "email_address") else ""
+        # Use 'or ""' to convert None to empty string
+        sender_name = (sender.name or "") if hasattr(sender, "name") else ""
+        sender_email = (sender.email_address or "") if hasattr(sender, "email_address") else ""
 
-    # Format as "Name <email>" or just "email" if no name
+    # Format as "Name <email>" or just what's available
     if sender_name and sender_email:
         from_str = f"{sender_name} <{sender_email}>"
     elif sender_email:
         from_str = sender_email
-    else:
+    elif sender_name:
         from_str = sender_name
+    else:
+        from_str = ""
 
     # To/Cc: Name <email> format
     def format_recipients(recipients):
@@ -96,12 +99,15 @@ def format_forward_header(message) -> dict:
         for r in recipients:
             if not r:
                 continue
-            name = r.name if hasattr(r, "name") else ""
-            email = r.email_address if hasattr(r, "email_address") else ""
+            # Use 'or ""' to convert None to empty string
+            name = (r.name or "") if hasattr(r, "name") else ""
+            email = (r.email_address or "") if hasattr(r, "email_address") else ""
             if name and email:
                 parts.append(f"{name} <{email}>")
             elif email:
                 parts.append(email)
+            elif name:
+                parts.append(name)
         return '; '.join(parts)
 
     to_recipients = safe_get(message, "to_recipients", []) or []
