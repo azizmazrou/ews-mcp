@@ -121,8 +121,9 @@ def format_forward_header(message) -> dict:
                     break
 
     # Format as "Name <email>" or just what's available
+    # Use HTML entities for angle brackets to prevent browser from hiding email
     if sender_name and sender_email:
-        from_str = f"{sender_name} <{sender_email}>"
+        from_str = f"{sender_name} &lt;{sender_email}&gt;"
     elif sender_email:
         from_str = sender_email
     elif sender_name:
@@ -142,7 +143,8 @@ def format_forward_header(message) -> dict:
             name = (r.name or "") if hasattr(r, "name") else ""
             email = (r.email_address or "") if hasattr(r, "email_address") else ""
             if name and email:
-                parts.append(f"{name} <{email}>")
+                # HTML-escape angle brackets to prevent browser from hiding email
+                parts.append(f"{name} &lt;{email}&gt;")
             elif email:
                 parts.append(email)
             elif name:
