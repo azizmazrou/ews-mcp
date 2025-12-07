@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     enable_audit_log: bool = True
     max_attachment_size: int = 157286400  # 150MB
 
+    # Impersonation/Delegation settings
+    ews_impersonation_enabled: bool = Field(
+        default=False,
+        description="Enable impersonation/delegation support for accessing other mailboxes"
+    )
+    ews_impersonation_type: Literal["impersonation", "delegate"] = Field(
+        default="impersonation",
+        description="Type of access: 'impersonation' (service account with ApplicationImpersonation role) or 'delegate' (user delegation)"
+    )
+
     # AI Features
     enable_ai: bool = False
     ai_provider: Literal["openai", "anthropic", "local"] = "openai"

@@ -438,16 +438,16 @@ def handle_ews_errors(func: Callable) -> Callable:
     return wrapper
 
 
-def find_message_across_folders(ews_client, message_id):
+def find_message_for_account(account, message_id):
     """
-    Search for a message across multiple folders.
+    Search for a message across multiple folders for a specific account.
 
     This function searches common folders for a message by ID, including
     custom subfolders. This is necessary because Exchange Web Services
     requires knowing which folder a message is in to retrieve it.
 
     Args:
-        ews_client: The EWS client instance
+        account: The Exchange Account object (primary or impersonated)
         message_id: The Exchange message ID to find
 
     Returns:
@@ -460,16 +460,16 @@ def find_message_across_folders(ews_client, message_id):
 
     # List of common folders to search (in priority order)
     folders_to_search = [
-        ("inbox", ews_client.account.inbox),
-        ("sent", ews_client.account.sent),
-        ("drafts", ews_client.account.drafts),
-        ("deleted", ews_client.account.trash),
-        ("junk", ews_client.account.junk),
+        ("inbox", account.inbox),
+        ("sent", account.sent),
+        ("drafts", account.drafts),
+        ("deleted", account.trash),
+        ("junk", account.junk),
     ]
 
     # Also search custom subfolders under inbox (like CC, Archive, etc.)
     try:
-        for child in ews_client.account.inbox.children:
+        for child in account.inbox.children:
             child_name = safe_get(child, 'name', 'unknown')
             folders_to_search.append((f"inbox/{child_name}", child))
     except Exception:
@@ -491,3 +491,22 @@ def find_message_across_folders(ews_client, message_id):
         f"The message may have been deleted, moved to a folder not in the search path, "
         f"or the ID may be invalid."
     )
+
+
+def find_message_across_folders(ews_client, message_id):
+    """
+    Search for a message across multiple folders.
+
+    Deprecated: Use find_message_for_account with explicit account parameter.
+
+    Args:
+        ews_client: The EWS client instance
+        message_id: The Exchange message ID to find
+
+    Returns:
+        The message item if found
+
+    Raises:
+        ToolExecutionError if message not found in any folder
+    """
+    return find_message_for_account(ews_client.account, message_id)

@@ -14,10 +14,14 @@ class AdvancedSearchTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "advanced_search",
-            "description": "Perform complex searches across mailbox with multiple criteria and filters",
+            "description": "Perform complex searches across mailbox with multiple criteria and filters. Supports impersonation to search in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
+                    },
                     "search_filter": {
                         "type": "object",
                         "description": "Search criteria object with filters",
@@ -101,6 +105,7 @@ class AdvancedSearchTool(BaseTool):
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Perform advanced search."""
+        target_mailbox = kwargs.get("target_mailbox")
         search_filter = kwargs.get("search_filter", {})
         search_scope = kwargs.get("search_scope", ["inbox"])
         max_results = kwargs.get("max_results", 250)
@@ -114,13 +119,16 @@ class AdvancedSearchTool(BaseTool):
             raise ToolExecutionError("search_scope is required and cannot be empty")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Map folder names to folder objects
             folder_map = {
-                "inbox": self.ews_client.account.inbox,
-                "sent": self.ews_client.account.sent,
-                "drafts": self.ews_client.account.drafts,
-                "deleted": self.ews_client.account.trash,
-                "junk": self.ews_client.account.junk
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk
             }
 
             # Get folders to search
@@ -251,7 +259,8 @@ class AdvancedSearchTool(BaseTool):
                 results=all_results,
                 count=len(all_results),
                 search_filter=search_filter,
-                folders_searched=search_scope
+                folders_searched=search_scope,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -267,10 +276,14 @@ class SearchByConversationTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "search_by_conversation",
-            "description": "Find all emails in a conversation thread using conversation ID or initial message",
+            "description": "Find all emails in a conversation thread using conversation ID or initial message. Supports impersonation to search in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
+                    },
                     "conversation_id": {
                         "type": "string",
                         "description": "Conversation ID to search for"
@@ -304,6 +317,7 @@ class SearchByConversationTool(BaseTool):
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Search for emails by conversation."""
+        target_mailbox = kwargs.get("target_mailbox")
         conversation_id = kwargs.get("conversation_id")
         message_id = kwargs.get("message_id")
         search_scope = kwargs.get("search_scope", ["inbox", "sent"])
@@ -314,6 +328,9 @@ class SearchByConversationTool(BaseTool):
             raise ToolExecutionError("Either conversation_id or message_id is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             from exchangelib import Q
 
             # If message_id provided, get conversation_id from it
@@ -321,9 +338,9 @@ class SearchByConversationTool(BaseTool):
                 message = None
                 for folder_name in ["inbox", "sent", "drafts"]:
                     folder_map = {
-                        "inbox": self.ews_client.account.inbox,
-                        "sent": self.ews_client.account.sent,
-                        "drafts": self.ews_client.account.drafts
+                        "inbox": account.inbox,
+                        "sent": account.sent,
+                        "drafts": account.drafts
                     }
                     folder = folder_map.get(folder_name)
                     try:
@@ -340,11 +357,11 @@ class SearchByConversationTool(BaseTool):
 
             # Map folder names to folder objects
             folder_map = {
-                "inbox": self.ews_client.account.inbox,
-                "sent": self.ews_client.account.sent,
-                "drafts": self.ews_client.account.drafts,
-                "deleted": self.ews_client.account.trash,
-                "junk": self.ews_client.account.junk
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk
             }
 
             # Build list of folders to search
@@ -355,7 +372,7 @@ class SearchByConversationTool(BaseTool):
                     folders_to_search.append(folder)
 
             if include_deleted and "deleted" not in [s.lower() for s in search_scope]:
-                folders_to_search.append(self.ews_client.account.trash)
+                folders_to_search.append(account.trash)
 
             if not folders_to_search:
                 raise ToolExecutionError("No valid folders to search")
@@ -398,7 +415,8 @@ class SearchByConversationTool(BaseTool):
                 results=all_results,
                 conversation_id=conversation_id,
                 total_results=len(all_results),
-                searched_folders=search_scope
+                searched_folders=search_scope,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -414,10 +432,14 @@ class FullTextSearchTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "full_text_search",
-            "description": "Perform full-text search across subject, body, and attachment names",
+            "description": "Perform full-text search across subject, body, and attachment names. Supports impersonation to search in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
+                    },
                     "query": {
                         "type": "string",
                         "description": "Search query text"
@@ -461,6 +483,7 @@ class FullTextSearchTool(BaseTool):
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Perform full-text search."""
+        target_mailbox = kwargs.get("target_mailbox")
         query = kwargs.get("query")
         search_scope = kwargs.get("search_scope", ["inbox", "sent"])
         max_results = kwargs.get("max_results", 50)
@@ -472,6 +495,9 @@ class FullTextSearchTool(BaseTool):
             raise ToolExecutionError("query is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             from exchangelib import Q
 
             # Normalize query for case-insensitive search
@@ -479,11 +505,11 @@ class FullTextSearchTool(BaseTool):
 
             # Map folder names to folder objects
             folder_map = {
-                "inbox": self.ews_client.account.inbox,
-                "sent": self.ews_client.account.sent,
-                "drafts": self.ews_client.account.drafts,
-                "deleted": self.ews_client.account.trash,
-                "junk": self.ews_client.account.junk
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk
             }
 
             # Build list of folders to search
@@ -577,7 +603,8 @@ class FullTextSearchTool(BaseTool):
                     "case_sensitive": case_sensitive,
                     "exact_phrase": exact_phrase,
                     "search_in": search_in
-                }
+                },
+                mailbox=mailbox
             )
 
         except ToolExecutionError:

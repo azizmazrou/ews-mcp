@@ -7,16 +7,16 @@ from pathlib import Path
 
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, find_message_across_folders
+from ..utils import format_success_response, safe_get, find_message_across_folders, find_message_for_account
 
 
 class ListAttachmentsTool(BaseTool):
-    """Tool for listing email attachments."""
+    """Tool for listing email attachments. Supports impersonation to access attachments in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "list_attachments",
-            "description": "List all attachments for a specific email message",
+            "description": "List all attachments for a specific email message. Supports impersonation to access attachments in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -28,6 +28,10 @@ class ListAttachmentsTool(BaseTool):
                         "type": "boolean",
                         "description": "Include inline attachments (images embedded in email)",
                         "default": True
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id"]
@@ -38,13 +42,17 @@ class ListAttachmentsTool(BaseTool):
         """List attachments for an email."""
         message_id = kwargs.get("message_id")
         include_inline = kwargs.get("include_inline", True)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find message across all folders (including custom subfolders)
-            message = find_message_across_folders(self.ews_client, message_id)
+            message = find_message_for_account(account, message_id)
 
             # List attachments
             attachments = []
@@ -84,7 +92,8 @@ class ListAttachmentsTool(BaseTool):
                 f"Found {len(attachments)} attachment(s)",
                 message_id=message_id,
                 attachments=attachments,
-                count=len(attachments)
+                count=len(attachments),
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -95,12 +104,12 @@ class ListAttachmentsTool(BaseTool):
 
 
 class DownloadAttachmentTool(BaseTool):
-    """Tool for downloading email attachments."""
+    """Tool for downloading email attachments. Supports impersonation to access attachments in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "download_attachment",
-            "description": "Download an email attachment by message ID and attachment ID",
+            "description": "Download an email attachment by message ID and attachment ID. Supports impersonation to access attachments in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -121,6 +130,10 @@ class DownloadAttachmentTool(BaseTool):
                     "save_path": {
                         "type": "string",
                         "description": "File path to save attachment (required if return_as is 'file_path')"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id", "attachment_id"]
@@ -133,6 +146,7 @@ class DownloadAttachmentTool(BaseTool):
         attachment_id = kwargs.get("attachment_id")
         return_as = kwargs.get("return_as", "base64")
         save_path = kwargs.get("save_path")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -144,8 +158,11 @@ class DownloadAttachmentTool(BaseTool):
             raise ToolExecutionError("save_path is required when return_as is 'file_path'")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find message across all folders (including custom subfolders)
-            message = find_message_across_folders(self.ews_client, message_id)
+            message = find_message_for_account(account, message_id)
 
             # Find the attachment
             attachment = None
@@ -191,7 +208,8 @@ class DownloadAttachmentTool(BaseTool):
                     name=attachment_name,
                     size=len(content),
                     content_type=safe_get(attachment, 'content_type', 'application/octet-stream'),
-                    content_base64=content_b64
+                    content_base64=content_b64,
+                    mailbox=mailbox
                 )
 
             elif return_as == "file_path":
@@ -214,7 +232,8 @@ class DownloadAttachmentTool(BaseTool):
                     name=attachment_name,
                     size=len(content),
                     content_type=safe_get(attachment, 'content_type', 'application/octet-stream'),
-                    file_path=str(file_path)
+                    file_path=str(file_path),
+                    mailbox=mailbox
                 )
 
         except ToolExecutionError:
@@ -225,12 +244,12 @@ class DownloadAttachmentTool(BaseTool):
 
 
 class AddAttachmentTool(BaseTool):
-    """Tool for adding attachments to draft or existing emails."""
+    """Tool for adding attachments to draft or existing emails. Supports impersonation to access attachments in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "add_attachment",
-            "description": "Add an attachment to a draft or existing email message",
+            "description": "Add an attachment to a draft or existing email message. Supports impersonation to access attachments in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -259,6 +278,10 @@ class AddAttachmentTool(BaseTool):
                         "type": "boolean",
                         "description": "Whether attachment is inline (embedded in body)",
                         "default": False
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id"]
@@ -273,6 +296,7 @@ class AddAttachmentTool(BaseTool):
         file_name = kwargs.get("file_name")
         content_type = kwargs.get("content_type", "application/octet-stream")
         is_inline = kwargs.get("is_inline", False)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -284,6 +308,9 @@ class AddAttachmentTool(BaseTool):
             raise ToolExecutionError("file_name is required when using file_content")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             from exchangelib import FileAttachment
             import base64
             from pathlib import Path
@@ -291,9 +318,9 @@ class AddAttachmentTool(BaseTool):
             # Find the message in Drafts folder (most common use case)
             message = None
             folders_to_search = [
-                self.ews_client.account.drafts,
-                self.ews_client.account.inbox,
-                self.ews_client.account.sent
+                account.drafts,
+                account.inbox,
+                account.sent
             ]
 
             for folder in folders_to_search:
@@ -345,7 +372,8 @@ class AddAttachmentTool(BaseTool):
                 attachment_name=file_name,
                 attachment_size=len(file_content),
                 content_type=content_type,
-                is_inline=is_inline
+                is_inline=is_inline,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -356,12 +384,12 @@ class AddAttachmentTool(BaseTool):
 
 
 class DeleteAttachmentTool(BaseTool):
-    """Tool for removing attachments from email messages."""
+    """Tool for removing attachments from email messages. Supports impersonation to access attachments in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_attachment",
-            "description": "Remove an attachment from an email message",
+            "description": "Remove an attachment from an email message. Supports impersonation to access attachments in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -376,6 +404,10 @@ class DeleteAttachmentTool(BaseTool):
                     "attachment_name": {
                         "type": "string",
                         "description": "Attachment name to remove (alternative to attachment_id)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id"]
@@ -387,6 +419,7 @@ class DeleteAttachmentTool(BaseTool):
         message_id = kwargs.get("message_id")
         attachment_id = kwargs.get("attachment_id")
         attachment_name = kwargs.get("attachment_name")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -395,12 +428,15 @@ class DeleteAttachmentTool(BaseTool):
             raise ToolExecutionError("Either attachment_id or attachment_name is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the message
             message = None
             folders_to_search = [
-                self.ews_client.account.drafts,
-                self.ews_client.account.inbox,
-                self.ews_client.account.sent
+                account.drafts,
+                account.inbox,
+                account.sent
             ]
 
             for folder in folders_to_search:
@@ -461,7 +497,8 @@ class DeleteAttachmentTool(BaseTool):
             return format_success_response(
                 f"Attachment '{deleted_name}' deleted successfully",
                 message_id=message_id,
-                attachment_name=deleted_name
+                attachment_name=deleted_name,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -472,12 +509,12 @@ class DeleteAttachmentTool(BaseTool):
 
 
 class ReadAttachmentTool(BaseTool):
-    """Tool for reading and extracting text content from email attachments."""
+    """Tool for reading and extracting text content from email attachments. Supports impersonation to access attachments in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "read_attachment",
-            "description": "Extract text content from email attachments (PDF, DOCX, XLSX, TXT). Supports Arabic (UTF-8) text.",
+            "description": "Extract text content from email attachments (PDF, DOCX, XLSX, TXT). Supports Arabic (UTF-8) text. Supports impersonation to access attachments in another user's mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -498,6 +535,10 @@ class ReadAttachmentTool(BaseTool):
                         "type": "integer",
                         "description": "Maximum number of pages to extract (for PDFs)",
                         "default": 50
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id", "attachment_name"]
@@ -510,6 +551,7 @@ class ReadAttachmentTool(BaseTool):
         attachment_name = kwargs.get("attachment_name")
         extract_tables = kwargs.get("extract_tables", False)
         max_pages = kwargs.get("max_pages", 50)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -518,8 +560,11 @@ class ReadAttachmentTool(BaseTool):
             raise ToolExecutionError("attachment_name is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find message across all folders (including custom subfolders)
-            message = find_message_across_folders(self.ews_client, message_id)
+            message = find_message_for_account(account, message_id)
 
             # Find the attachment by name
             attachment = None
@@ -569,7 +614,8 @@ class ReadAttachmentTool(BaseTool):
                 file_size=len(content),
                 content_length=len(extracted_text),
                 content=extracted_text,
-                supports_arabic=True  # UTF-8 encoding supports Arabic
+                supports_arabic=True,  # UTF-8 encoding supports Arabic
+                mailbox=mailbox
             )
 
         except ToolExecutionError:

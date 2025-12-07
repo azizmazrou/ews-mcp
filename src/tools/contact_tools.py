@@ -16,7 +16,7 @@ class CreateContactTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_contact",
-            "description": "Create a new contact in Exchange",
+            "description": "Create a new contact in Exchange. Supports impersonation to access another user's contacts",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -47,6 +47,10 @@ class CreateContactTool(BaseTool):
                     "department": {
                         "type": "string",
                         "description": "Department (optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["given_name", "surname", "email_address"]
@@ -55,10 +59,16 @@ class CreateContactTool(BaseTool):
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Create contact."""
+        target_mailbox = kwargs.get("target_mailbox")
+
         # Validate input
         request = self.validate_input(CreateContactRequest, **kwargs)
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Generate display_name from provided names (required by exchangelib)
             if request.given_name and request.surname:
                 display_name = f"{request.given_name} {request.surname}"
@@ -72,8 +82,8 @@ class CreateContactTool(BaseTool):
 
             # Create contact
             contact = Contact(
-                account=self.ews_client.account,
-                folder=self.ews_client.account.contacts,
+                account=account,
+                folder=account.contacts,
                 given_name=request.given_name,
                 surname=request.surname,
                 display_name=display_name,
@@ -106,7 +116,8 @@ class CreateContactTool(BaseTool):
                 "Contact created successfully",
                 item_id=ews_id_to_str(contact.id) if hasattr(contact, "id") else None,
                 display_name=f"{request.given_name} {request.surname}",
-                email=request.email_address
+                email=request.email_address,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -120,7 +131,7 @@ class SearchContactsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "search_contacts",
-            "description": "Search contacts by name or email",
+            "description": "Search contacts by name or email. Supports impersonation to access another user's contacts",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -133,6 +144,10 @@ class SearchContactsTool(BaseTool):
                         "description": "Maximum number of results",
                         "default": 50,
                         "maximum": 1000
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["query"]
@@ -143,10 +158,15 @@ class SearchContactsTool(BaseTool):
         """Search contacts."""
         query = kwargs.get("query", "")
         max_results = kwargs.get("max_results", 50)
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Search in contacts folder
-            items = self.ews_client.account.contacts.all()
+            items = account.contacts.all()
 
             # Apply filter
             # Note: exchangelib has limited query capabilities for contacts
@@ -193,7 +213,8 @@ class SearchContactsTool(BaseTool):
 
             return format_success_response(
                 f"Found {len(contacts)} matching contacts",
-                contacts=contacts
+                contacts=contacts,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -207,7 +228,7 @@ class GetContactsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_contacts",
-            "description": "List all contacts",
+            "description": "List all contacts. Supports impersonation to access another user's contacts",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -216,6 +237,10 @@ class GetContactsTool(BaseTool):
                         "description": "Maximum number of contacts to retrieve",
                         "default": 50,
                         "maximum": 1000
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 }
             }
@@ -224,10 +249,15 @@ class GetContactsTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Get all contacts."""
         max_results = kwargs.get("max_results", 50)
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get contacts
-            items = self.ews_client.account.contacts.all()[:max_results]
+            items = account.contacts.all()[:max_results]
 
             contacts = []
             for item in items:
@@ -256,7 +286,8 @@ class GetContactsTool(BaseTool):
 
             return format_success_response(
                 f"Retrieved {len(contacts)} contacts",
-                contacts=contacts
+                contacts=contacts,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -270,7 +301,7 @@ class UpdateContactTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_contact",
-            "description": "Update an existing contact",
+            "description": "Update an existing contact. Supports impersonation to access another user's contacts",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -301,6 +332,10 @@ class UpdateContactTool(BaseTool):
                     "job_title": {
                         "type": "string",
                         "description": "New job title (optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id"]
@@ -310,10 +345,15 @@ class UpdateContactTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Update contact."""
         item_id = kwargs.get("item_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get the contact
-            contact = self.ews_client.account.contacts.get(id=item_id)
+            contact = account.contacts.get(id=item_id)
 
             # Update fields
             if "given_name" in kwargs:
@@ -343,7 +383,8 @@ class UpdateContactTool(BaseTool):
 
             return format_success_response(
                 "Contact updated successfully",
-                item_id=item_id
+                item_id=item_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -357,13 +398,17 @@ class DeleteContactTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_contact",
-            "description": "Delete a contact",
+            "description": "Delete a contact. Supports impersonation to access another user's contacts",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "item_id": {
                         "type": "string",
                         "description": "Contact item ID to delete"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id"]
@@ -373,17 +418,23 @@ class DeleteContactTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Delete contact."""
         item_id = kwargs.get("item_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get and delete the contact
-            contact = self.ews_client.account.contacts.get(id=item_id)
+            contact = account.contacts.get(id=item_id)
             contact.delete()
 
             self.logger.info(f"Deleted contact {item_id}")
 
             return format_success_response(
                 "Contact deleted successfully",
-                item_id=item_id
+                item_id=item_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -397,7 +448,7 @@ class ResolveNamesTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "resolve_names",
-            "description": "Resolve partial names or email addresses to full contact information from Active Directory or Contacts",
+            "description": "Resolve partial names or email addresses to full contact information from Active Directory or Contacts. Supports impersonation to access another user's contacts",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -415,6 +466,10 @@ class ResolveNamesTool(BaseTool):
                         "enum": ["Contacts", "ActiveDirectory", "All"],
                         "description": "Where to search for the name",
                         "default": "All"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["name_query"]
@@ -426,13 +481,18 @@ class ResolveNamesTool(BaseTool):
         name_query = kwargs.get("name_query")
         return_full_info = kwargs.get("return_full_info", False)
         search_scope = kwargs.get("search_scope", "All")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not name_query:
             raise ToolExecutionError("name_query is required")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Use exchangelib's resolve_names method
-            resolved = self.ews_client.account.protocol.resolve_names(
+            resolved = account.protocol.resolve_names(
                 names=[name_query],
                 return_full_contact_data=return_full_info
             )
@@ -490,14 +550,14 @@ class ResolveNamesTool(BaseTool):
                         results.append(result)
                 # Fallback: Handle old format (object with .mailbox attribute)
                 elif resolution:
-                    mailbox = resolution.mailbox if hasattr(resolution, 'mailbox') else None
+                    resolution_mailbox = resolution.mailbox if hasattr(resolution, 'mailbox') else None
 
-                    if mailbox:
+                    if resolution_mailbox:
                         result = {
-                            "name": safe_get(mailbox, 'name', ''),
-                            "email": safe_get(mailbox, 'email_address', ''),
-                            "routing_type": safe_get(mailbox, 'routing_type', 'SMTP'),
-                            "mailbox_type": safe_get(mailbox, 'mailbox_type', 'Mailbox')
+                            "name": safe_get(resolution_mailbox, 'name', ''),
+                            "email": safe_get(resolution_mailbox, 'email_address', ''),
+                            "routing_type": safe_get(resolution_mailbox, 'routing_type', 'SMTP'),
+                            "mailbox_type": safe_get(resolution_mailbox, 'mailbox_type', 'Mailbox')
                         }
 
                         # Add contact details if available and requested
@@ -520,7 +580,8 @@ class ResolveNamesTool(BaseTool):
                 f"Found {len(results)} match(es) for '{name_query}'",
                 query=name_query,
                 results=results,
-                count=len(results)
+                count=len(results),
+                mailbox=mailbox
             )
 
         except Exception as e:
