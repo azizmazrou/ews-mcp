@@ -1440,6 +1440,9 @@ class ReplyEmailTool(BaseTool):
             # Build the complete reply body with quote
             if is_html or original_body_html:
                 # HTML reply format with Outlook-style headers (black text)
+                # Outlook marker tells Exchange where user content ends and quoted content begins
+                # This ensures server-side signatures are inserted before the reply header
+                outlook_reply_marker = '<div id="divRplyFwdMsg" dir="ltr"></div>'
                 quote_header = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
 <div style="font-family: Calibri, Arial, sans-serif;">
@@ -1453,7 +1456,7 @@ class ReplyEmailTool(BaseTool):
 </div>
 <br>
 """
-                complete_body = f"{body}{quote_header}{original_body_html}"
+                complete_body = f"{body}{outlook_reply_marker}{quote_header}{original_body_html}"
                 reply.body = HTMLBody(complete_body)
                 self.logger.info("Using HTMLBody for HTML reply content")
             else:
@@ -1641,6 +1644,9 @@ class ForwardEmailTool(BaseTool):
             # Build the complete forward body
             if is_html or original_body_html:
                 # HTML forward format with Outlook-style headers (black text)
+                # Outlook marker tells Exchange where user content ends and forwarded content begins
+                # This ensures server-side signatures are inserted before the forward header
+                outlook_reply_marker = '<div id="divRplyFwdMsg" dir="ltr"></div>'
                 forward_header_html = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
 <div style="font-family: Calibri, Arial, sans-serif;">
@@ -1655,7 +1661,7 @@ class ForwardEmailTool(BaseTool):
 <br>
 """
                 user_message = f"<div>{body}</div><br>" if body else ""
-                complete_body = f"{user_message}{forward_header_html}{original_body_html}"
+                complete_body = f"{user_message}{outlook_reply_marker}{forward_header_html}{original_body_html}"
                 forward.body = HTMLBody(complete_body)
                 self.logger.info("Using HTMLBody for HTML forward content")
             else:
