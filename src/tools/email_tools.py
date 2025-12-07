@@ -58,6 +58,36 @@ def extract_body_html(message) -> str:
     return str(body) if body else ""
 
 
+def clean_original_body_for_signature(original_body_html: str) -> str:
+    """
+    Remove or rename WordSection1 from original content to prevent
+    Exclaimer/server-side signature systems from placing signature after it.
+
+    Exclaimer looks for the LAST </div> that closes a WordSection1 and
+    inserts signature after it. If the original email has WordSection1,
+    the signature ends up at the very end instead of after user's message.
+
+    Args:
+        original_body_html: The HTML body of the original email
+
+    Returns:
+        Cleaned HTML with WordSection1 renamed to OriginalSection
+    """
+    if not original_body_html:
+        return original_body_html
+
+    # Rename WordSection1 to OriginalSection to avoid confusing Exclaimer
+    cleaned = original_body_html.replace('class="WordSection1"', 'class="OriginalSection"')
+    cleaned = cleaned.replace("class='WordSection1'", "class='OriginalSection'")
+    cleaned = cleaned.replace('class=WordSection1', 'class=OriginalSection')
+
+    # Also handle variations with spaces
+    cleaned = cleaned.replace('class = "WordSection1"', 'class="OriginalSection"')
+    cleaned = cleaned.replace("class = 'WordSection1'", "class='OriginalSection'")
+
+    return cleaned
+
+
 def format_forward_header(message) -> dict:
     """
     Format the forwarded message header like Outlook.
@@ -1460,6 +1490,9 @@ class ReplyEmailTool(BaseTool):
             original_body_html = extract_body_html(original_message)
             self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
+            # Clean original body - rename WordSection1 to prevent Exclaimer signature misplacement
+            original_body_html = clean_original_body_for_signature(original_body_html)
+
             # Build the complete reply body with quote
             if is_html or original_body_html:
                 # Outlook-compatible structure for Exclaimer/server-side signature placement
@@ -1679,6 +1712,9 @@ class ForwardEmailTool(BaseTool):
             # Extract original body HTML properly (from HTMLBody.body, not the object itself)
             original_body_html = extract_body_html(original_message)
             self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
+
+            # Clean original body - rename WordSection1 to prevent Exclaimer signature misplacement
+            original_body_html = clean_original_body_for_signature(original_body_html)
 
             # Detect if user's message body is HTML
             is_html = bool(re.search(r'<[^>]+>', body)) if body else False
