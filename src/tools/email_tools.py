@@ -73,13 +73,31 @@ def format_forward_header(message) -> dict:
         Dictionary with formatted header fields
     """
     # From: Name <email> format
-    sender = safe_get(message, "sender", None)
+    # Try multiple sources for sender info (some may be None for distribution lists, etc.)
     sender_name = ""
     sender_email = ""
+
+    # Try sender first (most common)
+    sender = safe_get(message, "sender", None)
     if sender:
-        # Use 'or ""' to convert None to empty string
         sender_name = (sender.name or "") if hasattr(sender, "name") else ""
         sender_email = (sender.email_address or "") if hasattr(sender, "email_address") else ""
+
+    # Fallback 1: Try author if sender.email_address is empty
+    if not sender_email:
+        author = safe_get(message, "author", None)
+        if author:
+            if not sender_name:
+                sender_name = (author.name or "") if hasattr(author, "name") else ""
+            sender_email = (author.email_address or "") if hasattr(author, "email_address") else ""
+
+    # Fallback 2: Try from_ if still empty
+    if not sender_email:
+        from_field = safe_get(message, "from_", None)
+        if from_field:
+            if not sender_name:
+                sender_name = (from_field.name or "") if hasattr(from_field, "name") else ""
+            sender_email = (from_field.email_address or "") if hasattr(from_field, "email_address") else ""
 
     # Format as "Name <email>" or just what's available
     if sender_name and sender_email:
