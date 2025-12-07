@@ -23,11 +23,12 @@ from .exceptions import EWSMCPException
 from .logging_system import get_logger
 from .openapi_adapter import OpenAPIAdapter
 
-# Import all tool classes (up to 47 tools total: 43 base + 4 AI)
+# Import all tool classes (up to 49 tools total: 45 base + 4 AI)
 from .tools import (
-    # Email tools (8)
+    # Email tools (10)
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
     DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool,
+    ReplyEmailTool, ForwardEmailTool,
     # Calendar tools (7)
     CreateAppointmentTool, GetCalendarTool, UpdateAppointmentTool,
     DeleteAppointmentTool, RespondToMeetingTool, CheckAvailabilityTool,
@@ -196,10 +197,10 @@ class EWSMCPServer:
                 )]
 
     def register_tools(self):
-        """Register all enabled tools (43 base tools, up to 47 with AI)."""
+        """Register all enabled tools (45 base tools, up to 49 with AI)."""
         tool_classes = []
 
-        # Email tools (8 tools)
+        # Email tools (10 tools)
         if self.settings.enable_email:
             tool_classes.extend([
                 SendEmailTool,
@@ -209,9 +210,11 @@ class EWSMCPServer:
                 DeleteEmailTool,
                 MoveEmailTool,
                 UpdateEmailTool,
-                CopyEmailTool
+                CopyEmailTool,
+                ReplyEmailTool,
+                ForwardEmailTool
             ])
-            self.logger.info("Email tools enabled (8 tools)")
+            self.logger.info("Email tools enabled (10 tools)")
 
         # Attachment tools (5 tools - email-related)
         if self.settings.enable_email:
