@@ -1537,14 +1537,29 @@ class ReplyEmailTool(BaseTool):
                 # 1. User's message at top
                 user_message = body if body else ""
 
-                # 2. Get the original email body HTML (already contains its own headers)
+                # 2. Format the reply headers from original email metadata
+                header = format_forward_header(original_message)
+
+                # 3. Get the original email body HTML
                 original_body_html = extract_body_html(original_message)
                 self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
-                # 3. Construct: user message → separator → original body
-                # No extra headers needed - original email body contains them
+                # 4. Build headers block
+                headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
+<b>From:</b> {header['from']}<br/>
+<b>Sent:</b> {header['sent']}<br/>'''
+                if header['to']:
+                    headers_html += f'''<b>To:</b> {header['to']}<br/>'''
+                if header['cc']:
+                    headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+                headers_html += f'''<b>Subject:</b> {header['subject']}
+</p>'''
+
+                # 5. Construct: user message → separator → headers → original body
                 complete_body = f'''{user_message}
 <hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
+{headers_html}
+<br/>
 {original_body_html}'''
 
                 self.logger.info(f"Constructed complete reply body: {len(complete_body)} characters")
@@ -1764,14 +1779,29 @@ class ForwardEmailTool(BaseTool):
                 # 1. User's message at top
                 user_message = body if body else ""
 
-                # 2. Get the original email body HTML (already contains its own headers)
+                # 2. Format the forward headers from original email metadata
+                header = format_forward_header(original_message)
+
+                # 3. Get the original email body HTML
                 original_body_html = extract_body_html(original_message)
                 self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
-                # 3. Construct: user message → separator → original body
-                # No extra headers needed - original email body contains them
+                # 4. Build headers block
+                headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
+<b>From:</b> {header['from']}<br/>
+<b>Date:</b> {header['sent']}<br/>
+<b>Subject:</b> {header['subject']}<br/>'''
+                if header['to']:
+                    headers_html += f'''<b>To:</b> {header['to']}<br/>'''
+                if header['cc']:
+                    headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+                headers_html += '''</p>'''
+
+                # 5. Construct: user message → separator → headers → original body
                 complete_body = f'''{user_message}
 <hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
+{headers_html}
+<br/>
 {original_body_html}'''
 
                 self.logger.info(f"Constructed complete forward body: {len(complete_body)} characters")
