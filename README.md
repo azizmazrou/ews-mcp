@@ -116,6 +116,7 @@ Multi-tier logging system for production environments:
 ### Technical Features
 
 - **Multi-Authentication**: OAuth2, Basic Auth, and NTLM support
+- **Impersonation/Delegation**: Access multiple mailboxes with a single service account
 - **Timezone Support**: Proper handling of all timezones (Asia/Riyadh, UTC, etc.)
 - **HTTP/SSE Transport**: stdio and HTTP/SSE for web clients (n8n compatible)
 - **Docker Ready**: Production-ready containerization with health checks
@@ -445,7 +446,9 @@ Add to your Claude Desktop configuration file:
 
 ## Available Tools
 
-**Total: 44 tools across 9 categories**
+**Total: 46 tools across 9 categories**
+
+> **New**: Reply & Forward tools with full body/signature preservation, and Impersonation support for all tools!
 
 ### Contact Intelligence Tools (3 tools)
 
@@ -462,7 +465,7 @@ Add to your Claude Desktop configuration file:
 - Communication statistics included
 - Arabic language support (UTF-8)
 
-### Email Tools (9 tools)
+### Email Tools (11 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -474,7 +477,11 @@ Add to your Claude Desktop configuration file:
 | `move_email` | Move emails between folders |
 | `copy_email` | Copy emails preserving originals |
 | `update_email` | Update read status, flags, categories |
+| `reply_email` | **NEW** Reply preserving thread, signatures, inline images |
+| `forward_email` | **NEW** Forward with full body, attachments, formatting |
 | `list_attachments` | List all attachments for email |
+
+> **Reply & Forward Features**: Full HTML body preservation, inline image support (signatures with logos), Outlook-style headers, conversation threading. See [Reply & Forward Guide](docs/REPLY_FORWARD.md).
 
 ### Attachment Tools (5 tools)
 
@@ -617,7 +624,49 @@ search_emails(
     has_attachments=True,
     start_date="2025-01-01"
 )
+
+# Reply to an email (preserves thread, signatures, inline images)
+reply_email(
+    message_id="AAMkADc3MWUy...",
+    body="<p>Thank you for your email. I'll review and respond by Friday.</p>",
+    reply_all=False
+)
+
+# Forward an email with a message
+forward_email(
+    message_id="AAMkADc3MWUy...",
+    to=["manager@company.com"],
+    body="FYI - Please see the project update below.",
+    cc=["team@company.com"]
+)
 ```
+
+### Impersonation (Multi-Mailbox Access)
+
+```python
+# Read emails from a shared mailbox
+read_emails(
+    folder="inbox",
+    target_mailbox="shared@company.com"
+)
+
+# Send email on behalf of another user
+send_email(
+    to=["client@external.com"],
+    subject="Support Response",
+    body="Thank you for contacting support...",
+    target_mailbox="support@company.com"
+)
+
+# Forward from a shared mailbox
+forward_email(
+    message_id="AAMkADc3MWUy...",
+    to=["colleague@company.com"],
+    target_mailbox="info@company.com"
+)
+```
+
+> **Note**: Impersonation requires `ApplicationImpersonation` role in Exchange. See [Impersonation Guide](docs/IMPERSONATION.md).
 
 ### Smart Meeting Scheduling
 
@@ -894,11 +943,22 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed solutions.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
 - [Architecture Overview](docs/ARCHITECTURE.md) - Technical deep dive
 
+### Feature Guides
+- **[Impersonation Guide](docs/IMPERSONATION.md)** - Access multiple mailboxes with a single service account
+  - ApplicationImpersonation vs Delegate access
+  - Setup instructions for Exchange/Office 365
+  - All 46 tools support `target_mailbox` parameter
+- **[Reply & Forward Guide](docs/REPLY_FORWARD.md)** - Reply and forward emails
+  - Full HTML body preservation
+  - Inline image support (signatures with logos)
+  - Outlook-style header formatting
+  - Conversation threading
+
 ### Integration Guides
 - **[Open WebUI Setup](OPENWEBUI_SETUP.md)** - Integrate with Open WebUI via REST API
   - Built-in OpenAPI/REST support (no MCPO needed!)
   - Configurable API URLs for any deployment
-  - Auto-discovery of all 43+ Exchange tools
+  - Auto-discovery of all 46 Exchange tools
   - Production deployment examples
 
 ### Version History
