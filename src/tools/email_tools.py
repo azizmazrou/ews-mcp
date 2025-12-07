@@ -1700,97 +1700,33 @@ class ForwardEmailTool(BaseTool):
             # Get original message details
             original_subject = safe_get(original_message, "subject", "") or ""
 
-            # Create forward using exchangelib's built-in method
-            forward = original_message.create_forward(subject=None, body=None, to_recipients=None)
-            self.logger.info("Creating forward message")
-
-            # Set recipients
-            forward.to_recipients = [Mailbox(email_address=email) for email in to_recipients]
-            if cc_recipients:
-                forward.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
-            if bcc_recipients:
-                forward.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
-
-            # Use helper function to format headers properly (Outlook-style)
-            # From: Name only, To/Cc: Name <email>
-            header = format_forward_header(original_message)
-
-            # Extract original body HTML properly (from HTMLBody.body, not the object itself)
-            original_body_html = extract_body_html(original_message)
-            self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
-
-            # Clean original body - rename WordSection1 to prevent Exclaimer signature misplacement
-            original_body_html = clean_original_body_for_signature(original_body_html)
+            # Let EWS handle forward body construction for proper Exclaimer signature placement
+            # By passing the user's body directly to create_forward(), Exchange builds the
+            # forward structure with proper metadata that Exclaimer can recognize
 
             # Detect if user's message body is HTML
             is_html = bool(re.search(r'<[^>]+>', body)) if body else False
 
-            # Build the complete forward body
-            if is_html or original_body_html:
-                # Outlook-compatible structure for Exclaimer/server-side signature placement
-                # Exclaimer looks for closing </div> of WordSection1 and inserts signature after it
-
-                user_message = body if body else ""
-
-                # Forward header with Outlook-style border
-                forward_header_html = f'''
-<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
-<p style="font-size:11pt;font-family:Calibri,sans-serif;">
-<b>From:</b> {header['from']}<br>
-<b>Sent:</b> {header['sent']}<br>'''
-                if header['to']:
-                    forward_header_html += f'''<b>To:</b> {header['to']}<br>'''
-                if header['cc']:
-                    forward_header_html += f'''<b>Cc:</b> {header['cc']}<br>'''
-                forward_header_html += f'''<b>Subject:</b> {header['subject']}
-</p>
-</div>
-'''
-
-                # Build complete body with Outlook-compatible structure
-                # WordSection1 div is closed after user content - signature goes in the <br><br> gap
-                # Use ForwardSection (not WordSection1) for forward content so Exclaimer ignores it
-                # Office XML namespaces are required for Exclaimer to recognize Outlook-style HTML
-                complete_body = f'''<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml" xmlns="http://www.w3.org/TR/REC-html40">
-<head>
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<meta name="Generator" content="Microsoft Word 15 (filtered medium)">
-<style>
-div.WordSection1 {{{{page:WordSection1;}}}}
-</style>
-</head>
-<body lang="EN-US" style="word-wrap:break-word">
-<div class="WordSection1">
-{user_message}
-<div></div>
-</div>
-<br><br>
-<div class="ForwardSection">
-{forward_header_html}
-{original_body_html}
-</div>
-</body>
-</html>'''
-
-                forward.body = HTMLBody(complete_body)
-                self.logger.info("Using HTMLBody for HTML forward content")
+            # Prepare user body for create_forward
+            if body:
+                user_body = HTMLBody(body) if is_html else Body(body)
             else:
-                # Plain text forward format
-                separator = "\n\n" + "─" * 40 + "\n"
-                forward_header_text = f"From: {header['from']}\n"
-                forward_header_text += f"Sent: {header['sent']}\n"
-                if header['to']:
-                    forward_header_text += f"To: {header['to']}\n"
-                if header['cc']:
-                    forward_header_text += f"Cc: {header['cc']}\n"
-                forward_header_text += f"Subject: {header['subject']}\n\n"
+                user_body = None
 
-                # Use text_body for plain text
-                original_text = safe_get(original_message, "text_body", "") or ""
-                user_message = f"{body}\n" if body else ""
-                complete_body = f"{user_message}{separator}{forward_header_text}{original_text}"
-                forward.body = Body(complete_body)
-                self.logger.info("Using Body (plain text) for forward content")
+            # Create forward using exchangelib's built-in method
+            # Pass body and recipients directly - let EWS handle the structure
+            forward = original_message.create_forward(
+                subject=None,
+                body=user_body,
+                to_recipients=[Mailbox(email_address=email) for email in to_recipients]
+            )
+            self.logger.info("Creating forward message (letting EWS handle body structure)")
+
+            # Set CC/BCC recipients
+            if cc_recipients:
+                forward.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
+            if bcc_recipients:
+                forward.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
 
             # Copy original attachments with proper content_id and is_inline preservation
             # This is CRITICAL for inline images (signatures, embedded images) to display correctly
