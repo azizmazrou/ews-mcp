@@ -9,12 +9,12 @@ from ..utils import format_success_response, parse_datetime_tz_aware, format_dat
 
 
 class SetOOFSettingsTool(BaseTool):
-    """Tool for configuring Out-of-Office automatic replies."""
+    """Tool for configuring Out-of-Office automatic replies. Supports impersonation to manage out-of-office settings for another user."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "set_oof_settings",
-            "description": "Configure Out-of-Office automatic reply settings",
+            "description": "Configure Out-of-Office automatic reply settings. Supports impersonation to manage out-of-office settings for another user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -44,6 +44,10 @@ class SetOOFSettingsTool(BaseTool):
                         "description": "Who receives external reply",
                         "enum": ["None", "Known", "All"],
                         "default": "Known"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["state"]
@@ -58,6 +62,7 @@ class SetOOFSettingsTool(BaseTool):
         start_time_str = kwargs.get("start_time")
         end_time_str = kwargs.get("end_time")
         external_audience = kwargs.get("external_audience", "Known")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not state:
             raise ToolExecutionError("state is required")
@@ -68,6 +73,9 @@ class SetOOFSettingsTool(BaseTool):
                 raise ToolExecutionError("start_time and end_time are required for Scheduled state")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             from exchangelib import OofSettings, MailboxData
 
             # Parse dates if provided
@@ -108,7 +116,7 @@ class SetOOFSettingsTool(BaseTool):
                 oof.end = end_time
 
             # Apply settings
-            self.ews_client.account.oof_settings = oof
+            account.oof_settings = oof
 
             self.logger.info(f"OOF settings updated: state={state}")
 
@@ -126,7 +134,8 @@ class SetOOFSettingsTool(BaseTool):
 
             return format_success_response(
                 f"Out-of-Office settings updated to {state}",
-                settings=response_data
+                settings=response_data,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -137,24 +146,34 @@ class SetOOFSettingsTool(BaseTool):
 
 
 class GetOOFSettingsTool(BaseTool):
-    """Tool for retrieving current Out-of-Office settings."""
+    """Tool for retrieving current Out-of-Office settings. Supports impersonation to manage out-of-office settings for another user."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_oof_settings",
-            "description": "Get current Out-of-Office automatic reply settings",
+            "description": "Get current Out-of-Office automatic reply settings. Supports impersonation to manage out-of-office settings for another user.",
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
+                    }
+                },
                 "required": []
             }
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Get current OOF settings."""
+        target_mailbox = kwargs.get("target_mailbox")
+
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get OOF settings
-            oof = self.ews_client.account.oof_settings
+            oof = account.oof_settings
 
             if not oof:
                 return format_success_response(
@@ -164,7 +183,8 @@ class GetOOFSettingsTool(BaseTool):
                         "internal_reply": "",
                         "external_reply": "",
                         "external_audience": "None"
-                    }
+                    },
+                    mailbox=mailbox
                 )
 
             # Extract settings
@@ -213,7 +233,8 @@ class GetOOFSettingsTool(BaseTool):
 
             return format_success_response(
                 f"Current OOF state: {settings['state']}",
-                settings=settings
+                settings=settings,
+                mailbox=mailbox
             )
 
         except Exception as e:

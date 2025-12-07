@@ -26,7 +26,7 @@ import re
 from .base import BaseTool
 from ..models import SendEmailRequest, EmailSearchRequest, EmailDetails
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, ews_id_to_str
+from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str
 
 
 def is_exchange_folder_id(identifier: str) -> bool:
@@ -53,29 +53,33 @@ def is_exchange_folder_id(identifier: str) -> bool:
     return False
 
 
-async def resolve_folder(ews_client, folder_identifier: str):
+async def resolve_folder_for_account(account, folder_identifier: str):
     """
-    Resolve folder from name, path, or ID.
+    Resolve folder from name, path, or ID for a specific account.
 
     Supports:
     - Standard names: inbox, sent, drafts, deleted, junk
     - Folder paths: Inbox/CC, Inbox/Projects/2024
     - Folder IDs: AAMkADc3MWUy... (base64 encoded, may contain '/' characters)
     - Custom folder names: CC, Archive, Projects
+
+    Args:
+        account: Exchange Account object (primary or impersonated)
+        folder_identifier: Folder name, path, or ID
     """
     folder_identifier = folder_identifier.strip()
 
     # Standard folders map (lowercase for matching)
     folder_map = {
-        "inbox": ews_client.account.inbox,
-        "sent": ews_client.account.sent,
-        "drafts": ews_client.account.drafts,
-        "deleted": ews_client.account.trash,
-        "junk": ews_client.account.junk,
-        "trash": ews_client.account.trash,
-        "calendar": ews_client.account.calendar,
-        "contacts": ews_client.account.contacts,
-        "tasks": ews_client.account.tasks
+        "inbox": account.inbox,
+        "sent": account.sent,
+        "drafts": account.drafts,
+        "deleted": account.trash,
+        "junk": account.junk,
+        "trash": account.trash,
+        "calendar": account.calendar,
+        "contacts": account.contacts,
+        "tasks": account.tasks
     }
 
     # Try 1: Standard folder name (case-insensitive)
@@ -103,7 +107,7 @@ async def resolve_folder(ews_client, folder_identifier: str):
             return None
 
         # Search root tree for folder ID
-        found_folder = find_folder_by_id(ews_client.account.root, folder_identifier)
+        found_folder = find_folder_by_id(account.root, folder_identifier)
         if found_folder:
             return found_folder
         # If not found as folder ID, don't fall through to path parsing
@@ -123,7 +127,7 @@ async def resolve_folder(ews_client, folder_identifier: str):
             current_folder = folder_map[parent_name]
         else:
             # Default to inbox if parent not recognized
-            current_folder = ews_client.account.inbox
+            current_folder = account.inbox
 
         # Navigate through subfolders
         for subfolder_name in parts[1:]:
@@ -169,12 +173,12 @@ async def resolve_folder(ews_client, folder_identifier: str):
         return None
 
     # Search under inbox first (most common location for custom folders)
-    custom_folder = search_folder_tree(ews_client.account.inbox, folder_identifier)
+    custom_folder = search_folder_tree(account.inbox, folder_identifier)
     if custom_folder:
         return custom_folder
 
     # Search under root as fallback
-    custom_folder = search_folder_tree(ews_client.account.root, folder_identifier)
+    custom_folder = search_folder_tree(account.root, folder_identifier)
     if custom_folder:
         return custom_folder
 
@@ -186,13 +190,22 @@ async def resolve_folder(ews_client, folder_identifier: str):
     )
 
 
+async def resolve_folder(ews_client, folder_identifier: str):
+    """
+    Backward-compatible wrapper for resolve_folder_for_account.
+
+    Deprecated: Use resolve_folder_for_account with explicit account parameter.
+    """
+    return await resolve_folder_for_account(ews_client.account, folder_identifier)
+
+
 class SendEmailTool(BaseTool):
     """Tool for sending emails."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "send_email",
-            "description": "Send an email through Exchange with optional attachments and CC/BCC",
+            "description": "Send an email through Exchange with optional attachments and CC/BCC. Supports impersonation to send on behalf of another user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -228,6 +241,10 @@ class SendEmailTool(BaseTool):
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Attachment file paths (optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to send on behalf of (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["to", "subject", "body"]
@@ -236,10 +253,17 @@ class SendEmailTool(BaseTool):
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Send email via EWS."""
+        # Get target mailbox for impersonation
+        target_mailbox = kwargs.pop("target_mailbox", None)
+
         # Validate input
         request = self.validate_input(SendEmailRequest, **kwargs)
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Validate recipients before sending (helps catch invalid addresses early)
             all_recipients = request.to + (request.cc or []) + (request.bcc or [])
             invalid_recipients = []
@@ -248,7 +272,7 @@ class SendEmailTool(BaseTool):
             for recipient in all_recipients:
                 try:
                     # Try to resolve the recipient via EWS
-                    resolved = self.ews_client.account.protocol.resolve_names(
+                    resolved = account.protocol.resolve_names(
                         names=[recipient],
                         return_full_contact_data=False
                     )
@@ -256,7 +280,7 @@ class SendEmailTool(BaseTool):
                     if not resolved or not any(resolved):
                         # Recipient couldn't be resolved - determine if internal or external
                         recipient_domain = recipient.split('@')[1] if '@' in recipient else ''
-                        sender_domain = self.ews_client.account.primary_smtp_address.split('@')[1]
+                        sender_domain = account.primary_smtp_address.split('@')[1]
 
                         if recipient_domain == sender_domain:
                             # Internal address that can't be resolved - error
@@ -268,7 +292,7 @@ class SendEmailTool(BaseTool):
                 except Exception as e:
                     # resolve_names failed - likely external address
                     recipient_domain = recipient.split('@')[1] if '@' in recipient else ''
-                    sender_domain = self.ews_client.account.primary_smtp_address.split('@')[1]
+                    sender_domain = account.primary_smtp_address.split('@')[1]
                     if recipient_domain == sender_domain:
                         invalid_recipients.append(recipient)
                     else:
@@ -314,7 +338,7 @@ class SendEmailTool(BaseTool):
             # Using wrong type causes Exchange to strip content!
             if is_html:
                 message = Message(
-                    account=self.ews_client.account,
+                    account=account,
                     subject=request.subject,
                     body=HTMLBody(email_body),
                     to_recipients=[Mailbox(email_address=email) for email in request.to]
@@ -322,7 +346,7 @@ class SendEmailTool(BaseTool):
                 self.logger.info("Using HTMLBody for HTML content")
             else:
                 message = Message(
-                    account=self.ews_client.account,
+                    account=account,
                     subject=request.subject,
                     body=Body(email_body),
                     to_recipients=[Mailbox(email_address=email) for email in request.to]
@@ -399,7 +423,8 @@ class SendEmailTool(BaseTool):
                 "Email sent successfully",
                 message_id=ews_id_to_str(message.id) if hasattr(message, 'id') else None,
                 sent_time=datetime.now().isoformat(),
-                recipients=request.to
+                recipients=request.to,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -413,7 +438,7 @@ class ReadEmailsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "read_emails",
-            "description": "Read emails from a specified folder (default: inbox)",
+            "description": "Read emails from a specified folder (default: inbox). Supports impersonation to read from another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -432,6 +457,10 @@ class ReadEmailsTool(BaseTool):
                         "type": "boolean",
                         "description": "Only return unread emails",
                         "default": False
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to read from (requires impersonation/delegate access)"
                     }
                 }
             }
@@ -442,11 +471,16 @@ class ReadEmailsTool(BaseTool):
         folder_name = kwargs.get("folder", "inbox")
         max_results = kwargs.get("max_results", 50)
         unread_only = kwargs.get("unread_only", False)
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get folder - supports standard names, paths, and folder IDs
-            folder = await resolve_folder(self.ews_client, folder_name)
-            self.logger.info(f"Resolved folder '{folder_name}' to: {safe_get(folder, 'name', folder_name)}")
+            folder = await resolve_folder_for_account(account, folder_name)
+            self.logger.info(f"Resolved folder '{folder_name}' to: {safe_get(folder, 'name', folder_name)} in mailbox: {mailbox}")
 
             # Build query
             items = folder.all().order_by('-datetime_received')
@@ -480,13 +514,14 @@ class ReadEmailsTool(BaseTool):
                 }
                 emails.append(email_data)
 
-            self.logger.info(f"Retrieved {len(emails)} emails from {folder_name}")
+            self.logger.info(f"Retrieved {len(emails)} emails from {folder_name} in mailbox: {mailbox}")
 
             return format_success_response(
                 f"Retrieved {len(emails)} emails",
                 emails=emails,
                 total_count=len(emails),
-                folder=folder_name
+                folder=folder_name,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -500,7 +535,7 @@ class SearchEmailsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "search_emails",
-            "description": "Search emails with various filters (subject, sender, date range, etc.)",
+            "description": "Search emails with various filters (subject, sender, date range, etc.). Supports impersonation to search in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -538,6 +573,10 @@ class SearchEmailsTool(BaseTool):
                         "description": "Maximum number of results",
                         "default": 50,
                         "maximum": 1000
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to search in (requires impersonation/delegate access)"
                     }
                 }
             }
@@ -549,7 +588,14 @@ class SearchEmailsTool(BaseTool):
         from exchangelib.errors import ErrorTimeoutExpired
         import socket
 
+        # Get target mailbox for impersonation
+        target_mailbox = kwargs.get("target_mailbox")
+
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Auto-add date range to prevent timeouts in large mailboxes
             if not kwargs.get("start_date") and not kwargs.get("end_date"):
                 # If no other specific filters are provided, enforce a default date range
@@ -579,8 +625,8 @@ class SearchEmailsTool(BaseTool):
 
             # Get folder - supports standard names, paths, and folder IDs
             folder_name = kwargs.get("folder", "inbox")
-            folder = await resolve_folder(self.ews_client, folder_name)
-            self.logger.info(f"Resolved folder '{folder_name}' to: {safe_get(folder, 'name', folder_name)}")
+            folder = await resolve_folder_for_account(account, folder_name)
+            self.logger.info(f"Resolved folder '{folder_name}' to: {safe_get(folder, 'name', folder_name)} in mailbox: {mailbox}")
 
             # Build query
             query = folder.all()
@@ -647,12 +693,13 @@ class SearchEmailsTool(BaseTool):
             # Execute with retry
             emails = execute_query()
 
-            self.logger.info(f"Found {len(emails)} emails matching search criteria")
+            self.logger.info(f"Found {len(emails)} emails matching search criteria in mailbox: {mailbox}")
 
             return format_success_response(
                 f"Found {len(emails)} matching emails",
                 emails=emails,
-                total_count=len(emails)
+                total_count=len(emails),
+                mailbox=mailbox
             )
 
         except (ErrorTimeoutExpired, socket.timeout) as e:
@@ -678,13 +725,17 @@ class GetEmailDetailsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_email_details",
-            "description": "Get full details of a specific email by ID",
+            "description": "Get full details of a specific email by ID. Supports impersonation to access another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "message_id": {
                         "type": "string",
                         "description": "Email message ID"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to access (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id"]
@@ -694,10 +745,15 @@ class GetEmailDetailsTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Get email details."""
         message_id = kwargs.get("message_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find message across all folders (including custom subfolders)
-            item = find_message_across_folders(self.ews_client, message_id)
+            item = find_message_for_account(account, message_id)
 
             # Get sender email safely
             sender = safe_get(item, "sender", None)
@@ -734,7 +790,8 @@ class GetEmailDetailsTool(BaseTool):
 
             return format_success_response(
                 "Email details retrieved",
-                email=email_details
+                email=email_details,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -748,7 +805,7 @@ class DeleteEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_email",
-            "description": "Delete an email by ID (moves to trash)",
+            "description": "Delete an email by ID (moves to trash). Supports impersonation to delete from another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -760,6 +817,10 @@ class DeleteEmailTool(BaseTool):
                         "type": "boolean",
                         "description": "Permanently delete (hard delete)",
                         "default": False
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to delete from (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id"]
@@ -770,10 +831,15 @@ class DeleteEmailTool(BaseTool):
         """Delete email."""
         message_id = kwargs.get("message_id")
         permanent = kwargs.get("permanent", False)
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find message across all folders (including custom subfolders)
-            item = find_message_across_folders(self.ews_client, message_id)
+            item = find_message_for_account(account, message_id)
 
             if permanent:
                 item.delete()
@@ -781,14 +847,15 @@ class DeleteEmailTool(BaseTool):
             else:
                 # Move to trash folder (Deleted Items) so user can recover
                 # Note: soft_delete() makes items recoverable but not visible in Deleted Items
-                item.move(self.ews_client.account.trash)
+                item.move(account.trash)
                 action = "moved to trash"
 
-            self.logger.info(f"Email {message_id} {action}")
+            self.logger.info(f"Email {message_id} {action} in mailbox: {mailbox}")
 
             return format_success_response(
                 f"Email {action}",
-                message_id=message_id
+                message_id=message_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -802,7 +869,7 @@ class MoveEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "move_email",
-            "description": "Move an email to a different folder",
+            "description": "Move an email to a different folder. Supports impersonation to move emails in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -813,6 +880,10 @@ class MoveEmailTool(BaseTool):
                     "destination_folder": {
                         "type": "string",
                         "description": "Destination folder (inbox, sent, drafts, deleted, junk)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id", "destination_folder"]
@@ -823,15 +894,20 @@ class MoveEmailTool(BaseTool):
         """Move email to folder."""
         message_id = kwargs.get("message_id")
         dest_folder_name = kwargs.get("destination_folder", "").lower()
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get destination folder
             folder_map = {
-                "inbox": self.ews_client.account.inbox,
-                "sent": self.ews_client.account.sent,
-                "drafts": self.ews_client.account.drafts,
-                "deleted": self.ews_client.account.trash,
-                "junk": self.ews_client.account.junk
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk
             }
 
             dest_folder = folder_map.get(dest_folder_name)
@@ -839,14 +915,15 @@ class MoveEmailTool(BaseTool):
                 raise ToolExecutionError(f"Unknown folder: {dest_folder_name}")
 
             # Find message across all folders (including custom subfolders)
-            item = find_message_across_folders(self.ews_client, message_id)
+            item = find_message_for_account(account, message_id)
             item.move(dest_folder)
 
-            self.logger.info(f"Email {message_id} moved to {dest_folder_name}")
+            self.logger.info(f"Email {message_id} moved to {dest_folder_name} in mailbox: {mailbox}")
 
             return format_success_response(
                 f"Email moved to {dest_folder_name}",
-                message_id=message_id
+                message_id=message_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -860,7 +937,7 @@ class UpdateEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_email",
-            "description": "Update email properties (read status, flags, categories, importance)",
+            "description": "Update email properties (read status, flags, categories, importance). Supports impersonation to update in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -886,6 +963,10 @@ class UpdateEmailTool(BaseTool):
                         "type": "string",
                         "enum": ["Low", "Normal", "High"],
                         "description": "Email importance level"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id"]
@@ -895,29 +976,18 @@ class UpdateEmailTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Update email properties."""
         message_id = kwargs.get("message_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the message across common folders
-            message = None
-            folders_to_search = [
-                self.ews_client.account.inbox,
-                self.ews_client.account.sent,
-                self.ews_client.account.drafts
-            ]
-
-            for folder in folders_to_search:
-                try:
-                    message = folder.get(id=message_id)
-                    if message:
-                        break
-                except Exception:
-                    continue
-
-            if not message:
-                raise ToolExecutionError(f"Message not found: {message_id}")
+            message = find_message_for_account(account, message_id)
 
             # Track what was updated
             updates = {}
@@ -951,12 +1021,13 @@ class UpdateEmailTool(BaseTool):
             # Save changes
             message.save()
 
-            self.logger.info(f"Email {message_id} updated: {updates}")
+            self.logger.info(f"Email {message_id} updated in mailbox {mailbox}: {updates}")
 
             return format_success_response(
                 "Email updated successfully",
                 message_id=message_id,
-                updates=updates
+                updates=updates,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -972,7 +1043,7 @@ class CopyEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "copy_email",
-            "description": "Copy an email to another folder (keeping original in current location)",
+            "description": "Copy an email to another folder (keeping original in current location). Supports impersonation to copy in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -988,6 +1059,10 @@ class CopyEmailTool(BaseTool):
                     "destination_folder_id": {
                         "type": "string",
                         "description": "Destination folder ID (alternative to destination_folder)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id"]
@@ -999,6 +1074,7 @@ class CopyEmailTool(BaseTool):
         message_id = kwargs.get("message_id")
         destination_folder_name = kwargs.get("destination_folder")
         destination_folder_id = kwargs.get("destination_folder_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -1007,16 +1083,20 @@ class CopyEmailTool(BaseTool):
             raise ToolExecutionError("Either destination_folder or destination_folder_id is required")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the message in various folders
             message = None
             source_folder_name = None
 
             folders_to_search = [
-                ("inbox", self.ews_client.account.inbox),
-                ("sent", self.ews_client.account.sent),
-                ("drafts", self.ews_client.account.drafts),
-                ("deleted", self.ews_client.account.trash),
-                ("junk", self.ews_client.account.junk)
+                ("inbox", account.inbox),
+                ("sent", account.sent),
+                ("drafts", account.drafts),
+                ("deleted", account.trash),
+                ("junk", account.junk)
             ]
 
             for folder_name, folder in folders_to_search:
@@ -1034,11 +1114,11 @@ class CopyEmailTool(BaseTool):
             # Get destination folder
             if destination_folder_name:
                 folder_map = {
-                    "inbox": self.ews_client.account.inbox,
-                    "sent": self.ews_client.account.sent,
-                    "drafts": self.ews_client.account.drafts,
-                    "deleted": self.ews_client.account.trash,
-                    "junk": self.ews_client.account.junk
+                    "inbox": account.inbox,
+                    "sent": account.sent,
+                    "drafts": account.drafts,
+                    "deleted": account.trash,
+                    "junk": account.junk
                 }
 
                 destination_folder = folder_map.get(destination_folder_name.lower())
@@ -1064,7 +1144,7 @@ class CopyEmailTool(BaseTool):
                                 return result
                     return None
 
-                destination_folder = find_folder_by_id(self.ews_client.account.root, destination_folder_id)
+                destination_folder = find_folder_by_id(account.root, destination_folder_id)
                 if not destination_folder:
                     raise ToolExecutionError(f"Destination folder not found: {destination_folder_id}")
                 dest_name = safe_get(destination_folder, 'name', 'Unknown')
@@ -1074,7 +1154,7 @@ class CopyEmailTool(BaseTool):
 
             subject = safe_get(message, 'subject', 'No Subject')
 
-            self.logger.info(f"Copied email '{subject}' from {source_folder_name} to {dest_name}")
+            self.logger.info(f"Copied email '{subject}' from {source_folder_name} to {dest_name} in mailbox: {mailbox}")
 
             return format_success_response(
                 f"Email copied from {source_folder_name} to {dest_name}",
@@ -1082,7 +1162,8 @@ class CopyEmailTool(BaseTool):
                 copied_message_id=ews_id_to_str(safe_get(copied_message, 'id', None)) or '' if copied_message else '',
                 subject=subject,
                 source_folder=source_folder_name,
-                destination_folder=dest_name
+                destination_folder=dest_name,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -1098,7 +1179,7 @@ class ReplyEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "reply_email",
-            "description": "Reply to an existing email while preserving the conversation thread. Uses Exchange's built-in reply mechanism to maintain In-Reply-To headers, conversation ID, and thread relationship.",
+            "description": "Reply to an existing email while preserving the conversation thread. Uses Exchange's built-in reply mechanism to maintain In-Reply-To headers, conversation ID, and thread relationship. Supports impersonation to reply from another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1119,6 +1200,10 @@ class ReplyEmailTool(BaseTool):
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "File paths to attach to the reply (optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to reply from (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id", "body"]
@@ -1131,6 +1216,7 @@ class ReplyEmailTool(BaseTool):
         body = kwargs.get("body", "").strip()
         reply_all = kwargs.get("reply_all", False)
         attachments = kwargs.get("attachments", [])
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -1138,8 +1224,12 @@ class ReplyEmailTool(BaseTool):
             raise ToolExecutionError("body is required")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the original message across folders
-            original_message = find_message_across_folders(self.ews_client, message_id)
+            original_message = find_message_for_account(account, message_id)
 
             # Get original message details for the response
             original_subject = safe_get(original_message, "subject", "") or ""
@@ -1238,7 +1328,7 @@ class ReplyEmailTool(BaseTool):
             reply_to_list = []
             if reply_all:
                 reply_to_list = [original_from_email] + [e for e in original_to + original_cc
-                                                        if e != self.ews_client.account.primary_smtp_address]
+                                                        if e != account.primary_smtp_address]
             else:
                 reply_to_list = [original_from_email]
 
@@ -1247,7 +1337,8 @@ class ReplyEmailTool(BaseTool):
                 original_subject=original_subject,
                 reply_to=reply_to_list,
                 reply_all=reply_all,
-                attachments_count=len(attachments) if attachments else 0
+                attachments_count=len(attachments) if attachments else 0,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -1263,7 +1354,7 @@ class ForwardEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "forward_email",
-            "description": "Forward an existing email to new recipients while preserving the original content, formatting, and attachments.",
+            "description": "Forward an existing email to new recipients while preserving the original content, formatting, and attachments. Supports impersonation to forward from another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1294,6 +1385,10 @@ class ForwardEmailTool(BaseTool):
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Additional file paths to attach (optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to forward from (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["message_id", "to"]
@@ -1308,6 +1403,7 @@ class ForwardEmailTool(BaseTool):
         cc_recipients = kwargs.get("cc", [])
         bcc_recipients = kwargs.get("bcc", [])
         additional_attachments = kwargs.get("attachments", [])
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -1315,8 +1411,12 @@ class ForwardEmailTool(BaseTool):
             raise ToolExecutionError("to recipients are required")
 
         try:
+            # Get account (primary or impersonated)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the original message across folders
-            original_message = find_message_across_folders(self.ews_client, message_id)
+            original_message = find_message_for_account(account, message_id)
 
             # Get original message details
             original_subject = safe_get(original_message, "subject", "") or ""
@@ -1430,7 +1530,7 @@ class ForwardEmailTool(BaseTool):
 
             # Send the forward
             forward.send()
-            self.logger.info(f"Email forwarded successfully to {', '.join(to_recipients)}")
+            self.logger.info(f"Email forwarded successfully to {', '.join(to_recipients)} from mailbox: {mailbox}")
 
             return format_success_response(
                 "Email forwarded successfully",
@@ -1439,7 +1539,8 @@ class ForwardEmailTool(BaseTool):
                 cc=cc_recipients if cc_recipients else None,
                 bcc=bcc_recipients if bcc_recipients else None,
                 attachments_included=original_attachment_count,
-                additional_attachments=len(additional_attachments) if additional_attachments else 0
+                additional_attachments=len(additional_attachments) if additional_attachments else 0,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:

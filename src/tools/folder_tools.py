@@ -9,12 +9,12 @@ from ..utils import format_success_response, safe_get, ews_id_to_str
 
 
 class ListFoldersTool(BaseTool):
-    """Tool for listing mailbox folder hierarchy."""
+    """Tool for listing mailbox folder hierarchy. Supports impersonation to manage folders in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "list_folders",
-            "description": "Get mailbox folder hierarchy with folder details",
+            "description": "Get mailbox folder hierarchy with folder details. Supports impersonation to manage folders in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -40,6 +40,10 @@ class ListFoldersTool(BaseTool):
                         "type": "boolean",
                         "description": "Include item counts for each folder",
                         "default": True
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 }
             }
@@ -51,23 +55,27 @@ class ListFoldersTool(BaseTool):
         depth = kwargs.get("depth", 2)
         include_hidden = kwargs.get("include_hidden", False)
         include_counts = kwargs.get("include_counts", True)
+        target_mailbox = kwargs.get("target_mailbox")
 
         # Validate depth
         if depth < 1 or depth > 10:
             raise ToolExecutionError("depth must be between 1 and 10")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get the parent folder
             folder_map = {
-                "root": self.ews_client.account.root,
-                "inbox": self.ews_client.account.inbox,
-                "sent": self.ews_client.account.sent,
-                "drafts": self.ews_client.account.drafts,
-                "deleted": self.ews_client.account.trash,
-                "junk": self.ews_client.account.junk,
-                "calendar": self.ews_client.account.calendar,
-                "contacts": self.ews_client.account.contacts,
-                "tasks": self.ews_client.account.tasks
+                "root": account.root,
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk,
+                "calendar": account.calendar,
+                "contacts": account.contacts,
+                "tasks": account.tasks
             }
 
             parent_folder = folder_map.get(parent_folder_name)
@@ -168,7 +176,8 @@ class ListFoldersTool(BaseTool):
                 folder_tree=folder_tree,
                 total_folders=total_folders,
                 parent_folder=parent_folder_name,
-                depth=depth
+                depth=depth,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -179,12 +188,12 @@ class ListFoldersTool(BaseTool):
 
 
 class CreateFolderTool(BaseTool):
-    """Tool for creating new mailbox folders."""
+    """Tool for creating new mailbox folders. Supports impersonation to manage folders in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_folder",
-            "description": "Create a new folder in the mailbox",
+            "description": "Create a new folder in the mailbox. Supports impersonation to manage folders in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -203,6 +212,10 @@ class CreateFolderTool(BaseTool):
                         "description": "Folder class (type of items it will contain)",
                         "default": "IPF.Note",
                         "enum": ["IPF.Note", "IPF.Appointment", "IPF.Contact", "IPF.Task"]
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["folder_name"]
@@ -214,22 +227,26 @@ class CreateFolderTool(BaseTool):
         folder_name = kwargs.get("folder_name")
         parent_folder_name = kwargs.get("parent_folder", "inbox").lower()
         folder_class = kwargs.get("folder_class", "IPF.Note")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not folder_name:
             raise ToolExecutionError("folder_name is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get the parent folder
             folder_map = {
-                "root": self.ews_client.account.root,
-                "inbox": self.ews_client.account.inbox,
-                "sent": self.ews_client.account.sent,
-                "drafts": self.ews_client.account.drafts,
-                "deleted": self.ews_client.account.trash,
-                "junk": self.ews_client.account.junk,
-                "calendar": self.ews_client.account.calendar,
-                "contacts": self.ews_client.account.contacts,
-                "tasks": self.ews_client.account.tasks
+                "root": account.root,
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk,
+                "calendar": account.calendar,
+                "contacts": account.contacts,
+                "tasks": account.tasks
             }
 
             parent_folder = folder_map.get(parent_folder_name)
@@ -247,7 +264,8 @@ class CreateFolderTool(BaseTool):
                 folder_id=ews_id_to_str(new_folder.id),
                 folder_name=folder_name,
                 parent_folder=parent_folder_name,
-                folder_class=folder_class
+                folder_class=folder_class,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -258,12 +276,12 @@ class CreateFolderTool(BaseTool):
 
 
 class DeleteFolderTool(BaseTool):
-    """Tool for deleting mailbox folders."""
+    """Tool for deleting mailbox folders. Supports impersonation to manage folders in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_folder",
-            "description": "Delete a mailbox folder (moves to Deleted Items or permanently deletes)",
+            "description": "Delete a mailbox folder (moves to Deleted Items or permanently deletes). Supports impersonation to manage folders in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -275,6 +293,10 @@ class DeleteFolderTool(BaseTool):
                         "type": "boolean",
                         "description": "Permanently delete (true) or move to Deleted Items (false)",
                         "default": False
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["folder_id"]
@@ -285,11 +307,15 @@ class DeleteFolderTool(BaseTool):
         """Delete a folder."""
         folder_id = kwargs.get("folder_id")
         permanent = kwargs.get("permanent", False)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not folder_id:
             raise ToolExecutionError("folder_id is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the folder by ID
             # We need to search through the folder tree
             folder = None
@@ -308,7 +334,7 @@ class DeleteFolderTool(BaseTool):
                 return None
 
             # Search starting from root
-            folder = find_folder_by_id(self.ews_client.account.root, folder_id)
+            folder = find_folder_by_id(account.root, folder_id)
 
             if not folder:
                 raise ToolExecutionError(f"Folder not found: {folder_id}")
@@ -329,7 +355,8 @@ class DeleteFolderTool(BaseTool):
                 f"Folder '{folder_name}' {action}",
                 folder_id=folder_id,
                 folder_name=folder_name,
-                permanent=permanent
+                permanent=permanent,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -340,12 +367,12 @@ class DeleteFolderTool(BaseTool):
 
 
 class RenameFolderTool(BaseTool):
-    """Tool for renaming mailbox folders."""
+    """Tool for renaming mailbox folders. Supports impersonation to manage folders in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "rename_folder",
-            "description": "Rename an existing mailbox folder",
+            "description": "Rename an existing mailbox folder. Supports impersonation to manage folders in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -356,6 +383,10 @@ class RenameFolderTool(BaseTool):
                     "new_name": {
                         "type": "string",
                         "description": "New name for the folder"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["folder_id", "new_name"]
@@ -366,11 +397,15 @@ class RenameFolderTool(BaseTool):
         """Rename a folder."""
         folder_id = kwargs.get("folder_id")
         new_name = kwargs.get("new_name")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not folder_id or not new_name:
             raise ToolExecutionError("folder_id and new_name are required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the folder by ID
             def find_folder_by_id(parent, target_id):
                 """Recursively search for folder by ID."""
@@ -385,7 +420,7 @@ class RenameFolderTool(BaseTool):
                             return result
                 return None
 
-            folder = find_folder_by_id(self.ews_client.account.root, folder_id)
+            folder = find_folder_by_id(account.root, folder_id)
 
             if not folder:
                 raise ToolExecutionError(f"Folder not found: {folder_id}")
@@ -402,7 +437,8 @@ class RenameFolderTool(BaseTool):
                 f"Folder renamed from '{old_name}' to '{new_name}'",
                 folder_id=folder_id,
                 old_name=old_name,
-                new_name=new_name
+                new_name=new_name,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -413,12 +449,12 @@ class RenameFolderTool(BaseTool):
 
 
 class MoveFolderTool(BaseTool):
-    """Tool for moving folders to a new parent folder."""
+    """Tool for moving folders to a new parent folder. Supports impersonation to manage folders in another user's mailbox."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "move_folder",
-            "description": "Move a folder to a new parent folder",
+            "description": "Move a folder to a new parent folder. Supports impersonation to manage folders in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -434,6 +470,10 @@ class MoveFolderTool(BaseTool):
                     "target_parent_folder_id": {
                         "type": "string",
                         "description": "Target parent folder ID (alternative to target_parent_folder)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["folder_id"]
@@ -445,6 +485,7 @@ class MoveFolderTool(BaseTool):
         folder_id = kwargs.get("folder_id")
         target_parent_name = kwargs.get("target_parent_folder")
         target_parent_id = kwargs.get("target_parent_folder_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not folder_id:
             raise ToolExecutionError("folder_id is required")
@@ -453,6 +494,9 @@ class MoveFolderTool(BaseTool):
             raise ToolExecutionError("Either target_parent_folder or target_parent_folder_id is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Find the folder to move
             def find_folder_by_id(parent, target_id):
                 """Recursively search for folder by ID."""
@@ -467,7 +511,7 @@ class MoveFolderTool(BaseTool):
                             return result
                 return None
 
-            folder = find_folder_by_id(self.ews_client.account.root, folder_id)
+            folder = find_folder_by_id(account.root, folder_id)
 
             if not folder:
                 raise ToolExecutionError(f"Folder not found: {folder_id}")
@@ -477,22 +521,22 @@ class MoveFolderTool(BaseTool):
             # Get target parent folder
             if target_parent_name:
                 folder_map = {
-                    "root": self.ews_client.account.root,
-                    "inbox": self.ews_client.account.inbox,
-                    "sent": self.ews_client.account.sent,
-                    "drafts": self.ews_client.account.drafts,
-                    "deleted": self.ews_client.account.trash,
-                    "junk": self.ews_client.account.junk,
-                    "calendar": self.ews_client.account.calendar,
-                    "contacts": self.ews_client.account.contacts,
-                    "tasks": self.ews_client.account.tasks
+                    "root": account.root,
+                    "inbox": account.inbox,
+                    "sent": account.sent,
+                    "drafts": account.drafts,
+                    "deleted": account.trash,
+                    "junk": account.junk,
+                    "calendar": account.calendar,
+                    "contacts": account.contacts,
+                    "tasks": account.tasks
                 }
                 target_parent = folder_map.get(target_parent_name.lower())
                 if not target_parent:
                     raise ToolExecutionError(f"Unknown target parent folder: {target_parent_name}")
                 target_name = target_parent_name
             else:
-                target_parent = find_folder_by_id(self.ews_client.account.root, target_parent_id)
+                target_parent = find_folder_by_id(account.root, target_parent_id)
                 if not target_parent:
                     raise ToolExecutionError(f"Target parent folder not found: {target_parent_id}")
                 target_name = safe_get(target_parent, 'name', 'Unknown')
@@ -507,7 +551,8 @@ class MoveFolderTool(BaseTool):
                 f"Folder '{folder_name}' moved to '{target_name}'",
                 folder_id=folder_id,
                 folder_name=folder_name,
-                target_parent=target_name
+                target_parent=target_name,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
