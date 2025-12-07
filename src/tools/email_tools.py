@@ -1516,11 +1516,16 @@ class ReplyEmailTool(BaseTool):
                 # Build complete body with Outlook-compatible structure
                 # WordSection1 div is closed after user content - signature goes in the <br><br> gap
                 # Use ForwardSection (not WordSection1) for forward content so Exclaimer ignores it
-                complete_body = f'''<html>
+                # Office XML namespaces are required for Exclaimer to recognize Outlook-style HTML
+                complete_body = f'''<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml" xmlns="http://www.w3.org/TR/REC-html40">
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="Generator" content="Microsoft Word 15 (filtered medium)">
+<style>
+div.WordSection1 {{{{page:WordSection1;}}}}
+</style>
 </head>
-<body>
+<body lang="EN-US" style="word-wrap:break-word">
 <div class="WordSection1">
 {body}
 <div></div>
@@ -1745,11 +1750,16 @@ class ForwardEmailTool(BaseTool):
                 # Build complete body with Outlook-compatible structure
                 # WordSection1 div is closed after user content - signature goes in the <br><br> gap
                 # Use ForwardSection (not WordSection1) for forward content so Exclaimer ignores it
-                complete_body = f'''<html>
+                # Office XML namespaces are required for Exclaimer to recognize Outlook-style HTML
+                complete_body = f'''<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml" xmlns="http://www.w3.org/TR/REC-html40">
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="Generator" content="Microsoft Word 15 (filtered medium)">
+<style>
+div.WordSection1 {{{{page:WordSection1;}}}}
+</style>
 </head>
-<body>
+<body lang="EN-US" style="word-wrap:break-word">
 <div class="WordSection1">
 {user_message}
 <div></div>
