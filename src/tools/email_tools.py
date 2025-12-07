@@ -29,6 +29,140 @@ from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str
 
 
+def extract_body_html(message) -> str:
+    """
+    Properly extract HTML body content from an Exchange message.
+
+    In exchangelib, message.body is an HTMLBody object, not a string.
+    The actual HTML content is inside message.body.body.
+
+    Args:
+        message: Exchange Message object
+
+    Returns:
+        HTML body content as string, or empty string if no body
+    """
+    body = safe_get(message, "body", None)
+    if not body:
+        return ""
+
+    # HTMLBody object has inner 'body' property with actual content
+    if hasattr(body, 'body') and body.body:
+        return body.body
+
+    # If body is already a string
+    if isinstance(body, str):
+        return body
+
+    # Fallback - convert to string
+    return str(body) if body else ""
+
+
+def format_forward_header(message) -> dict:
+    """
+    Format the forwarded message header like Outlook.
+
+    - From: Name only (no email in brackets)
+    - To/Cc: Name <email> format
+    - Sent: Full date format with day name
+
+    Args:
+        message: Exchange Message object
+
+    Returns:
+        Dictionary with formatted header fields
+    """
+    # From: Name only (no email brackets)
+    sender = safe_get(message, "sender", None)
+    sender_name = ""
+    sender_email = ""
+    if sender:
+        sender_name = sender.name if hasattr(sender, "name") else ""
+        sender_email = sender.email_address if hasattr(sender, "email_address") else ""
+    from_str = sender_name if sender_name else sender_email
+
+    # To/Cc: Name <email> format
+    def format_recipients(recipients):
+        if not recipients:
+            return ""
+        parts = []
+        for r in recipients:
+            if not r:
+                continue
+            name = r.name if hasattr(r, "name") else ""
+            email = r.email_address if hasattr(r, "email_address") else ""
+            if name and email:
+                parts.append(f"{name} <{email}>")
+            elif email:
+                parts.append(email)
+        return '; '.join(parts)
+
+    to_recipients = safe_get(message, "to_recipients", []) or []
+    cc_recipients = safe_get(message, "cc_recipients", []) or []
+
+    to_str = format_recipients(to_recipients)
+    cc_str = format_recipients(cc_recipients)
+
+    # Date: Full format with day name
+    sent_date = safe_get(message, "datetime_sent", None)
+    date_str = ""
+    if sent_date:
+        date_str = sent_date.strftime('%A, %B %d, %Y %I:%M:%S %p')
+
+    return {
+        'from': from_str,
+        'sent': date_str,
+        'to': to_str,
+        'cc': cc_str,
+        'subject': safe_get(message, "subject", "") or ""
+    }
+
+
+def copy_attachments_to_message(original_message, new_message) -> tuple:
+    """
+    Copy all attachments from original message to new message,
+    preserving inline image properties (content_id, is_inline).
+
+    This is critical for email signatures with embedded images to display correctly.
+
+    Args:
+        original_message: Source message with attachments
+        new_message: Target message to attach files to
+
+    Returns:
+        Tuple of (inline_count, regular_count)
+    """
+    attachments = safe_get(original_message, "attachments", []) or []
+    if not attachments:
+        return 0, 0
+
+    inline_count = 0
+    regular_count = 0
+
+    for att in attachments:
+        if not att or not isinstance(att, FileAttachment):
+            continue
+
+        # Create new attachment preserving ALL properties
+        # CRITICAL: content_id is needed for cid: references in HTML
+        # CRITICAL: is_inline marks the attachment as embedded
+        new_att = FileAttachment(
+            name=att.name,
+            content=att.content,
+            content_type=getattr(att, 'content_type', None),
+            content_id=getattr(att, 'content_id', None),  # Preserve for cid: refs
+            is_inline=getattr(att, 'is_inline', False)     # Preserve inline flag
+        )
+        new_message.attach(new_att)
+
+        if getattr(att, 'is_inline', False):
+            inline_count += 1
+        else:
+            regular_count += 1
+
+    return inline_count, regular_count
+
+
 def is_exchange_folder_id(identifier: str) -> bool:
     """
     Check if the identifier looks like an Exchange folder/item ID.
@@ -1256,30 +1390,26 @@ class ReplyEmailTool(BaseTool):
             # Detect if body is HTML or plain text
             is_html = bool(re.search(r'<[^>]+>', body))
 
-            # Format the reply body with quoted original message
-            original_date = safe_get(original_message, "datetime_sent", None)
-            date_str = original_date.strftime("%A, %B %d, %Y %I:%M %p") if original_date else "Unknown Date"
+            # Use helper function to format headers properly (Outlook-style)
+            header = format_forward_header(original_message)
 
-            # Build recipients string for quote header
-            to_str = "; ".join(original_to) if original_to else ""
-            cc_str = "; ".join(original_cc) if original_cc else ""
-
-            # Get original body
-            original_body_html = str(safe_get(original_message, "body", "") or "")
+            # Extract original body HTML properly (from HTMLBody.body, not the object itself)
+            original_body_html = extract_body_html(original_message)
+            self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
             # Build the complete reply body with quote
-            if is_html:
-                # HTML reply format
+            if is_html or original_body_html:
+                # HTML reply format with Outlook-style headers
                 quote_header = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
-<p style="margin: 0; color: #666;">
-<strong>From:</strong> {original_from_email}<br>
-<strong>Sent:</strong> {date_str}<br>
-<strong>To:</strong> {to_str}<br>"""
-                if cc_str:
-                    quote_header += f"""<strong>Cc:</strong> {cc_str}<br>"""
-                quote_header += f"""<strong>Subject:</strong> {original_subject}
-</p>
+<div style="color: #1f497d; font-family: Calibri, Arial, sans-serif;">
+<b>From:</b> {header['from']}<br>
+<b>Sent:</b> {header['sent']}<br>
+<b>To:</b> {header['to']}<br>"""
+                if header['cc']:
+                    quote_header += f"""<b>Cc:</b> {header['cc']}<br>"""
+                quote_header += f"""<b>Subject:</b> {header['subject']}
+</div>
 <br>
 """
                 complete_body = f"{body}{quote_header}{original_body_html}"
@@ -1288,12 +1418,12 @@ class ReplyEmailTool(BaseTool):
             else:
                 # Plain text reply format
                 separator = "\n\n" + "─" * 40 + "\n"
-                quote_header = f"From: {original_from_email}\n"
-                quote_header += f"Sent: {date_str}\n"
-                quote_header += f"To: {to_str}\n"
-                if cc_str:
-                    quote_header += f"Cc: {cc_str}\n"
-                quote_header += f"Subject: {original_subject}\n\n"
+                quote_header = f"From: {header['from']}\n"
+                quote_header += f"Sent: {header['sent']}\n"
+                quote_header += f"To: {header['to']}\n"
+                if header['cc']:
+                    quote_header += f"Cc: {header['cc']}\n"
+                quote_header += f"Subject: {header['subject']}\n\n"
 
                 # Use text_body for plain text
                 original_text = safe_get(original_message, "text_body", "") or ""
@@ -1301,7 +1431,14 @@ class ReplyEmailTool(BaseTool):
                 reply.body = Body(complete_body)
                 self.logger.info("Using Body (plain text) for reply content")
 
-            # Add attachments if provided
+            # Copy original inline attachments (signatures, embedded images)
+            # This preserves content_id and is_inline properties for cid: references
+            inline_count, regular_from_original = copy_attachments_to_message(original_message, reply)
+            if inline_count > 0:
+                self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
+
+            # Add new attachments if provided
+            new_attachment_count = 0
             if attachments:
                 for file_path in attachments:
                     try:
@@ -1312,6 +1449,7 @@ class ReplyEmailTool(BaseTool):
                                 content=content
                             )
                             reply.attach(attachment)
+                            new_attachment_count += 1
                             self.logger.info(f"Attached file: {file_path}")
                     except FileNotFoundError:
                         raise ToolExecutionError(f"Attachment file not found: {file_path}")
@@ -1337,7 +1475,8 @@ class ReplyEmailTool(BaseTool):
                 original_subject=original_subject,
                 reply_to=reply_to_list,
                 reply_all=reply_all,
-                attachments_count=len(attachments) if attachments else 0,
+                attachments_count=new_attachment_count,
+                inline_attachments_preserved=inline_count,
                 mailbox=mailbox
             )
 
@@ -1420,22 +1559,6 @@ class ForwardEmailTool(BaseTool):
 
             # Get original message details
             original_subject = safe_get(original_message, "subject", "") or ""
-            original_sender = safe_get(original_message, "sender", None)
-            original_from_email = ""
-            original_from_name = ""
-            if original_sender:
-                original_from_email = original_sender.email_address or "" if hasattr(original_sender, "email_address") else ""
-                original_from_name = original_sender.name or "" if hasattr(original_sender, "name") else ""
-
-            # Get original recipients
-            original_to = [r.email_address for r in (safe_get(original_message, "to_recipients", []) or [])
-                          if r and hasattr(r, "email_address") and r.email_address]
-            original_cc = [r.email_address for r in (safe_get(original_message, "cc_recipients", []) or [])
-                         if r and hasattr(r, "email_address") and r.email_address]
-
-            # Get original date
-            original_date = safe_get(original_message, "datetime_sent", None)
-            date_str = original_date.strftime("%A, %B %d, %Y %I:%M %p") if original_date else "Unknown Date"
 
             # Create forward using exchangelib's built-in method
             forward = original_message.create_forward(subject=None, body=None, to_recipients=None)
@@ -1448,68 +1571,62 @@ class ForwardEmailTool(BaseTool):
             if bcc_recipients:
                 forward.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
 
-            # Build recipients string for forward header
-            to_str = "; ".join(original_to) if original_to else ""
-            cc_str = "; ".join(original_cc) if original_cc else ""
+            # Use helper function to format headers properly (Outlook-style)
+            # From: Name only, To/Cc: Name <email>
+            header = format_forward_header(original_message)
 
-            # Get original body
-            original_body_html = str(safe_get(original_message, "body", "") or "")
+            # Extract original body HTML properly (from HTMLBody.body, not the object itself)
+            original_body_html = extract_body_html(original_message)
+            self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
             # Detect if user's message body is HTML
             is_html = bool(re.search(r'<[^>]+>', body)) if body else False
-            # Also check if original body is HTML
-            is_original_html = bool(re.search(r'<[^>]+>', original_body_html))
-
-            # Format display name
-            from_display = f"{original_from_name} <{original_from_email}>" if original_from_name else original_from_email
 
             # Build the complete forward body
-            if is_html or is_original_html:
-                # HTML forward format
-                forward_header = f"""
+            if is_html or original_body_html:
+                # HTML forward format with Outlook-style headers
+                forward_header_html = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
-<p style="margin: 0; color: #666; font-family: Arial, sans-serif;">
----------- Forwarded message ----------<br>
-<strong>From:</strong> {from_display}<br>
-<strong>Sent:</strong> {date_str}<br>
-<strong>To:</strong> {to_str}<br>"""
-                if cc_str:
-                    forward_header += f"""<strong>Cc:</strong> {cc_str}<br>"""
-                forward_header += f"""<strong>Subject:</strong> {original_subject}
-</p>
+<div style="color: #1f497d; font-family: Calibri, Arial, sans-serif;">
+<b>From:</b> {header['from']}<br>
+<b>Sent:</b> {header['sent']}<br>
+<b>To:</b> {header['to']}<br>"""
+                if header['cc']:
+                    forward_header_html += f"""<b>Cc:</b> {header['cc']}<br>"""
+                forward_header_html += f"""<b>Subject:</b> {header['subject']}
+</div>
 <br>
 """
-                user_message = f"<div>{body}</div>" if body else ""
-                complete_body = f"{user_message}{forward_header}{original_body_html}"
+                user_message = f"<div>{body}</div><br>" if body else ""
+                complete_body = f"{user_message}{forward_header_html}{original_body_html}"
                 forward.body = HTMLBody(complete_body)
                 self.logger.info("Using HTMLBody for HTML forward content")
             else:
                 # Plain text forward format
                 separator = "\n\n" + "─" * 40 + "\n"
-                forward_header = "---------- Forwarded message ----------\n"
-                forward_header += f"From: {from_display}\n"
-                forward_header += f"Sent: {date_str}\n"
-                forward_header += f"To: {to_str}\n"
-                if cc_str:
-                    forward_header += f"Cc: {cc_str}\n"
-                forward_header += f"Subject: {original_subject}\n\n"
+                forward_header_text = f"From: {header['from']}\n"
+                forward_header_text += f"Sent: {header['sent']}\n"
+                forward_header_text += f"To: {header['to']}\n"
+                if header['cc']:
+                    forward_header_text += f"Cc: {header['cc']}\n"
+                forward_header_text += f"Subject: {header['subject']}\n\n"
 
                 # Use text_body for plain text
                 original_text = safe_get(original_message, "text_body", "") or ""
                 user_message = f"{body}\n" if body else ""
-                complete_body = f"{user_message}{separator}{forward_header}{original_text}"
+                complete_body = f"{user_message}{separator}{forward_header_text}{original_text}"
                 forward.body = Body(complete_body)
                 self.logger.info("Using Body (plain text) for forward content")
 
-            # Count original attachments that will be included
-            original_attachments = safe_get(original_message, "attachments", []) or []
-            original_attachment_count = len([att for att in original_attachments
-                                            if att and hasattr(att, "name") and att.name])
-
-            # The create_forward method automatically includes original attachments
-            self.logger.info(f"Forward will include {original_attachment_count} original attachment(s)")
+            # Copy original attachments with proper content_id and is_inline preservation
+            # This is CRITICAL for inline images (signatures, embedded images) to display correctly
+            inline_count, regular_count = copy_attachments_to_message(original_message, forward)
+            total_original_attachments = inline_count + regular_count
+            self.logger.info(f"Copied {total_original_attachments} attachment(s) from original "
+                           f"({inline_count} inline, {regular_count} regular)")
 
             # Add additional attachments if provided
+            additional_attachment_count = 0
             if additional_attachments:
                 for file_path in additional_attachments:
                     try:
@@ -1520,6 +1637,7 @@ class ForwardEmailTool(BaseTool):
                                 content=content
                             )
                             forward.attach(attachment)
+                            additional_attachment_count += 1
                             self.logger.info(f"Attached additional file: {file_path}")
                     except FileNotFoundError:
                         raise ToolExecutionError(f"Attachment file not found: {file_path}")
@@ -1538,8 +1656,9 @@ class ForwardEmailTool(BaseTool):
                 forwarded_to=to_recipients,
                 cc=cc_recipients if cc_recipients else None,
                 bcc=bcc_recipients if bcc_recipients else None,
-                attachments_included=original_attachment_count,
-                additional_attachments=len(additional_attachments) if additional_attachments else 0,
+                attachments_included=total_original_attachments,
+                inline_attachments_preserved=inline_count,
+                additional_attachments=additional_attachment_count,
                 mailbox=mailbox
             )
 
