@@ -1388,7 +1388,7 @@ class ReplyEmailTool(BaseTool):
             # Create reply using exchangelib's built-in methods
             # This automatically preserves conversation ID, In-Reply-To, and References headers
             if reply_all:
-                reply = original_message.create_reply_all(subject=None, body=None, to_recipients=None)
+                reply = original_message.create_reply_all(subject=None, body=None)
                 self.logger.info("Creating reply-all message")
             else:
                 reply = original_message.create_reply(subject=None, body=None, to_recipients=None)
