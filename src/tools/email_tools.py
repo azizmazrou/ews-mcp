@@ -1561,14 +1561,19 @@ class ReplyEmailTool(BaseTool):
 
                 # 5. Construct complete body with WordSection1 for Exclaimer signature placement
                 # Exclaimer inserts signature after the closing </div> of WordSection1
-                # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
+                # Wrap replied content in blockquote so Exclaimer recognizes it as quoted content
+                # Structure: [user message in WordSection1] → [signature inserted here] → [quoted replied content]
                 complete_body = f'''<div class="WordSection1">
 {user_message}
 </div>
-<hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
+
+<blockquote style="margin:0 0 0 0;border:none;padding:0in">
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
 {headers_html}
+</div>
 <br/>
-{original_body_html}'''
+{original_body_html}
+</blockquote>'''
 
                 self.logger.info(f"Constructed complete reply body: {len(complete_body)} characters")
 
@@ -1811,14 +1816,19 @@ class ForwardEmailTool(BaseTool):
 
                 # 5. Construct complete body with WordSection1 for Exclaimer signature placement
                 # Exclaimer inserts signature after the closing </div> of WordSection1
-                # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
+                # Wrap forwarded content in blockquote so Exclaimer recognizes it as quoted content
+                # Structure: [user message in WordSection1] → [signature inserted here] → [quoted forwarded content]
                 complete_body = f'''<div class="WordSection1">
 {user_message}
 </div>
-<hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
+
+<blockquote style="margin:0 0 0 0;border:none;padding:0in">
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
 {headers_html}
+</div>
 <br/>
-{original_body_html}'''
+{original_body_html}
+</blockquote>'''
 
                 self.logger.info(f"Constructed complete forward body: {len(complete_body)} characters")
 
