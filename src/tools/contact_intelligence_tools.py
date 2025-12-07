@@ -38,7 +38,7 @@ class FindPersonTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "find_person",
-            "description": "Search for contacts across Global Address List (GAL), email history, and domains. Supports Arabic text (UTF-8).",
+            "description": "Search for contacts across Global Address List (GAL), email history, and domains. Supports Arabic text (UTF-8). Supports impersonation to analyze contacts in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -67,6 +67,10 @@ class FindPersonTool(BaseTool):
                         "description": "Maximum results to return",
                         "default": 50,
                         "maximum": 100
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["query"]
@@ -85,11 +89,15 @@ class FindPersonTool(BaseTool):
         include_stats = kwargs.get("include_stats", True)
         time_range_days = kwargs.get("time_range_days", 365)
         max_results = kwargs.get("max_results", 50)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not query:
             raise ToolExecutionError("Query parameter is required")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Create PersonService (v3.0)
             person_service = PersonService(self.ews_client)
 
@@ -164,7 +172,8 @@ class FindPersonTool(BaseTool):
                 query=query,
                 search_scope=search_scope,
                 total_results=len(formatted_results),
-                unified_results=formatted_results
+                unified_results=formatted_results,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -476,7 +485,7 @@ class GetCommunicationHistoryTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_communication_history",
-            "description": "Get detailed communication history and statistics with a specific person",
+            "description": "Get detailed communication history and statistics with a specific person. Supports impersonation to analyze contacts in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -498,6 +507,10 @@ class GetCommunicationHistoryTool(BaseTool):
                         "type": "boolean",
                         "description": "Extract topics from email subjects",
                         "default": True
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["email"]
@@ -510,12 +523,16 @@ class GetCommunicationHistoryTool(BaseTool):
         days_back = kwargs.get("days_back", 365)
         max_emails = kwargs.get("max_emails", 10)
         include_topics = kwargs.get("include_topics", True)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not email:
             raise ToolExecutionError("Email parameter is required")
 
         try:
-            start_date = datetime.now(self.ews_client.account.default_timezone) - timedelta(days=days_back)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
+            start_date = datetime.now(account.default_timezone) - timedelta(days=days_back)
 
             # Statistics
             stats = {
@@ -538,7 +555,7 @@ class GetCommunicationHistoryTool(BaseTool):
             # 1. Search Inbox (received emails)
             # Add pagination to prevent timeouts with large mailboxes
             MAX_ITEMS_TO_SCAN = 2000  # Limit total items scanned to prevent timeout
-            inbox = self.ews_client.account.inbox
+            inbox = account.inbox
             received_items = inbox.filter(
                 datetime_received__gte=start_date
             ).order_by('-datetime_received').only('sender', 'subject', 'datetime_received', 'text_body')
@@ -594,7 +611,7 @@ class GetCommunicationHistoryTool(BaseTool):
 
             # 2. Search Sent Items (sent emails)
             # Add pagination to prevent timeouts with large mailboxes
-            sent_items = self.ews_client.account.sent
+            sent_items = account.sent
             sent_query = sent_items.filter(
                 datetime_sent__gte=start_date
             ).order_by('-datetime_sent').only('to_recipients', 'subject', 'datetime_sent', 'text_body')
@@ -688,7 +705,8 @@ class GetCommunicationHistoryTool(BaseTool):
                 statistics=stats,
                 timeline=timeline_list,
                 topics=top_topics if include_topics else [],
-                recent_emails=recent_emails[:max_emails]
+                recent_emails=recent_emails[:max_emails],
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -726,7 +744,7 @@ class AnalyzeNetworkTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "analyze_network",
-            "description": "Analyze professional network, identify top contacts, VIPs, dormant relationships, and domain statistics",
+            "description": "Analyze professional network, identify top contacts, VIPs, dormant relationships, and domain statistics. Supports impersonation to analyze contacts in another user's mailbox.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -756,6 +774,10 @@ class AnalyzeNetworkTool(BaseTool):
                         "type": "integer",
                         "description": "Minimum emails to qualify as VIP",
                         "default": 10
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 }
             }
@@ -768,11 +790,15 @@ class AnalyzeNetworkTool(BaseTool):
         top_n = kwargs.get("top_n", 20)
         dormant_threshold = kwargs.get("dormant_threshold_days", 60)
         vip_threshold = kwargs.get("vip_email_threshold", 10)
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Gather all contacts from email history
             self.logger.info(f"Analyzing network for past {days_back} days")
-            contacts = await self._gather_contacts(days_back)
+            contacts = await self._gather_contacts(days_back, account)
 
             if not contacts:
                 return format_success_response(
@@ -787,17 +813,18 @@ class AnalyzeNetworkTool(BaseTool):
             elif analysis_type == "by_domain":
                 results = self._analyze_by_domain(contacts, top_n)
             elif analysis_type == "dormant":
-                results = self._analyze_dormant(contacts, dormant_threshold, days_back)
+                results = self._analyze_dormant(contacts, dormant_threshold, days_back, account)
             elif analysis_type == "vip":
-                results = self._analyze_vip(contacts, vip_threshold, days_back)
+                results = self._analyze_vip(contacts, vip_threshold, days_back, account)
             else:  # overview
-                results = self._analyze_overview(contacts, top_n, dormant_threshold, vip_threshold, days_back)
+                results = self._analyze_overview(contacts, top_n, dormant_threshold, vip_threshold, days_back, account)
 
             return format_success_response(
                 f"Network analysis: {analysis_type}",
                 analysis_type=analysis_type,
                 period_days=days_back,
                 total_contacts=len(contacts),
+                mailbox=mailbox,
                 **results
             )
 
@@ -805,13 +832,13 @@ class AnalyzeNetworkTool(BaseTool):
             self.logger.error(f"Failed to analyze network: {e}")
             raise ToolExecutionError(f"Failed to analyze network: {e}")
 
-    async def _gather_contacts(self, days_back: int) -> Dict[str, Dict[str, Any]]:
+    async def _gather_contacts(self, days_back: int, account) -> Dict[str, Dict[str, Any]]:
         """Gather all contacts from email history."""
-        start_date = datetime.now(self.ews_client.account.default_timezone) - timedelta(days=days_back)
+        start_date = datetime.now(account.default_timezone) - timedelta(days=days_back)
         contacts = {}
 
         # Search Inbox
-        inbox = self.ews_client.account.inbox
+        inbox = account.inbox
         inbox_items = inbox.filter(
             datetime_received__gte=start_date
         ).only('sender', 'datetime_received')
@@ -845,7 +872,7 @@ class AnalyzeNetworkTool(BaseTool):
                         contacts[email]["first_contact"] = received_time
 
         # Search Sent Items
-        sent_items = self.ews_client.account.sent
+        sent_items = account.sent
         sent_query = sent_items.filter(
             datetime_sent__gte=start_date
         ).only('to_recipients', 'datetime_sent')
@@ -938,9 +965,9 @@ class AnalyzeNetworkTool(BaseTool):
 
         return {"domains": sorted_domains}
 
-    def _analyze_dormant(self, contacts: Dict, threshold_days: int, analysis_days: int) -> Dict[str, Any]:
+    def _analyze_dormant(self, contacts: Dict, threshold_days: int, analysis_days: int, account) -> Dict[str, Any]:
         """Identify dormant relationships."""
-        now = datetime.now(self.ews_client.account.default_timezone)
+        now = datetime.now(account.default_timezone)
         threshold_date = now - timedelta(days=threshold_days)
         analysis_start = now - timedelta(days=analysis_days)
 
@@ -970,9 +997,9 @@ class AnalyzeNetworkTool(BaseTool):
             "threshold_days": threshold_days
         }
 
-    def _analyze_vip(self, contacts: Dict, email_threshold: int, analysis_days: int) -> Dict[str, Any]:
+    def _analyze_vip(self, contacts: Dict, email_threshold: int, analysis_days: int, account) -> Dict[str, Any]:
         """Identify VIP contacts."""
-        now = datetime.now(self.ews_client.account.default_timezone)
+        now = datetime.now(account.default_timezone)
         recent_threshold = now - timedelta(days=30)  # Active in last 30 days
 
         vips = []
@@ -1006,14 +1033,15 @@ class AnalyzeNetworkTool(BaseTool):
         top_n: int,
         dormant_threshold: int,
         vip_threshold: int,
-        analysis_days: int
+        analysis_days: int,
+        account
     ) -> Dict[str, Any]:
         """Comprehensive network overview."""
         # Get all analyses
         top_contacts = self._analyze_top_contacts(contacts, min(top_n, 10))
         domains = self._analyze_by_domain(contacts, min(top_n, 10))
-        dormant = self._analyze_dormant(contacts, dormant_threshold, analysis_days)
-        vips = self._analyze_vip(contacts, vip_threshold, analysis_days)
+        dormant = self._analyze_dormant(contacts, dormant_threshold, analysis_days, account)
+        vips = self._analyze_vip(contacts, vip_threshold, analysis_days, account)
 
         # Calculate summary statistics
         total_emails = sum(c["total_emails"] for c in contacts.values())

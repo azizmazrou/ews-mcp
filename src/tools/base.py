@@ -1,8 +1,9 @@
 """Base class for all MCP tools."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Type
+from typing import Any, Dict, Type, Optional
 from pydantic import BaseModel, ValidationError as PydanticValidationError
+from exchangelib import Account
 import logging
 import time
 
@@ -37,6 +38,36 @@ class BaseTool(ABC):
         except PydanticValidationError as e:
             self.logger.error(f"Validation error: {e}")
             raise ValidationError(f"Invalid input: {e}")
+
+    def get_account(self, target_mailbox: Optional[str] = None) -> Account:
+        """
+        Get Exchange account for operations.
+
+        Args:
+            target_mailbox: Optional email to impersonate/delegate.
+                           If None or same as primary, returns primary account.
+
+        Returns:
+            Account object (primary or impersonated)
+
+        Raises:
+            ConnectionError: If impersonation fails or is not enabled
+        """
+        return self.ews_client.get_account(target_mailbox)
+
+    def get_mailbox_info(self, target_mailbox: Optional[str] = None) -> str:
+        """
+        Get mailbox identifier for response.
+
+        Args:
+            target_mailbox: Optional target mailbox email
+
+        Returns:
+            The target mailbox if impersonating, otherwise primary email
+        """
+        if target_mailbox and target_mailbox.lower() != self.ews_client.config.ews_email.lower():
+            return target_mailbox
+        return self.ews_client.config.ews_email
 
     async def safe_execute(self, **kwargs) -> Dict[str, Any]:
         """Execute with error handling and comprehensive logging."""

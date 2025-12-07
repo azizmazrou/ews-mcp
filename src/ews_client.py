@@ -1,11 +1,11 @@
 """Exchange Web Services client wrapper."""
 
-from exchangelib import Account, Configuration, DELEGATE, Version, EWSTimeZone
+from exchangelib import Account, Configuration, DELEGATE, IMPERSONATION, Version, EWSTimeZone
 from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import logging
 import pytz
-from typing import Optional
+from typing import Optional, Dict
 import urllib3
 
 from .config import Settings
@@ -24,6 +24,7 @@ class EWSClient:
         self.auth_handler = auth_handler
         self.logger = logging.getLogger(__name__)
         self._account: Optional[Account] = None
+        self._impersonated_accounts: Dict[str, Account] = {}
 
         # Configure exchangelib
         BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
@@ -146,8 +147,130 @@ class EWSClient:
             return False
 
     def close(self) -> None:
-        """Close connection and cleanup."""
+        """Close all connections and cleanup."""
+        # Close impersonated accounts first
+        self.clear_impersonation_cache()
+
+        # Close primary account
         if self._account:
             self.logger.info("Closing EWS connection")
             self._account.protocol.close()
             self._account = None
+
+    def get_account(self, target_mailbox: Optional[str] = None) -> Account:
+        """
+        Get Exchange account, optionally for a different mailbox.
+
+        Args:
+            target_mailbox: Email address to impersonate/delegate.
+                           If None, returns primary account.
+
+        Returns:
+            Account object for the specified mailbox
+
+        Raises:
+            ConnectionError: If impersonation is not enabled or fails
+        """
+        # Return primary account if no target specified
+        if not target_mailbox or target_mailbox.lower() == self.config.ews_email.lower():
+            return self.account
+
+        # Check if impersonation is enabled
+        if not self.config.ews_impersonation_enabled:
+            raise ConnectionError(
+                f"Impersonation not enabled. Set EWS_IMPERSONATION_ENABLED=true "
+                f"to access mailbox: {target_mailbox}"
+            )
+
+        # Check cache first
+        cache_key = target_mailbox.lower()
+        if cache_key in self._impersonated_accounts:
+            self.logger.debug(f"Using cached account for {target_mailbox}")
+            return self._impersonated_accounts[cache_key]
+
+        # Create impersonated account
+        try:
+            self.logger.info(f"Creating impersonated account for {target_mailbox}")
+
+            # Determine access type
+            access_type = (
+                IMPERSONATION
+                if self.config.ews_impersonation_type == "impersonation"
+                else DELEGATE
+            )
+
+            # Get timezone
+            try:
+                tz = EWSTimeZone(self.config.timezone)
+            except Exception:
+                tz = EWSTimeZone('UTC')
+
+            # Get credentials
+            credentials = self.auth_handler.get_credentials()
+
+            # Create account with same config but different target
+            if self.config.ews_autodiscover:
+                impersonated_account = Account(
+                    primary_smtp_address=target_mailbox,
+                    credentials=credentials,
+                    autodiscover=True,
+                    access_type=access_type,
+                    default_timezone=tz
+                )
+            else:
+                # Reuse existing configuration with same endpoint
+                config = Configuration(
+                    service_endpoint=self._get_ews_url(),
+                    credentials=credentials,
+                    retry_policy=None,
+                    max_connections=self.config.connection_pool_size
+                )
+
+                impersonated_account = Account(
+                    primary_smtp_address=target_mailbox,
+                    config=config,
+                    autodiscover=False,
+                    access_type=access_type,
+                    default_timezone=tz
+                )
+
+            # Test connection
+            _ = impersonated_account.root.tree()
+
+            # Cache the account
+            self._impersonated_accounts[cache_key] = impersonated_account
+            self.logger.info(f"Successfully connected to mailbox: {target_mailbox}")
+
+            return impersonated_account
+
+        except Exception as e:
+            self.logger.error(f"Failed to access mailbox {target_mailbox}: {e}")
+            raise ConnectionError(
+                f"Failed to access mailbox {target_mailbox}: {e}. "
+                f"Ensure the service account has ApplicationImpersonation role "
+                f"or delegate access to this mailbox."
+            )
+
+    def _get_ews_url(self) -> str:
+        """Get normalized EWS endpoint URL."""
+        ews_input = self.config.ews_server_url.strip()
+        if ews_input.endswith('/EWS/Exchange.asmx'):
+            return ews_input
+        elif '/EWS/' in ews_input:
+            if not ews_input.endswith('.asmx'):
+                return ews_input.rstrip('/') + '/Exchange.asmx'
+            return ews_input
+        else:
+            server = ews_input.replace('https://', '').replace('http://', '').rstrip('/')
+            return f"https://{server}/EWS/Exchange.asmx"
+
+    def clear_impersonation_cache(self) -> None:
+        """Clear cached impersonated accounts."""
+        for email, account in self._impersonated_accounts.items():
+            try:
+                account.protocol.close()
+                self.logger.debug(f"Closed impersonated connection for {email}")
+            except Exception:
+                pass
+        self._impersonated_accounts.clear()
+        self.logger.info("Impersonation cache cleared")

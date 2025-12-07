@@ -16,7 +16,7 @@ class CreateAppointmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_appointment",
-            "description": "Create a calendar appointment or meeting with attendees",
+            "description": "Create a calendar appointment or meeting with attendees. Supports impersonation to operate on another user's calendar/mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -54,6 +54,10 @@ class CreateAppointmentTool(BaseTool):
                         "type": "integer",
                         "description": "Reminder minutes before (optional)",
                         "default": 15
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["subject", "start_time", "end_time"]
@@ -70,10 +74,14 @@ class CreateAppointmentTool(BaseTool):
         request = self.validate_input(CreateAppointmentRequest, **kwargs)
 
         try:
+            target_mailbox = kwargs.get("target_mailbox")
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Create calendar item
             item = CalendarItem(
-                account=self.ews_client.account,
-                folder=self.ews_client.account.calendar,
+                account=account,
+                folder=account.calendar,
                 subject=request.subject,
                 start=request.start_time,
                 end=request.end_time,
@@ -108,7 +116,8 @@ class CreateAppointmentTool(BaseTool):
                 item_id=ews_id_to_str(item.id) if hasattr(item, "id") else None,
                 subject=request.subject,
                 start_time=request.start_time.isoformat(),
-                end_time=request.end_time.isoformat()
+                end_time=request.end_time.isoformat(),
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -122,7 +131,7 @@ class GetCalendarTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_calendar",
-            "description": "Retrieve calendar events for a date range",
+            "description": "Retrieve calendar events for a date range. Supports impersonation to operate on another user's calendar/mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -146,6 +155,10 @@ class GetCalendarTool(BaseTool):
                         "description": "Maximum number of events to retrieve",
                         "default": 50,
                         "maximum": 1000
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 }
             }
@@ -154,6 +167,10 @@ class GetCalendarTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Get calendar events."""
         try:
+            target_mailbox = kwargs.get("target_mailbox")
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Parse dates as timezone-aware
             start_date = kwargs.get("start_date")
             if start_date:
@@ -174,7 +191,7 @@ class GetCalendarTool(BaseTool):
             max_results = kwargs.get("max_results", 50)
 
             # Query calendar - use only() to fetch specific fields and avoid timezone parsing warnings
-            items = self.ews_client.account.calendar.view(
+            items = account.calendar.view(
                 start=start_date,
                 end=end_date
             ).only(
@@ -217,7 +234,8 @@ class GetCalendarTool(BaseTool):
                 f"Retrieved {len(events)} events",
                 events=events,
                 start_date=start_date.isoformat(),
-                end_date=end_date.isoformat()
+                end_date=end_date.isoformat(),
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -231,7 +249,7 @@ class UpdateAppointmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_appointment",
-            "description": "Update an existing calendar appointment",
+            "description": "Update an existing calendar appointment. Supports impersonation to operate on another user's calendar/mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -258,6 +276,10 @@ class UpdateAppointmentTool(BaseTool):
                     "body": {
                         "type": "string",
                         "description": "New body (optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id"]
@@ -269,8 +291,12 @@ class UpdateAppointmentTool(BaseTool):
         item_id = kwargs.get("item_id")
 
         try:
+            target_mailbox = kwargs.get("target_mailbox")
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get the appointment
-            item = self.ews_client.account.calendar.get(id=item_id)
+            item = account.calendar.get(id=item_id)
 
             # Update fields
             if "subject" in kwargs:
@@ -295,7 +321,8 @@ class UpdateAppointmentTool(BaseTool):
 
             return format_success_response(
                 "Appointment updated successfully",
-                item_id=item_id
+                item_id=item_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -309,7 +336,7 @@ class DeleteAppointmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_appointment",
-            "description": "Delete a calendar appointment",
+            "description": "Delete a calendar appointment. Supports impersonation to operate on another user's calendar/mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -321,6 +348,10 @@ class DeleteAppointmentTool(BaseTool):
                         "type": "boolean",
                         "description": "Send cancellation to attendees (for meetings)",
                         "default": True
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id"]
@@ -333,8 +364,12 @@ class DeleteAppointmentTool(BaseTool):
         send_cancellation = kwargs.get("send_cancellation", True)
 
         try:
+            target_mailbox = kwargs.get("target_mailbox")
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get and delete the appointment
-            item = self.ews_client.account.calendar.get(id=item_id)
+            item = account.calendar.get(id=item_id)
 
             # Check if we should send cancellation
             required_attendees = safe_get(item, "required_attendees", []) or []
@@ -349,7 +384,8 @@ class DeleteAppointmentTool(BaseTool):
 
             return format_success_response(
                 "Appointment deleted successfully",
-                item_id=item_id
+                item_id=item_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -363,7 +399,7 @@ class RespondToMeetingTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "respond_to_meeting",
-            "description": "Accept, tentatively accept, or decline a meeting invitation",
+            "description": "Accept, tentatively accept, or decline a meeting invitation. Supports impersonation to operate on another user's calendar/mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -379,6 +415,10 @@ class RespondToMeetingTool(BaseTool):
                     "message": {
                         "type": "string",
                         "description": "Optional response message"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id", "response"]
@@ -392,8 +432,12 @@ class RespondToMeetingTool(BaseTool):
         message = kwargs.get("message", "")
 
         try:
+            target_mailbox = kwargs.get("target_mailbox")
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get the meeting request
-            item = self.ews_client.account.calendar.get(id=item_id)
+            item = account.calendar.get(id=item_id)
 
             # Send response
             if response == "Accept":
@@ -413,7 +457,8 @@ class RespondToMeetingTool(BaseTool):
             return format_success_response(
                 f"Meeting {action}",
                 item_id=item_id,
-                response=response
+                response=response,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -427,7 +472,7 @@ class CheckAvailabilityTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "check_availability",
-            "description": "Get free/busy information for email addresses in a time range",
+            "description": "Get free/busy information for email addresses in a time range. Supports impersonation to operate on another user's calendar/mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -450,6 +495,10 @@ class CheckAvailabilityTool(BaseTool):
                         "default": 30,
                         "minimum": 15,
                         "maximum": 1440
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["email_addresses", "start_time", "end_time"]
@@ -470,6 +519,10 @@ class CheckAvailabilityTool(BaseTool):
             raise ToolExecutionError("start_time and end_time are required")
 
         try:
+            target_mailbox = kwargs.get("target_mailbox")
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Parse datetimes
             start_time = parse_datetime_tz_aware(start_time_str)
             end_time = parse_datetime_tz_aware(end_time_str)
@@ -485,7 +538,7 @@ class CheckAvailabilityTool(BaseTool):
             mailboxes = [Mailbox(email_address=email) for email in email_addresses]
 
             # Get free/busy information (convert generator to list)
-            availability_data = list(self.ews_client.account.protocol.get_free_busy_info(
+            availability_data = list(account.protocol.get_free_busy_info(
                 accounts=mailboxes,
                 start=start_time,
                 end=end_time,
@@ -537,7 +590,8 @@ class CheckAvailabilityTool(BaseTool):
                     "start": start_time_str,
                     "end": end_time_str,
                     "interval_minutes": interval_minutes
-                }
+                },
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -553,7 +607,7 @@ class FindMeetingTimesTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "find_meeting_times",
-            "description": "Find optimal meeting times based on attendee availability and preferences",
+            "description": "Find optimal meeting times based on attendee availability and preferences. Supports impersonation to operate on another user's calendar/mailbox",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -596,6 +650,10 @@ class FindMeetingTimesTool(BaseTool):
                             "earliest_hour": {"type": "integer", "default": 9, "minimum": 0, "maximum": 23},
                             "latest_hour": {"type": "integer", "default": 17, "minimum": 0, "maximum": 23}
                         }
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["attendees", "date_range_start", "date_range_end"]
@@ -618,6 +676,10 @@ class FindMeetingTimesTool(BaseTool):
             raise ToolExecutionError("date_range_start and date_range_end are required")
 
         try:
+            target_mailbox = kwargs.get("target_mailbox")
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             from exchangelib import Mailbox
             from datetime import timedelta
 
@@ -644,7 +706,7 @@ class FindMeetingTimesTool(BaseTool):
             mailboxes = [Mailbox(email_address=email) for email in attendees]
 
             # Get availability for all attendees (convert generator to list)
-            availability_data = list(self.ews_client.account.protocol.get_free_busy_info(
+            availability_data = list(account.protocol.get_free_busy_info(
                 accounts=mailboxes,
                 start=start_date,
                 end=end_date,
@@ -750,7 +812,8 @@ class FindMeetingTimesTool(BaseTool):
                     "start": date_range_start_str,
                     "end": date_range_end_str
                 },
-                preferences=preferences
+                preferences=preferences,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:

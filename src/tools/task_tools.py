@@ -17,7 +17,7 @@ class CreateTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_task",
-            "description": "Create a new task in Exchange",
+            "description": "Create a new task in Exchange. Supports impersonation to access another user's tasks",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -46,6 +46,10 @@ class CreateTaskTool(BaseTool):
                     "reminder_time": {
                         "type": "string",
                         "description": "Reminder time (ISO 8601 format, optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["subject"]
@@ -56,12 +60,16 @@ class CreateTaskTool(BaseTool):
         """Create task."""
         # Validate input first (Pydantic expects datetime types)
         request = self.validate_input(CreateTaskRequest, **kwargs)
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Create task
             task = Task(
-                account=self.ews_client.account,
-                folder=self.ews_client.account.tasks,
+                account=account,
+                folder=account.tasks,
                 subject=request.subject
             )
 
@@ -91,7 +99,8 @@ class CreateTaskTool(BaseTool):
             return format_success_response(
                 "Task created successfully",
                 item_id=ews_id_to_str(task.id) if hasattr(task, "id") else None,
-                subject=request.subject
+                subject=request.subject,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -105,7 +114,7 @@ class GetTasksTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_tasks",
-            "description": "Retrieve tasks, optionally filtered by status",
+            "description": "Retrieve tasks, optionally filtered by status. Supports impersonation to access another user's tasks",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -119,6 +128,10 @@ class GetTasksTool(BaseTool):
                         "description": "Maximum number of tasks to retrieve",
                         "default": 50,
                         "maximum": 1000
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 }
             }
@@ -128,10 +141,14 @@ class GetTasksTool(BaseTool):
         """Get tasks."""
         include_completed = kwargs.get("include_completed", False)
         max_results = kwargs.get("max_results", 50)
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Query tasks
-            items = self.ews_client.account.tasks.all()
+            items = account.tasks.all()
 
             if not include_completed:
                 items = items.filter(is_complete=False)
@@ -161,7 +178,8 @@ class GetTasksTool(BaseTool):
 
             return format_success_response(
                 f"Retrieved {len(tasks)} tasks",
-                tasks=tasks
+                tasks=tasks,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -175,7 +193,7 @@ class UpdateTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_task",
-            "description": "Update an existing task",
+            "description": "Update an existing task. Supports impersonation to access another user's tasks",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -205,6 +223,10 @@ class UpdateTaskTool(BaseTool):
                         "type": "string",
                         "enum": ["Low", "Normal", "High"],
                         "description": "New importance (optional)"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id"]
@@ -214,10 +236,14 @@ class UpdateTaskTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Update task."""
         item_id = kwargs.get("item_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get the task
-            task = self.ews_client.account.tasks.get(id=item_id)
+            task = account.tasks.get(id=item_id)
 
             # Update fields
             if "subject" in kwargs:
@@ -248,7 +274,8 @@ class UpdateTaskTool(BaseTool):
 
             return format_success_response(
                 "Task updated successfully",
-                item_id=item_id
+                item_id=item_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -262,13 +289,17 @@ class CompleteTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "complete_task",
-            "description": "Mark a task as complete",
+            "description": "Mark a task as complete. Supports impersonation to access another user's tasks",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "item_id": {
                         "type": "string",
                         "description": "Task item ID to complete"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id"]
@@ -278,10 +309,14 @@ class CompleteTaskTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Complete task."""
         item_id = kwargs.get("item_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get and complete the task
-            task = self.ews_client.account.tasks.get(id=item_id)
+            task = account.tasks.get(id=item_id)
             task.percent_complete = Decimal('100')
             task.status = "Completed"
             task.is_complete = True
@@ -291,7 +326,8 @@ class CompleteTaskTool(BaseTool):
 
             return format_success_response(
                 "Task marked as complete",
-                item_id=item_id
+                item_id=item_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
@@ -305,13 +341,17 @@ class DeleteTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_task",
-            "description": "Delete a task",
+            "description": "Delete a task. Supports impersonation to access another user's tasks",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "item_id": {
                         "type": "string",
                         "description": "Task item ID to delete"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
                 "required": ["item_id"]
@@ -321,17 +361,22 @@ class DeleteTaskTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Delete task."""
         item_id = kwargs.get("item_id")
+        target_mailbox = kwargs.get("target_mailbox")
 
         try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             # Get and delete the task
-            task = self.ews_client.account.tasks.get(id=item_id)
+            task = account.tasks.get(id=item_id)
             task.delete()
 
             self.logger.info(f"Deleted task {item_id}")
 
             return format_success_response(
                 "Task deleted successfully",
-                item_id=item_id
+                item_id=item_id,
+                mailbox=mailbox
             )
 
         except Exception as e:
