@@ -1415,13 +1415,14 @@ class ReplyEmailTool(BaseTool):
 
             # Build the complete reply body with quote
             if is_html or original_body_html:
-                # HTML reply format with Outlook-style headers
+                # HTML reply format with Outlook-style headers (black text)
                 quote_header = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
-<div style="color: #1f497d; font-family: Calibri, Arial, sans-serif;">
+<div style="font-family: Calibri, Arial, sans-serif;">
 <b>From:</b> {header['from']}<br>
-<b>Sent:</b> {header['sent']}<br>
-<b>To:</b> {header['to']}<br>"""
+<b>Sent:</b> {header['sent']}<br>"""
+                if header['to']:
+                    quote_header += f"""<b>To:</b> {header['to']}<br>"""
                 if header['cc']:
                     quote_header += f"""<b>Cc:</b> {header['cc']}<br>"""
                 quote_header += f"""<b>Subject:</b> {header['subject']}
@@ -1436,7 +1437,8 @@ class ReplyEmailTool(BaseTool):
                 separator = "\n\n" + "─" * 40 + "\n"
                 quote_header = f"From: {header['from']}\n"
                 quote_header += f"Sent: {header['sent']}\n"
-                quote_header += f"To: {header['to']}\n"
+                if header['to']:
+                    quote_header += f"To: {header['to']}\n"
                 if header['cc']:
                     quote_header += f"Cc: {header['cc']}\n"
                 quote_header += f"Subject: {header['subject']}\n\n"
@@ -1614,13 +1616,14 @@ class ForwardEmailTool(BaseTool):
 
             # Build the complete forward body
             if is_html or original_body_html:
-                # HTML forward format with Outlook-style headers
+                # HTML forward format with Outlook-style headers (black text)
                 forward_header_html = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
-<div style="color: #1f497d; font-family: Calibri, Arial, sans-serif;">
+<div style="font-family: Calibri, Arial, sans-serif;">
 <b>From:</b> {header['from']}<br>
-<b>Sent:</b> {header['sent']}<br>
-<b>To:</b> {header['to']}<br>"""
+<b>Sent:</b> {header['sent']}<br>"""
+                if header['to']:
+                    forward_header_html += f"""<b>To:</b> {header['to']}<br>"""
                 if header['cc']:
                     forward_header_html += f"""<b>Cc:</b> {header['cc']}<br>"""
                 forward_header_html += f"""<b>Subject:</b> {header['subject']}
@@ -1636,7 +1639,8 @@ class ForwardEmailTool(BaseTool):
                 separator = "\n\n" + "─" * 40 + "\n"
                 forward_header_text = f"From: {header['from']}\n"
                 forward_header_text += f"Sent: {header['sent']}\n"
-                forward_header_text += f"To: {header['to']}\n"
+                if header['to']:
+                    forward_header_text += f"To: {header['to']}\n"
                 if header['cc']:
                     forward_header_text += f"Cc: {header['cc']}\n"
                 forward_header_text += f"Subject: {header['subject']}\n\n"
