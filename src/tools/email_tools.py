@@ -1,5 +1,6 @@
 """Email operation tools for EWS MCP Server."""
 
+import os
 from typing import Any, Dict, List
 from datetime import datetime
 from exchangelib import Message, Mailbox, FileAttachment, HTMLBody, Body, Folder, ExtendedProperty
@@ -599,39 +600,34 @@ class SendEmailTool(BaseTool):
                 )
             self.logger.info(f"Verified message body set correctly: {len(str(message.body))} characters")
 
-            # Add attachments if provided (must save before sending when attachments are present)
+            # Add attachments if provided
+            attachment_count = 0
             if request.attachments:
                 for file_path in request.attachments:
                     try:
+                        # Use os.path.basename to handle both Windows and Unix paths
+                        file_name = os.path.basename(file_path)
                         with open(file_path, 'rb') as f:
                             content = f.read()
                             attachment = FileAttachment(
-                                name=file_path.split('/')[-1],
+                                name=file_name,
                                 content=content
                             )
                             message.attach(attachment)
+                            attachment_count += 1
+                            self.logger.info(f"Attached file: {file_name} ({len(content)} bytes)")
+                    except FileNotFoundError:
+                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                    except PermissionError:
+                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
                     except Exception as e:
-                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
+                        raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
-                # Save message with attachments first (required for attachments to be included)
-                message.save()
-                self.logger.info(f"Message saved with {len(request.attachments)} attachment(s)")
+                self.logger.info(f"Total attachments added: {attachment_count}")
 
-                # CRITICAL: Verify body still exists after save()
-                if not message.body or len(str(message.body).strip()) == 0:
-                    raise ToolExecutionError(
-                        "Message body was stripped during save()! "
-                        "This may indicate encoding issue or Exchange policy blocking content."
-                    )
-                self.logger.info(f"Body preserved after save(): {len(str(message.body))} characters")
-
-                # Then send
-                message.send()
-                self.logger.info(f"Message sent with attachments to {', '.join(request.to)}")
-            else:
-                # Send directly if no attachments
-                message.send()
-                self.logger.info(f"Message sent (no attachments) to {', '.join(request.to)}")
+            # Send the message (attachments are included automatically)
+            message.send()
+            self.logger.info(f"Message sent to {', '.join(request.to)} with {attachment_count} attachment(s)")
 
             # FINAL VERIFICATION: Check message body after send
             if hasattr(message, 'body') and message.body and len(str(message.body).strip()) > 0:
@@ -1551,21 +1547,23 @@ class ReplyEmailTool(BaseTool):
                 # Add new attachments
                 for file_path in attachments:
                     try:
+                        # Use os.path.basename for cross-platform path handling
+                        file_name = os.path.basename(file_path)
                         with open(file_path, 'rb') as f:
                             content = f.read()
                             attachment = FileAttachment(
-                                name=file_path.split('/')[-1],
+                                name=file_name,
                                 content=content
                             )
                             message.attach(attachment)
                             new_attachment_count += 1
-                            self.logger.info(f"Attached file: {file_path}")
+                            self.logger.info(f"Attached file: {file_name} ({len(content)} bytes)")
                     except FileNotFoundError:
                         raise ToolExecutionError(f"Attachment file not found: {file_path}")
                     except PermissionError:
                         raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
                     except Exception as e:
-                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
+                        raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
                 # Send the message
                 message.send()
@@ -1764,21 +1762,23 @@ class ForwardEmailTool(BaseTool):
                 # Add additional attachments
                 for file_path in additional_attachments:
                     try:
+                        # Use os.path.basename for cross-platform path handling
+                        file_name = os.path.basename(file_path)
                         with open(file_path, 'rb') as f:
                             content = f.read()
                             attachment = FileAttachment(
-                                name=file_path.split('/')[-1],
+                                name=file_name,
                                 content=content
                             )
                             message.attach(attachment)
                             additional_attachment_count += 1
-                            self.logger.info(f"Attached additional file: {file_path}")
+                            self.logger.info(f"Attached additional file: {file_name} ({len(content)} bytes)")
                     except FileNotFoundError:
                         raise ToolExecutionError(f"Attachment file not found: {file_path}")
                     except PermissionError:
                         raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
                     except Exception as e:
-                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
+                        raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
                 # Send the message
                 message.send()
