@@ -62,7 +62,7 @@ def format_forward_header(message) -> dict:
     """
     Format the forwarded message header like Outlook.
 
-    - From: Name only (no email in brackets)
+    - From: Name <email> format
     - To/Cc: Name <email> format
     - Sent: Full date format with day name
 
@@ -72,14 +72,21 @@ def format_forward_header(message) -> dict:
     Returns:
         Dictionary with formatted header fields
     """
-    # From: Name only (no email brackets)
+    # From: Name <email> format
     sender = safe_get(message, "sender", None)
     sender_name = ""
     sender_email = ""
     if sender:
         sender_name = sender.name if hasattr(sender, "name") else ""
         sender_email = sender.email_address if hasattr(sender, "email_address") else ""
-    from_str = sender_name if sender_name else sender_email
+
+    # Format as "Name <email>" or just "email" if no name
+    if sender_name and sender_email:
+        from_str = f"{sender_name} <{sender_email}>"
+    elif sender_email:
+        from_str = sender_email
+    else:
+        from_str = sender_name
 
     # To/Cc: Name <email> format
     def format_recipients(recipients):
