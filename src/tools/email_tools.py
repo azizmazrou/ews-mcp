@@ -139,6 +139,11 @@ def copy_attachments_to_message(original_message, new_message) -> tuple:
     Returns:
         Tuple of (inline_count, regular_count)
     """
+    # Check if target message supports attach method
+    # ReplyToItem/ReplyAllToItem objects from create_reply() don't support attach
+    if not hasattr(new_message, 'attach') or not callable(getattr(new_message, 'attach', None)):
+        return 0, 0
+
     attachments = safe_get(original_message, "attachments", []) or []
     if not attachments:
         return 0, 0
@@ -150,22 +155,26 @@ def copy_attachments_to_message(original_message, new_message) -> tuple:
         if not att or not isinstance(att, FileAttachment):
             continue
 
-        # Create new attachment preserving ALL properties
-        # CRITICAL: content_id is needed for cid: references in HTML
-        # CRITICAL: is_inline marks the attachment as embedded
-        new_att = FileAttachment(
-            name=att.name,
-            content=att.content,
-            content_type=getattr(att, 'content_type', None),
-            content_id=getattr(att, 'content_id', None),  # Preserve for cid: refs
-            is_inline=getattr(att, 'is_inline', False)     # Preserve inline flag
-        )
-        new_message.attach(new_att)
+        try:
+            # Create new attachment preserving ALL properties
+            # CRITICAL: content_id is needed for cid: references in HTML
+            # CRITICAL: is_inline marks the attachment as embedded
+            new_att = FileAttachment(
+                name=att.name,
+                content=att.content,
+                content_type=getattr(att, 'content_type', None),
+                content_id=getattr(att, 'content_id', None),  # Preserve for cid: refs
+                is_inline=getattr(att, 'is_inline', False)     # Preserve inline flag
+            )
+            new_message.attach(new_att)
 
-        if getattr(att, 'is_inline', False):
-            inline_count += 1
-        else:
-            regular_count += 1
+            if getattr(att, 'is_inline', False):
+                inline_count += 1
+            else:
+                regular_count += 1
+        except (AttributeError, TypeError):
+            # Target message doesn't support attach - skip
+            return inline_count, regular_count
 
     return inline_count, regular_count
 
@@ -1439,31 +1448,45 @@ class ReplyEmailTool(BaseTool):
                 self.logger.info("Using Body (plain text) for reply content")
 
             # Copy original inline attachments (signatures, embedded images)
+            # Note: ReplyToItem/ReplyAllToItem may not support attach method
             # This preserves content_id and is_inline properties for cid: references
             inline_count, regular_from_original = copy_attachments_to_message(original_message, reply)
             if inline_count > 0:
                 self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
 
-            # Add new attachments if provided
+            # Check if reply object supports attachments
+            # ReplyToItem/ReplyAllToItem from create_reply() don't support attach
+            supports_attach = hasattr(reply, 'attach') and callable(getattr(reply, 'attach', None))
+
+            # Add new attachments if provided and supported
             new_attachment_count = 0
             if attachments:
-                for file_path in attachments:
-                    try:
-                        with open(file_path, 'rb') as f:
-                            content = f.read()
-                            attachment = FileAttachment(
-                                name=file_path.split('/')[-1],
-                                content=content
-                            )
-                            reply.attach(attachment)
-                            new_attachment_count += 1
-                            self.logger.info(f"Attached file: {file_path}")
-                    except FileNotFoundError:
-                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
-                    except PermissionError:
-                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
+                if not supports_attach:
+                    self.logger.warning(
+                        "Reply object doesn't support attachments. "
+                        "Use send_email for replies that need attachments."
+                    )
+                else:
+                    for file_path in attachments:
+                        try:
+                            with open(file_path, 'rb') as f:
+                                content = f.read()
+                                attachment = FileAttachment(
+                                    name=file_path.split('/')[-1],
+                                    content=content
+                                )
+                                reply.attach(attachment)
+                                new_attachment_count += 1
+                                self.logger.info(f"Attached file: {file_path}")
+                        except FileNotFoundError:
+                            raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                        except PermissionError:
+                            raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
+                        except (AttributeError, TypeError) as e:
+                            self.logger.warning(f"Reply doesn't support attachments: {e}")
+                            break
+                        except Exception as e:
+                            self.logger.warning(f"Failed to attach file {file_path}: {e}")
 
             # Send the reply
             reply.send()
