@@ -1471,91 +1471,25 @@ class ReplyEmailTool(BaseTool):
             original_cc = [r.email_address for r in (safe_get(original_message, "cc_recipients", []) or [])
                          if r and hasattr(r, "email_address") and r.email_address]
 
-            # Create reply using exchangelib's built-in methods
-            # This automatically preserves conversation ID, In-Reply-To, and References headers
-            if reply_all:
-                reply = original_message.create_reply_all(subject=None, body=None)
-                self.logger.info("Creating reply-all message")
-            else:
-                reply = original_message.create_reply(subject=None, body=None, to_recipients=None)
-                self.logger.info("Creating reply message")
+            # Let EWS handle reply body construction for proper Exclaimer signature placement
+            # By passing the user's body directly to create_reply(), Exchange builds the
+            # reply structure with proper metadata that Exclaimer can recognize
 
             # Detect if body is HTML or plain text
             is_html = bool(re.search(r'<[^>]+>', body))
 
-            # Use helper function to format headers properly (Outlook-style)
-            header = format_forward_header(original_message)
+            # Prepare user body for create_reply
+            user_body = HTMLBody(body) if is_html else Body(body)
 
-            # Extract original body HTML properly (from HTMLBody.body, not the object itself)
-            original_body_html = extract_body_html(original_message)
-            self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
-
-            # Clean original body - rename WordSection1 to prevent Exclaimer signature misplacement
-            original_body_html = clean_original_body_for_signature(original_body_html)
-
-            # Build the complete reply body with quote
-            if is_html or original_body_html:
-                # Outlook-compatible structure for Exclaimer/server-side signature placement
-                # Exclaimer looks for closing </div> of WordSection1 and inserts signature after it
-
-                # Reply header with Outlook-style border
-                quote_header = f'''
-<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
-<p style="font-size:11pt;font-family:Calibri,sans-serif;">
-<b>From:</b> {header['from']}<br>
-<b>Sent:</b> {header['sent']}<br>'''
-                if header['to']:
-                    quote_header += f'''<b>To:</b> {header['to']}<br>'''
-                if header['cc']:
-                    quote_header += f'''<b>Cc:</b> {header['cc']}<br>'''
-                quote_header += f'''<b>Subject:</b> {header['subject']}
-</p>
-</div>
-'''
-
-                # Build complete body with Outlook-compatible structure
-                # WordSection1 div is closed after user content - signature goes in the <br><br> gap
-                # Use ForwardSection (not WordSection1) for forward content so Exclaimer ignores it
-                # Office XML namespaces are required for Exclaimer to recognize Outlook-style HTML
-                complete_body = f'''<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns:m="http://schemas.microsoft.com/office/2004/12/omml" xmlns="http://www.w3.org/TR/REC-html40">
-<head>
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<meta name="Generator" content="Microsoft Word 15 (filtered medium)">
-<style>
-div.WordSection1 {{{{page:WordSection1;}}}}
-</style>
-</head>
-<body lang="EN-US" style="word-wrap:break-word">
-<div class="WordSection1">
-{body}
-<div></div>
-</div>
-<br><br>
-<div class="ForwardSection">
-{quote_header}
-{original_body_html}
-</div>
-</body>
-</html>'''
-
-                reply.body = HTMLBody(complete_body)
-                self.logger.info("Using HTMLBody for HTML reply content")
+            # Create reply using exchangelib's built-in methods
+            # Pass body directly - let EWS handle the structure
+            # This automatically preserves conversation ID, In-Reply-To, and References headers
+            if reply_all:
+                reply = original_message.create_reply_all(subject=None, body=user_body)
+                self.logger.info("Creating reply-all message (letting EWS handle body structure)")
             else:
-                # Plain text reply format
-                separator = "\n\n" + "─" * 40 + "\n"
-                quote_header = f"From: {header['from']}\n"
-                quote_header += f"Sent: {header['sent']}\n"
-                if header['to']:
-                    quote_header += f"To: {header['to']}\n"
-                if header['cc']:
-                    quote_header += f"Cc: {header['cc']}\n"
-                quote_header += f"Subject: {header['subject']}\n\n"
-
-                # Use text_body for plain text
-                original_text = safe_get(original_message, "text_body", "") or ""
-                complete_body = f"{body}{separator}{quote_header}{original_text}"
-                reply.body = Body(complete_body)
-                self.logger.info("Using Body (plain text) for reply content")
+                reply = original_message.create_reply(subject=None, body=user_body, to_recipients=None)
+                self.logger.info("Creating reply message (letting EWS handle body structure)")
 
             # Copy original inline attachments (signatures, embedded images)
             # Note: ReplyToItem/ReplyAllToItem may not support attach method
@@ -1597,6 +1531,26 @@ div.WordSection1 {{{{page:WordSection1;}}}}
                             break
                         except Exception as e:
                             self.logger.warning(f"Failed to attach file {file_path}: {e}")
+
+            # Post-process: Add sender email to From header if missing
+            # Native EWS reply may only show name for internal senders
+            body_str = str(reply.body) if reply.body else ""
+            if '<b>From:</b>' in body_str or '<b>From:<' in body_str:
+                # Get sender email from original message
+                sender_email = ""
+                if original_message.sender and hasattr(original_message.sender, 'email_address'):
+                    sender_email = original_message.sender.email_address or ""
+
+                # Only add if email exists and not already in body
+                if sender_email and sender_email not in body_str and f"&lt;{sender_email}&gt;" not in body_str:
+                    # Find: <b>From:</b> Name<br> or <b>From:</b> Name</span>
+                    # Add email after name using HTML entities for angle brackets
+                    pattern = r'(<b>From:</b>\s*)([^<]+?)(\s*<)'
+                    replacement = rf'\1\2 &lt;{sender_email}&gt;\3'
+                    modified_body = re.sub(pattern, replacement, body_str, count=1)
+                    if modified_body != body_str:
+                        reply.body = HTMLBody(modified_body)
+                        self.logger.info(f"Added sender email to From header: {sender_email}")
 
             # Send the reply
             reply.send()
@@ -1755,6 +1709,26 @@ class ForwardEmailTool(BaseTool):
                         raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
                     except Exception as e:
                         self.logger.warning(f"Failed to attach file {file_path}: {e}")
+
+            # Post-process: Add sender email to From header if missing
+            # Native EWS forward may only show name for internal senders
+            body_str = str(forward.body) if forward.body else ""
+            if '<b>From:</b>' in body_str or '<b>From:<' in body_str:
+                # Get sender email from original message
+                sender_email = ""
+                if original_message.sender and hasattr(original_message.sender, 'email_address'):
+                    sender_email = original_message.sender.email_address or ""
+
+                # Only add if email exists and not already in body
+                if sender_email and sender_email not in body_str and f"&lt;{sender_email}&gt;" not in body_str:
+                    # Find: <b>From:</b> Name<br> or <b>From:</b> Name</span>
+                    # Add email after name using HTML entities for angle brackets
+                    pattern = r'(<b>From:</b>\s*)([^<]+?)(\s*<)'
+                    replacement = rf'\1\2 &lt;{sender_email}&gt;\3'
+                    modified_body = re.sub(pattern, replacement, body_str, count=1)
+                    if modified_body != body_str:
+                        forward.body = HTMLBody(modified_body)
+                        self.logger.info(f"Added sender email to From header: {sender_email}")
 
             # Send the forward
             forward.send()
