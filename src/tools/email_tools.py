@@ -1515,9 +1515,11 @@ class ReplyEmailTool(BaseTool):
 
             if attachments:
                 # ReplyToItem doesn't support attachments, create a new Message instead
-                self.logger.info("Attachments requested - creating Message object")
+                # We need to manually construct the complete reply body since
+                # reply.body only contains user's message, not the full structure
+                self.logger.info("Attachments requested - creating Message object with full body")
 
-                # Get the reply subject (should be "RE: original subject")
+                # Get the reply subject
                 reply_subject = f"RE: {original_subject}" if original_subject else "RE:"
 
                 # Determine recipients for the reply
@@ -1531,11 +1533,42 @@ class ReplyEmailTool(BaseTool):
                     # Reply: just original sender
                     reply_to_recipients = [Mailbox(email_address=original_from_email)]
 
-                # Create a new Message with the reply body
+                # Build the complete reply body manually
+                # 1. User's message at top
+                user_message = body if body else ""
+
+                # 2. Format the quote header using our helper
+                header = format_forward_header(original_message)
+
+                # 3. Get the original email body HTML
+                original_body_html = extract_body_html(original_message)
+                self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
+
+                # 4. Construct the complete reply body with quote
+                quote_header_html = f'''
+<hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
+<p style="font-size:11pt;font-family:Calibri,sans-serif;">
+<b>From:</b> {header['from']}<br/>
+<b>Sent:</b> {header['sent']}<br/>'''
+                if header['to']:
+                    quote_header_html += f'''<b>To:</b> {header['to']}<br/>'''
+                if header['cc']:
+                    quote_header_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+                quote_header_html += f'''<b>Subject:</b> {header['subject']}
+</p>
+<br/>'''
+
+                complete_body = f'''{user_message}
+{quote_header_html}
+{original_body_html}'''
+
+                self.logger.info(f"Constructed complete reply body: {len(complete_body)} characters")
+
+                # Create a new Message with the complete body
                 message = Message(
                     account=account,
                     subject=reply_subject,
-                    body=HTMLBody(body_str) if body_str else reply.body,
+                    body=HTMLBody(complete_body),
                     to_recipients=reply_to_recipients
                 )
 
@@ -1735,16 +1768,50 @@ class ForwardEmailTool(BaseTool):
 
             if additional_attachments:
                 # ForwardItem doesn't support attachments, create a new Message instead
-                self.logger.info("Additional attachments requested - creating Message object")
+                # We need to manually construct the complete forward body since
+                # forward.body only contains user's message, not the full structure
+                self.logger.info("Additional attachments requested - creating Message object with full body")
 
-                # Get the forward subject (should be "FW: original subject")
+                # Get the forward subject
                 forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
 
-                # Create a new Message with the forward body
+                # Build the complete forward body manually
+                # 1. User's message at top
+                user_message = body if body else ""
+
+                # 2. Format the forward header using our helper
+                header = format_forward_header(original_message)
+
+                # 3. Get the original email body HTML
+                original_body_html = extract_body_html(original_message)
+                self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
+
+                # 4. Construct the complete forward body
+                forward_header_html = f'''
+<hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
+<p><b>---------- Forwarded message ----------</b></p>
+<p style="font-size:11pt;font-family:Calibri,sans-serif;">
+<b>From:</b> {header['from']}<br/>
+<b>Date:</b> {header['sent']}<br/>
+<b>Subject:</b> {header['subject']}<br/>'''
+                if header['to']:
+                    forward_header_html += f'''<b>To:</b> {header['to']}<br/>'''
+                if header['cc']:
+                    forward_header_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+                forward_header_html += '''</p>
+<br/>'''
+
+                complete_body = f'''{user_message}
+{forward_header_html}
+{original_body_html}'''
+
+                self.logger.info(f"Constructed complete forward body: {len(complete_body)} characters")
+
+                # Create a new Message with the complete body
                 message = Message(
                     account=account,
                     subject=forward_subject,
-                    body=HTMLBody(body_str) if body_str else forward.body,
+                    body=HTMLBody(complete_body),
                     to_recipients=[Mailbox(email_address=email) for email in to_recipients]
                 )
 
