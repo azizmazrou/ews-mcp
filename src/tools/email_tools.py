@@ -1090,3 +1090,360 @@ class CopyEmailTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to copy email: {e}")
             raise ToolExecutionError(f"Failed to copy email: {e}")
+
+
+class ReplyEmailTool(BaseTool):
+    """Tool for replying to emails while preserving conversation thread."""
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "reply_email",
+            "description": "Reply to an existing email while preserving the conversation thread. Uses Exchange's built-in reply mechanism to maintain In-Reply-To headers, conversation ID, and thread relationship.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The Exchange message ID of the email to reply to"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The reply body (HTML supported)"
+                    },
+                    "reply_all": {
+                        "type": "boolean",
+                        "description": "If true, reply to all recipients; if false, reply only to sender",
+                        "default": False
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "File paths to attach to the reply (optional)"
+                    }
+                },
+                "required": ["message_id", "body"]
+            }
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        """Reply to an email via EWS."""
+        message_id = kwargs.get("message_id")
+        body = kwargs.get("body", "").strip()
+        reply_all = kwargs.get("reply_all", False)
+        attachments = kwargs.get("attachments", [])
+
+        if not message_id:
+            raise ToolExecutionError("message_id is required")
+        if not body:
+            raise ToolExecutionError("body is required")
+
+        try:
+            # Find the original message across folders
+            original_message = find_message_across_folders(self.ews_client, message_id)
+
+            # Get original message details for the response
+            original_subject = safe_get(original_message, "subject", "") or ""
+            original_sender = safe_get(original_message, "sender", None)
+            original_from_email = ""
+            if original_sender and hasattr(original_sender, "email_address"):
+                original_from_email = original_sender.email_address or ""
+
+            # Get original recipients for reply-all
+            original_to = [r.email_address for r in (safe_get(original_message, "to_recipients", []) or [])
+                          if r and hasattr(r, "email_address") and r.email_address]
+            original_cc = [r.email_address for r in (safe_get(original_message, "cc_recipients", []) or [])
+                         if r and hasattr(r, "email_address") and r.email_address]
+
+            # Create reply using exchangelib's built-in methods
+            # This automatically preserves conversation ID, In-Reply-To, and References headers
+            if reply_all:
+                reply = original_message.create_reply_all(subject=None, body=None, to_recipients=None)
+                self.logger.info("Creating reply-all message")
+            else:
+                reply = original_message.create_reply(subject=None, body=None, to_recipients=None)
+                self.logger.info("Creating reply message")
+
+            # Detect if body is HTML or plain text
+            is_html = bool(re.search(r'<[^>]+>', body))
+
+            # Format the reply body with quoted original message
+            original_date = safe_get(original_message, "datetime_sent", None)
+            date_str = original_date.strftime("%A, %B %d, %Y %I:%M %p") if original_date else "Unknown Date"
+
+            # Build recipients string for quote header
+            to_str = "; ".join(original_to) if original_to else ""
+            cc_str = "; ".join(original_cc) if original_cc else ""
+
+            # Get original body
+            original_body_html = str(safe_get(original_message, "body", "") or "")
+
+            # Build the complete reply body with quote
+            if is_html:
+                # HTML reply format
+                quote_header = f"""
+<hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
+<p style="margin: 0; color: #666;">
+<strong>From:</strong> {original_from_email}<br>
+<strong>Sent:</strong> {date_str}<br>
+<strong>To:</strong> {to_str}<br>"""
+                if cc_str:
+                    quote_header += f"""<strong>Cc:</strong> {cc_str}<br>"""
+                quote_header += f"""<strong>Subject:</strong> {original_subject}
+</p>
+<br>
+"""
+                complete_body = f"{body}{quote_header}{original_body_html}"
+                reply.body = HTMLBody(complete_body)
+                self.logger.info("Using HTMLBody for HTML reply content")
+            else:
+                # Plain text reply format
+                separator = "\n\n" + "─" * 40 + "\n"
+                quote_header = f"From: {original_from_email}\n"
+                quote_header += f"Sent: {date_str}\n"
+                quote_header += f"To: {to_str}\n"
+                if cc_str:
+                    quote_header += f"Cc: {cc_str}\n"
+                quote_header += f"Subject: {original_subject}\n\n"
+
+                # Use text_body for plain text
+                original_text = safe_get(original_message, "text_body", "") or ""
+                complete_body = f"{body}{separator}{quote_header}{original_text}"
+                reply.body = Body(complete_body)
+                self.logger.info("Using Body (plain text) for reply content")
+
+            # Add attachments if provided
+            if attachments:
+                for file_path in attachments:
+                    try:
+                        with open(file_path, 'rb') as f:
+                            content = f.read()
+                            attachment = FileAttachment(
+                                name=file_path.split('/')[-1],
+                                content=content
+                            )
+                            reply.attach(attachment)
+                            self.logger.info(f"Attached file: {file_path}")
+                    except FileNotFoundError:
+                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                    except PermissionError:
+                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
+
+            # Send the reply
+            reply.send()
+            self.logger.info(f"Reply sent successfully to {original_from_email}")
+
+            # Determine who the reply was sent to
+            reply_to_list = []
+            if reply_all:
+                reply_to_list = [original_from_email] + [e for e in original_to + original_cc
+                                                        if e != self.ews_client.account.primary_smtp_address]
+            else:
+                reply_to_list = [original_from_email]
+
+            return format_success_response(
+                "Reply sent successfully",
+                original_subject=original_subject,
+                reply_to=reply_to_list,
+                reply_all=reply_all,
+                attachments_count=len(attachments) if attachments else 0
+            )
+
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to send reply: {e}")
+            raise ToolExecutionError(f"Failed to send reply: {e}")
+
+
+class ForwardEmailTool(BaseTool):
+    """Tool for forwarding emails to new recipients while preserving original content."""
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "forward_email",
+            "description": "Forward an existing email to new recipients while preserving the original content, formatting, and attachments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The Exchange message ID of the email to forward"
+                    },
+                    "to": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of recipient email addresses"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional message to add before the forwarded content"
+                    },
+                    "cc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "CC recipients (optional)"
+                    },
+                    "bcc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "BCC recipients (optional)"
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional file paths to attach (optional)"
+                    }
+                },
+                "required": ["message_id", "to"]
+            }
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        """Forward an email via EWS."""
+        message_id = kwargs.get("message_id")
+        to_recipients = kwargs.get("to", [])
+        body = kwargs.get("body", "").strip() if kwargs.get("body") else ""
+        cc_recipients = kwargs.get("cc", [])
+        bcc_recipients = kwargs.get("bcc", [])
+        additional_attachments = kwargs.get("attachments", [])
+
+        if not message_id:
+            raise ToolExecutionError("message_id is required")
+        if not to_recipients:
+            raise ToolExecutionError("to recipients are required")
+
+        try:
+            # Find the original message across folders
+            original_message = find_message_across_folders(self.ews_client, message_id)
+
+            # Get original message details
+            original_subject = safe_get(original_message, "subject", "") or ""
+            original_sender = safe_get(original_message, "sender", None)
+            original_from_email = ""
+            original_from_name = ""
+            if original_sender:
+                original_from_email = original_sender.email_address or "" if hasattr(original_sender, "email_address") else ""
+                original_from_name = original_sender.name or "" if hasattr(original_sender, "name") else ""
+
+            # Get original recipients
+            original_to = [r.email_address for r in (safe_get(original_message, "to_recipients", []) or [])
+                          if r and hasattr(r, "email_address") and r.email_address]
+            original_cc = [r.email_address for r in (safe_get(original_message, "cc_recipients", []) or [])
+                         if r and hasattr(r, "email_address") and r.email_address]
+
+            # Get original date
+            original_date = safe_get(original_message, "datetime_sent", None)
+            date_str = original_date.strftime("%A, %B %d, %Y %I:%M %p") if original_date else "Unknown Date"
+
+            # Create forward using exchangelib's built-in method
+            forward = original_message.create_forward(subject=None, body=None, to_recipients=None)
+            self.logger.info("Creating forward message")
+
+            # Set recipients
+            forward.to_recipients = [Mailbox(email_address=email) for email in to_recipients]
+            if cc_recipients:
+                forward.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
+            if bcc_recipients:
+                forward.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
+
+            # Build recipients string for forward header
+            to_str = "; ".join(original_to) if original_to else ""
+            cc_str = "; ".join(original_cc) if original_cc else ""
+
+            # Get original body
+            original_body_html = str(safe_get(original_message, "body", "") or "")
+
+            # Detect if user's message body is HTML
+            is_html = bool(re.search(r'<[^>]+>', body)) if body else False
+            # Also check if original body is HTML
+            is_original_html = bool(re.search(r'<[^>]+>', original_body_html))
+
+            # Format display name
+            from_display = f"{original_from_name} <{original_from_email}>" if original_from_name else original_from_email
+
+            # Build the complete forward body
+            if is_html or is_original_html:
+                # HTML forward format
+                forward_header = f"""
+<hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
+<p style="margin: 0; color: #666; font-family: Arial, sans-serif;">
+---------- Forwarded message ----------<br>
+<strong>From:</strong> {from_display}<br>
+<strong>Sent:</strong> {date_str}<br>
+<strong>To:</strong> {to_str}<br>"""
+                if cc_str:
+                    forward_header += f"""<strong>Cc:</strong> {cc_str}<br>"""
+                forward_header += f"""<strong>Subject:</strong> {original_subject}
+</p>
+<br>
+"""
+                user_message = f"<div>{body}</div>" if body else ""
+                complete_body = f"{user_message}{forward_header}{original_body_html}"
+                forward.body = HTMLBody(complete_body)
+                self.logger.info("Using HTMLBody for HTML forward content")
+            else:
+                # Plain text forward format
+                separator = "\n\n" + "─" * 40 + "\n"
+                forward_header = "---------- Forwarded message ----------\n"
+                forward_header += f"From: {from_display}\n"
+                forward_header += f"Sent: {date_str}\n"
+                forward_header += f"To: {to_str}\n"
+                if cc_str:
+                    forward_header += f"Cc: {cc_str}\n"
+                forward_header += f"Subject: {original_subject}\n\n"
+
+                # Use text_body for plain text
+                original_text = safe_get(original_message, "text_body", "") or ""
+                user_message = f"{body}\n" if body else ""
+                complete_body = f"{user_message}{separator}{forward_header}{original_text}"
+                forward.body = Body(complete_body)
+                self.logger.info("Using Body (plain text) for forward content")
+
+            # Count original attachments that will be included
+            original_attachments = safe_get(original_message, "attachments", []) or []
+            original_attachment_count = len([att for att in original_attachments
+                                            if att and hasattr(att, "name") and att.name])
+
+            # The create_forward method automatically includes original attachments
+            self.logger.info(f"Forward will include {original_attachment_count} original attachment(s)")
+
+            # Add additional attachments if provided
+            if additional_attachments:
+                for file_path in additional_attachments:
+                    try:
+                        with open(file_path, 'rb') as f:
+                            content = f.read()
+                            attachment = FileAttachment(
+                                name=file_path.split('/')[-1],
+                                content=content
+                            )
+                            forward.attach(attachment)
+                            self.logger.info(f"Attached additional file: {file_path}")
+                    except FileNotFoundError:
+                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                    except PermissionError:
+                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
+
+            # Send the forward
+            forward.send()
+            self.logger.info(f"Email forwarded successfully to {', '.join(to_recipients)}")
+
+            return format_success_response(
+                "Email forwarded successfully",
+                original_subject=original_subject,
+                forwarded_to=to_recipients,
+                cc=cc_recipients if cc_recipients else None,
+                bcc=bcc_recipients if bcc_recipients else None,
+                attachments_included=original_attachment_count,
+                additional_attachments=len(additional_attachments) if additional_attachments else 0
+            )
+
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to forward email: {e}")
+            raise ToolExecutionError(f"Failed to forward email: {e}")
