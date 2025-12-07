@@ -1515,6 +1515,7 @@ class ReplyEmailTool(BaseTool):
 
                 # Build complete body with Outlook-compatible structure
                 # WordSection1 div is closed after user content - signature goes in the <br><br> gap
+                # Use ForwardSection (not WordSection1) for forward content so Exclaimer ignores it
                 complete_body = f'''<html>
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
@@ -1525,7 +1526,7 @@ class ReplyEmailTool(BaseTool):
 <div></div>
 </div>
 <br><br>
-<div class="WordSection1">
+<div class="ForwardSection">
 {quote_header}
 {original_body_html}
 </div>
@@ -1743,6 +1744,7 @@ class ForwardEmailTool(BaseTool):
 
                 # Build complete body with Outlook-compatible structure
                 # WordSection1 div is closed after user content - signature goes in the <br><br> gap
+                # Use ForwardSection (not WordSection1) for forward content so Exclaimer ignores it
                 complete_body = f'''<html>
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
@@ -1753,7 +1755,7 @@ class ForwardEmailTool(BaseTool):
 <div></div>
 </div>
 <br><br>
-<div class="WordSection1">
+<div class="ForwardSection">
 {forward_header_html}
 {original_body_html}
 </div>
