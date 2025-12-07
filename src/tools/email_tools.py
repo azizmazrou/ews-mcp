@@ -99,6 +99,27 @@ def format_forward_header(message) -> dict:
                 sender_name = (from_field.name or "") if hasattr(from_field, "name") else ""
             sender_email = (from_field.email_address or "") if hasattr(from_field, "email_address") else ""
 
+    # Fallback 3: Extract from internet_message_headers as last resort
+    if not sender_email:
+        headers = safe_get(message, "headers", None) or safe_get(message, "internet_message_headers", None)
+        if headers:
+            for h in headers:
+                header_name = getattr(h, 'name', '') or ''
+                if header_name.lower() == 'from':
+                    header_value = getattr(h, 'value', '') or ''
+                    # Parse "Name <email>" format
+                    match = re.search(r'<([^>]+)>', header_value)
+                    if match:
+                        sender_email = match.group(1)
+                        # Also extract name if we don't have it
+                        if not sender_name:
+                            name_part = header_value[:header_value.find('<')].strip()
+                            if name_part:
+                                sender_name = name_part.strip('"\'')
+                    elif '@' in header_value:
+                        sender_email = header_value.strip()
+                    break
+
     # Format as "Name <email>" or just what's available
     if sender_name and sender_email:
         from_str = f"{sender_name} <{sender_email}>"
@@ -1440,9 +1461,10 @@ class ReplyEmailTool(BaseTool):
             # Build the complete reply body with quote
             if is_html or original_body_html:
                 # HTML reply format with Outlook-style headers (black text)
-                # Outlook marker tells Exchange where user content ends and quoted content begins
-                # This ensures server-side signatures are inserted before the reply header
-                outlook_reply_marker = '<div id="divRplyFwdMsg" dir="ltr"></div>'
+                # Outlook/Exchange markers tell server where user content ends and quoted content begins
+                # appendonsend: Exchange Online uses this to insert signatures
+                # divRplyFwdMsg: Outlook desktop uses this for reply/forward boundary
+                outlook_reply_marker = '<div id="appendonsend"></div><hr style="display:none;"><div id="divRplyFwdMsg" dir="ltr">'
                 quote_header = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
 <div style="font-family: Calibri, Arial, sans-serif;">
@@ -1456,7 +1478,8 @@ class ReplyEmailTool(BaseTool):
 </div>
 <br>
 """
-                complete_body = f"{body}{outlook_reply_marker}{quote_header}{original_body_html}"
+                # Close the divRplyFwdMsg div at the end
+                complete_body = f"{body}{outlook_reply_marker}{quote_header}{original_body_html}</div>"
                 reply.body = HTMLBody(complete_body)
                 self.logger.info("Using HTMLBody for HTML reply content")
             else:
@@ -1644,9 +1667,10 @@ class ForwardEmailTool(BaseTool):
             # Build the complete forward body
             if is_html or original_body_html:
                 # HTML forward format with Outlook-style headers (black text)
-                # Outlook marker tells Exchange where user content ends and forwarded content begins
-                # This ensures server-side signatures are inserted before the forward header
-                outlook_reply_marker = '<div id="divRplyFwdMsg" dir="ltr"></div>'
+                # Outlook/Exchange markers tell server where user content ends and forwarded content begins
+                # appendonsend: Exchange Online uses this to insert signatures
+                # divRplyFwdMsg: Outlook desktop uses this for reply/forward boundary
+                outlook_reply_marker = '<div id="appendonsend"></div><hr style="display:none;"><div id="divRplyFwdMsg" dir="ltr">'
                 forward_header_html = f"""
 <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
 <div style="font-family: Calibri, Arial, sans-serif;">
@@ -1661,7 +1685,8 @@ class ForwardEmailTool(BaseTool):
 <br>
 """
                 user_message = f"<div>{body}</div><br>" if body else ""
-                complete_body = f"{user_message}{outlook_reply_marker}{forward_header_html}{original_body_html}"
+                # Close the divRplyFwdMsg div at the end
+                complete_body = f"{user_message}{outlook_reply_marker}{forward_header_html}{original_body_html}</div>"
                 forward.body = HTMLBody(complete_body)
                 self.logger.info("Using HTMLBody for HTML forward content")
             else:
