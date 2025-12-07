@@ -121,8 +121,9 @@ def format_forward_header(message) -> dict:
                     break
 
     # Format as "Name <email>" or just what's available
+    # Use HTML entities for angle brackets to prevent browser from hiding email
     if sender_name and sender_email:
-        from_str = f"{sender_name} <{sender_email}>"
+        from_str = f"{sender_name} &lt;{sender_email}&gt;"
     elif sender_email:
         from_str = sender_email
     elif sender_name:
@@ -142,7 +143,8 @@ def format_forward_header(message) -> dict:
             name = (r.name or "") if hasattr(r, "name") else ""
             email = (r.email_address or "") if hasattr(r, "email_address") else ""
             if name and email:
-                parts.append(f"{name} <{email}>")
+                # HTML-escape angle brackets to prevent browser from hiding email
+                parts.append(f"{name} &lt;{email}&gt;")
             elif email:
                 parts.append(email)
             elif name:
@@ -1460,26 +1462,43 @@ class ReplyEmailTool(BaseTool):
 
             # Build the complete reply body with quote
             if is_html or original_body_html:
-                # HTML reply format with Outlook-style headers (black text)
-                # Outlook/Exchange markers tell server where user content ends and quoted content begins
-                # appendonsend: Exchange Online uses this to insert signatures
-                # divRplyFwdMsg: Outlook desktop uses this for reply/forward boundary
-                outlook_reply_marker = '<div id="appendonsend"></div><hr style="display:none;"><div id="divRplyFwdMsg" dir="ltr">'
-                quote_header = f"""
-<hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
-<div style="font-family: Calibri, Arial, sans-serif;">
+                # Outlook-compatible structure for Exclaimer/server-side signature placement
+                # Exclaimer looks for closing </div> of WordSection1 and inserts signature after it
+
+                # Reply header with Outlook-style border
+                quote_header = f'''
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<p style="font-size:11pt;font-family:Calibri,sans-serif;">
 <b>From:</b> {header['from']}<br>
-<b>Sent:</b> {header['sent']}<br>"""
+<b>Sent:</b> {header['sent']}<br>'''
                 if header['to']:
-                    quote_header += f"""<b>To:</b> {header['to']}<br>"""
+                    quote_header += f'''<b>To:</b> {header['to']}<br>'''
                 if header['cc']:
-                    quote_header += f"""<b>Cc:</b> {header['cc']}<br>"""
-                quote_header += f"""<b>Subject:</b> {header['subject']}
+                    quote_header += f'''<b>Cc:</b> {header['cc']}<br>'''
+                quote_header += f'''<b>Subject:</b> {header['subject']}
+</p>
 </div>
-<br>
-"""
-                # Close the divRplyFwdMsg div at the end
-                complete_body = f"{body}{outlook_reply_marker}{quote_header}{original_body_html}</div>"
+'''
+
+                # Build complete body with Outlook-compatible structure
+                # WordSection1 div is closed after user content - signature goes in the <br><br> gap
+                complete_body = f'''<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+</head>
+<body>
+<div class="WordSection1">
+{body}
+<div></div>
+</div>
+<br><br>
+<div class="WordSection1">
+{quote_header}
+{original_body_html}
+</div>
+</body>
+</html>'''
+
                 reply.body = HTMLBody(complete_body)
                 self.logger.info("Using HTMLBody for HTML reply content")
             else:
@@ -1666,27 +1685,45 @@ class ForwardEmailTool(BaseTool):
 
             # Build the complete forward body
             if is_html or original_body_html:
-                # HTML forward format with Outlook-style headers (black text)
-                # Outlook/Exchange markers tell server where user content ends and forwarded content begins
-                # appendonsend: Exchange Online uses this to insert signatures
-                # divRplyFwdMsg: Outlook desktop uses this for reply/forward boundary
-                outlook_reply_marker = '<div id="appendonsend"></div><hr style="display:none;"><div id="divRplyFwdMsg" dir="ltr">'
-                forward_header_html = f"""
-<hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
-<div style="font-family: Calibri, Arial, sans-serif;">
+                # Outlook-compatible structure for Exclaimer/server-side signature placement
+                # Exclaimer looks for closing </div> of WordSection1 and inserts signature after it
+
+                user_message = body if body else ""
+
+                # Forward header with Outlook-style border
+                forward_header_html = f'''
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<p style="font-size:11pt;font-family:Calibri,sans-serif;">
 <b>From:</b> {header['from']}<br>
-<b>Sent:</b> {header['sent']}<br>"""
+<b>Sent:</b> {header['sent']}<br>'''
                 if header['to']:
-                    forward_header_html += f"""<b>To:</b> {header['to']}<br>"""
+                    forward_header_html += f'''<b>To:</b> {header['to']}<br>'''
                 if header['cc']:
-                    forward_header_html += f"""<b>Cc:</b> {header['cc']}<br>"""
-                forward_header_html += f"""<b>Subject:</b> {header['subject']}
+                    forward_header_html += f'''<b>Cc:</b> {header['cc']}<br>'''
+                forward_header_html += f'''<b>Subject:</b> {header['subject']}
+</p>
 </div>
-<br>
-"""
-                user_message = f"<div>{body}</div><br>" if body else ""
-                # Close the divRplyFwdMsg div at the end
-                complete_body = f"{user_message}{outlook_reply_marker}{forward_header_html}{original_body_html}</div>"
+'''
+
+                # Build complete body with Outlook-compatible structure
+                # WordSection1 div is closed after user content - signature goes in the <br><br> gap
+                complete_body = f'''<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+</head>
+<body>
+<div class="WordSection1">
+{user_message}
+<div></div>
+</div>
+<br><br>
+<div class="WordSection1">
+{forward_header_html}
+{original_body_html}
+</div>
+</body>
+</html>'''
+
                 forward.body = HTMLBody(complete_body)
                 self.logger.info("Using HTMLBody for HTML forward content")
             else:
