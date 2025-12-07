@@ -1534,7 +1534,7 @@ class ReplyEmailTool(BaseTool):
                     reply_to_recipients = [Mailbox(email_address=original_from_email)]
 
                 # Build the complete reply body manually
-                # 1. User's message at top
+                # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
                 user_message = body if body else ""
 
                 # 2. Format the reply headers from original email metadata
@@ -1555,8 +1555,12 @@ class ReplyEmailTool(BaseTool):
                 headers_html += f'''<b>Subject:</b> {header['subject']}
 </p>'''
 
-                # 5. Construct: user message → separator → headers → original body
-                complete_body = f'''{user_message}
+                # 5. Construct complete body with WordSection1 for Exclaimer signature placement
+                # Exclaimer inserts signature after the closing </div> of WordSection1
+                # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
+                complete_body = f'''<div class="WordSection1">
+{user_message}
+</div>
 <hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
 {headers_html}
 <br/>
@@ -1776,7 +1780,7 @@ class ForwardEmailTool(BaseTool):
                 forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
 
                 # Build the complete forward body manually
-                # 1. User's message at top
+                # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
                 user_message = body if body else ""
 
                 # 2. Format the forward headers from original email metadata
@@ -1797,8 +1801,12 @@ class ForwardEmailTool(BaseTool):
                     headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
                 headers_html += '''</p>'''
 
-                # 5. Construct: user message → separator → headers → original body
-                complete_body = f'''{user_message}
+                # 5. Construct complete body with WordSection1 for Exclaimer signature placement
+                # Exclaimer inserts signature after the closing </div> of WordSection1
+                # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
+                complete_body = f'''<div class="WordSection1">
+{user_message}
+</div>
 <hr style="border:none;border-top:solid #E1E1E1 1.0pt;"/>
 {headers_html}
 <br/>
