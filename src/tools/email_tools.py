@@ -1,5 +1,6 @@
 """Email operation tools for EWS MCP Server."""
 
+import os
 from typing import Any, Dict, List
 from datetime import datetime
 from exchangelib import Message, Mailbox, FileAttachment, HTMLBody, Body, Folder, ExtendedProperty
@@ -599,39 +600,34 @@ class SendEmailTool(BaseTool):
                 )
             self.logger.info(f"Verified message body set correctly: {len(str(message.body))} characters")
 
-            # Add attachments if provided (must save before sending when attachments are present)
+            # Add attachments if provided
+            attachment_count = 0
             if request.attachments:
                 for file_path in request.attachments:
                     try:
+                        # Use os.path.basename to handle both Windows and Unix paths
+                        file_name = os.path.basename(file_path)
                         with open(file_path, 'rb') as f:
                             content = f.read()
                             attachment = FileAttachment(
-                                name=file_path.split('/')[-1],
+                                name=file_name,
                                 content=content
                             )
                             message.attach(attachment)
+                            attachment_count += 1
+                            self.logger.info(f"Attached file: {file_name} ({len(content)} bytes)")
+                    except FileNotFoundError:
+                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                    except PermissionError:
+                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
                     except Exception as e:
-                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
+                        raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
-                # Save message with attachments first (required for attachments to be included)
-                message.save()
-                self.logger.info(f"Message saved with {len(request.attachments)} attachment(s)")
+                self.logger.info(f"Total attachments added: {attachment_count}")
 
-                # CRITICAL: Verify body still exists after save()
-                if not message.body or len(str(message.body).strip()) == 0:
-                    raise ToolExecutionError(
-                        "Message body was stripped during save()! "
-                        "This may indicate encoding issue or Exchange policy blocking content."
-                    )
-                self.logger.info(f"Body preserved after save(): {len(str(message.body))} characters")
-
-                # Then send
-                message.send()
-                self.logger.info(f"Message sent with attachments to {', '.join(request.to)}")
-            else:
-                # Send directly if no attachments
-                message.send()
-                self.logger.info(f"Message sent (no attachments) to {', '.join(request.to)}")
+            # Send the message (attachments are included automatically)
+            message.send()
+            self.logger.info(f"Message sent to {', '.join(request.to)} with {attachment_count} attachment(s)")
 
             # FINAL VERIFICATION: Check message body after send
             if hasattr(message, 'body') and message.body and len(str(message.body).strip()) > 0:
@@ -1491,47 +1487,6 @@ class ReplyEmailTool(BaseTool):
                 reply = original_message.create_reply(subject=None, body=user_body, to_recipients=None)
                 self.logger.info("Creating reply message (letting EWS handle body structure)")
 
-            # Copy original inline attachments (signatures, embedded images)
-            # Note: ReplyToItem/ReplyAllToItem may not support attach method
-            # This preserves content_id and is_inline properties for cid: references
-            inline_count, regular_from_original = copy_attachments_to_message(original_message, reply)
-            if inline_count > 0:
-                self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
-
-            # Check if reply object supports attachments
-            # ReplyToItem/ReplyAllToItem from create_reply() don't support attach
-            supports_attach = hasattr(reply, 'attach') and callable(getattr(reply, 'attach', None))
-
-            # Add new attachments if provided and supported
-            new_attachment_count = 0
-            if attachments:
-                if not supports_attach:
-                    self.logger.warning(
-                        "Reply object doesn't support attachments. "
-                        "Use send_email for replies that need attachments."
-                    )
-                else:
-                    for file_path in attachments:
-                        try:
-                            with open(file_path, 'rb') as f:
-                                content = f.read()
-                                attachment = FileAttachment(
-                                    name=file_path.split('/')[-1],
-                                    content=content
-                                )
-                                reply.attach(attachment)
-                                new_attachment_count += 1
-                                self.logger.info(f"Attached file: {file_path}")
-                        except FileNotFoundError:
-                            raise ToolExecutionError(f"Attachment file not found: {file_path}")
-                        except PermissionError:
-                            raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
-                        except (AttributeError, TypeError) as e:
-                            self.logger.warning(f"Reply doesn't support attachments: {e}")
-                            break
-                        except Exception as e:
-                            self.logger.warning(f"Failed to attach file {file_path}: {e}")
-
             # Post-process: Add sender email to From header if missing
             # Native EWS reply may only show name for internal senders
             body_str = str(reply.body) if reply.body else ""
@@ -1550,11 +1505,79 @@ class ReplyEmailTool(BaseTool):
                     modified_body = re.sub(pattern, replacement, body_str, count=1)
                     if modified_body != body_str:
                         reply.body = HTMLBody(modified_body)
+                        body_str = modified_body
                         self.logger.info(f"Added sender email to From header: {sender_email}")
 
-            # Send the reply
-            reply.send()
-            self.logger.info(f"Reply sent successfully to {original_from_email}")
+            # Handle attachments - ReplyToItem/ReplyAllToItem don't support .attach()
+            # If we have attachments, create a new Message with the reply body
+            inline_count = 0
+            new_attachment_count = 0
+
+            if attachments:
+                # ReplyToItem doesn't support attachments, create a new Message instead
+                self.logger.info("Attachments requested - creating Message object")
+
+                # Get the reply subject (should be "RE: original subject")
+                reply_subject = f"RE: {original_subject}" if original_subject else "RE:"
+
+                # Determine recipients for the reply
+                if reply_all:
+                    # Reply all: original sender + all original recipients (except self)
+                    reply_to_recipients = [Mailbox(email_address=original_from_email)]
+                    for email in original_to + original_cc:
+                        if email != account.primary_smtp_address:
+                            reply_to_recipients.append(Mailbox(email_address=email))
+                else:
+                    # Reply: just original sender
+                    reply_to_recipients = [Mailbox(email_address=original_from_email)]
+
+                # Create a new Message with the reply body
+                message = Message(
+                    account=account,
+                    subject=reply_subject,
+                    body=HTMLBody(body_str) if body_str else reply.body,
+                    to_recipients=reply_to_recipients
+                )
+
+                # Copy original inline attachments
+                inline_count, _ = copy_attachments_to_message(original_message, message)
+                if inline_count > 0:
+                    self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
+
+                # Add new attachments
+                for file_path in attachments:
+                    try:
+                        # Use os.path.basename for cross-platform path handling
+                        file_name = os.path.basename(file_path)
+                        with open(file_path, 'rb') as f:
+                            content = f.read()
+                            attachment = FileAttachment(
+                                name=file_name,
+                                content=content
+                            )
+                            message.attach(attachment)
+                            new_attachment_count += 1
+                            self.logger.info(f"Attached file: {file_name} ({len(content)} bytes)")
+                    except FileNotFoundError:
+                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                    except PermissionError:
+                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
+                    except Exception as e:
+                        raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
+
+                # Send the message
+                message.send()
+                self.logger.info(f"Reply (with attachments) sent to {original_from_email}")
+            else:
+                # No attachments - use native reply
+                # Copy original inline attachments (signatures, embedded images)
+                inline_count, _ = copy_attachments_to_message(original_message, reply)
+                if inline_count > 0:
+                    self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
+
+                # Send the reply
+                reply.send()
+                self.logger.info(f"Reply sent successfully to {original_from_email}")
 
             # Determine who the reply was sent to
             reply_to_list = []
@@ -1682,34 +1705,6 @@ class ForwardEmailTool(BaseTool):
             if bcc_recipients:
                 forward.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
 
-            # Copy original attachments with proper content_id and is_inline preservation
-            # This is CRITICAL for inline images (signatures, embedded images) to display correctly
-            inline_count, regular_count = copy_attachments_to_message(original_message, forward)
-            total_original_attachments = inline_count + regular_count
-            self.logger.info(f"Copied {total_original_attachments} attachment(s) from original "
-                           f"({inline_count} inline, {regular_count} regular)")
-
-            # Add additional attachments if provided
-            additional_attachment_count = 0
-            if additional_attachments:
-                for file_path in additional_attachments:
-                    try:
-                        with open(file_path, 'rb') as f:
-                            content = f.read()
-                            attachment = FileAttachment(
-                                name=file_path.split('/')[-1],
-                                content=content
-                            )
-                            forward.attach(attachment)
-                            additional_attachment_count += 1
-                            self.logger.info(f"Attached additional file: {file_path}")
-                    except FileNotFoundError:
-                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
-                    except PermissionError:
-                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to attach file {file_path}: {e}")
-
             # Post-process: Add sender email to From header if missing
             # Native EWS forward may only show name for internal senders
             body_str = str(forward.body) if forward.body else ""
@@ -1728,11 +1723,77 @@ class ForwardEmailTool(BaseTool):
                     modified_body = re.sub(pattern, replacement, body_str, count=1)
                     if modified_body != body_str:
                         forward.body = HTMLBody(modified_body)
+                        body_str = modified_body
                         self.logger.info(f"Added sender email to From header: {sender_email}")
 
-            # Send the forward
-            forward.send()
-            self.logger.info(f"Email forwarded successfully to {', '.join(to_recipients)} from mailbox: {mailbox}")
+            # Handle attachments - ForwardItem doesn't support .attach()
+            # If we have additional attachments, create a new Message with the forward body
+            inline_count = 0
+            regular_count = 0
+            total_original_attachments = 0
+            additional_attachment_count = 0
+
+            if additional_attachments:
+                # ForwardItem doesn't support attachments, create a new Message instead
+                self.logger.info("Additional attachments requested - creating Message object")
+
+                # Get the forward subject (should be "FW: original subject")
+                forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
+
+                # Create a new Message with the forward body
+                message = Message(
+                    account=account,
+                    subject=forward_subject,
+                    body=HTMLBody(body_str) if body_str else forward.body,
+                    to_recipients=[Mailbox(email_address=email) for email in to_recipients]
+                )
+
+                if cc_recipients:
+                    message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
+                if bcc_recipients:
+                    message.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
+
+                # Copy original attachments
+                inline_count, regular_count = copy_attachments_to_message(original_message, message)
+                total_original_attachments = inline_count + regular_count
+                self.logger.info(f"Copied {total_original_attachments} attachment(s) from original "
+                               f"({inline_count} inline, {regular_count} regular)")
+
+                # Add additional attachments
+                for file_path in additional_attachments:
+                    try:
+                        # Use os.path.basename for cross-platform path handling
+                        file_name = os.path.basename(file_path)
+                        with open(file_path, 'rb') as f:
+                            content = f.read()
+                            attachment = FileAttachment(
+                                name=file_name,
+                                content=content
+                            )
+                            message.attach(attachment)
+                            additional_attachment_count += 1
+                            self.logger.info(f"Attached additional file: {file_name} ({len(content)} bytes)")
+                    except FileNotFoundError:
+                        raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                    except PermissionError:
+                        raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
+                    except Exception as e:
+                        raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
+
+                # Send the message
+                message.send()
+                self.logger.info(f"Email forwarded (with attachments) to {', '.join(to_recipients)} from mailbox: {mailbox}")
+            else:
+                # No additional attachments - use native forward
+                # Copy original attachments (inline images, etc.)
+                inline_count, regular_count = copy_attachments_to_message(original_message, forward)
+                total_original_attachments = inline_count + regular_count
+                self.logger.info(f"Copied {total_original_attachments} attachment(s) from original "
+                               f"({inline_count} inline, {regular_count} regular)")
+
+                # Send the forward
+                forward.send()
+                self.logger.info(f"Email forwarded successfully to {', '.join(to_recipients)} from mailbox: {mailbox}")
 
             return format_success_response(
                 "Email forwarded successfully",
