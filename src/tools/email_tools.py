@@ -49,14 +49,48 @@ def extract_body_html(message) -> str:
 
     # HTMLBody object has inner 'body' property with actual content
     if hasattr(body, 'body') and body.body:
-        return body.body
+        html = body.body
+    elif isinstance(body, str):
+        html = body
+    else:
+        html = str(body) if body else ""
 
-    # If body is already a string
-    if isinstance(body, str):
-        return body
+    # Strip document-level HTML tags to prevent nested <html><body> issues
+    # when embedding in blockquote. Nested document tags break HTML structure.
+    return strip_html_document_tags(html)
 
-    # Fallback - convert to string
-    return str(body) if body else ""
+
+def strip_html_document_tags(html: str) -> str:
+    """
+    Strip document-level HTML tags from content.
+
+    When forwarding/replying, the original email body may contain full HTML
+    document structure (<html>, <head>, <body>). If we embed this inside
+    our blockquote, we get invalid nested HTML that browsers/Exclaimer
+    restructure incorrectly, causing content to appear in wrong order.
+
+    Args:
+        html: HTML content that may contain document-level tags
+
+    Returns:
+        Inner content with document tags stripped
+    """
+    if not html:
+        return html
+
+    # Remove DOCTYPE declaration
+    html = re.sub(r'<!DOCTYPE[^>]*>', '', html, flags=re.IGNORECASE)
+
+    # Remove <html> open/close tags (with any attributes)
+    html = re.sub(r'</?html[^>]*>', '', html, flags=re.IGNORECASE)
+
+    # Remove entire <head>...</head> section (includes style, meta, etc.)
+    html = re.sub(r'<head[^>]*>.*?</head>', '', html, flags=re.IGNORECASE | re.DOTALL)
+
+    # Remove <body> open/close tags but keep the content inside
+    html = re.sub(r'</?body[^>]*>', '', html, flags=re.IGNORECASE)
+
+    return html.strip()
 
 
 def clean_original_body_for_signature(original_body_html: str) -> str:
