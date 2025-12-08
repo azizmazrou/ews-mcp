@@ -1467,103 +1467,58 @@ class ReplyEmailTool(BaseTool):
             original_cc = [r.email_address for r in (safe_get(original_message, "cc_recipients", []) or [])
                          if r and hasattr(r, "email_address") and r.email_address]
 
-            # Let EWS handle reply body construction for proper Exclaimer signature placement
-            # By passing the user's body directly to create_reply(), Exchange builds the
-            # reply structure with proper metadata that Exclaimer can recognize
+            # IMPORTANT: DO NOT use create_reply()/create_reply_all() - they auto-append content we can't control
+            # This causes duplication and wrong order issues with Exclaimer signature placement.
+            # Instead, always create a fresh Message with manually constructed body.
+            self.logger.info("Creating fresh Message for reply (not using create_reply)")
 
-            # Detect if body is HTML or plain text
-            is_html = bool(re.search(r'<[^>]+>', body))
+            # Get the reply subject
+            reply_subject = f"RE: {original_subject}" if original_subject else "RE:"
 
-            # Prepare user body for create_reply
-            user_body = HTMLBody(body) if is_html else Body(body)
-
-            # Create reply using exchangelib's built-in methods
-            # Pass body directly - let EWS handle the structure
-            # This automatically preserves conversation ID, In-Reply-To, and References headers
+            # Determine recipients for the reply
             if reply_all:
-                reply = original_message.create_reply_all(subject=None, body=user_body)
-                self.logger.info("Creating reply-all message (letting EWS handle body structure)")
+                # Reply all: original sender + all original recipients (except self)
+                reply_to_recipients = [Mailbox(email_address=original_from_email)]
+                for email in original_to + original_cc:
+                    if email != account.primary_smtp_address:
+                        reply_to_recipients.append(Mailbox(email_address=email))
+                self.logger.info(f"Reply-all to {len(reply_to_recipients)} recipient(s)")
             else:
-                reply = original_message.create_reply(subject=None, body=user_body, to_recipients=None)
-                self.logger.info("Creating reply message (letting EWS handle body structure)")
+                # Reply: just original sender
+                reply_to_recipients = [Mailbox(email_address=original_from_email)]
+                self.logger.info(f"Reply to {original_from_email}")
 
-            # Post-process: Add sender email to From header if missing
-            # Native EWS reply may only show name for internal senders
-            body_str = str(reply.body) if reply.body else ""
-            if '<b>From:</b>' in body_str or '<b>From:<' in body_str:
-                # Get sender email from original message
-                sender_email = ""
-                if original_message.sender and hasattr(original_message.sender, 'email_address'):
-                    sender_email = original_message.sender.email_address or ""
+            # Build the complete reply body manually
+            # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
+            user_message = body if body else ""
 
-                # Only add if email exists and not already in body
-                if sender_email and sender_email not in body_str and f"&lt;{sender_email}&gt;" not in body_str:
-                    # Find: <b>From:</b> Name<br> or <b>From:</b> Name</span>
-                    # Add email after name using HTML entities for angle brackets
-                    pattern = r'(<b>From:</b>\s*)([^<]+?)(\s*<)'
-                    replacement = rf'\1\2 &lt;{sender_email}&gt;\3'
-                    modified_body = re.sub(pattern, replacement, body_str, count=1)
-                    if modified_body != body_str:
-                        reply.body = HTMLBody(modified_body)
-                        body_str = modified_body
-                        self.logger.info(f"Added sender email to From header: {sender_email}")
+            # 2. Format the reply headers from original email metadata
+            header = format_forward_header(original_message)
 
-            # Handle attachments - ReplyToItem/ReplyAllToItem don't support .attach()
-            # If we have attachments, create a new Message with the reply body
-            inline_count = 0
-            new_attachment_count = 0
+            # 3. Get the original email body HTML
+            original_body_html = extract_body_html(original_message)
+            self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
-            if attachments:
-                # ReplyToItem doesn't support attachments, create a new Message instead
-                # We need to manually construct the complete reply body since
-                # reply.body only contains user's message, not the full structure
-                self.logger.info("Attachments requested - creating Message object with full body")
+            # Clean original body - rename WordSection1 to OriginalSection
+            # This prevents Exclaimer from placing signature after the original content
+            original_body_html = clean_original_body_for_signature(original_body_html)
 
-                # Get the reply subject
-                reply_subject = f"RE: {original_subject}" if original_subject else "RE:"
-
-                # Determine recipients for the reply
-                if reply_all:
-                    # Reply all: original sender + all original recipients (except self)
-                    reply_to_recipients = [Mailbox(email_address=original_from_email)]
-                    for email in original_to + original_cc:
-                        if email != account.primary_smtp_address:
-                            reply_to_recipients.append(Mailbox(email_address=email))
-                else:
-                    # Reply: just original sender
-                    reply_to_recipients = [Mailbox(email_address=original_from_email)]
-
-                # Build the complete reply body manually
-                # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
-                user_message = body if body else ""
-
-                # 2. Format the reply headers from original email metadata
-                header = format_forward_header(original_message)
-
-                # 3. Get the original email body HTML
-                original_body_html = extract_body_html(original_message)
-                self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
-
-                # Clean original body - rename WordSection1 to OriginalSection
-                # This prevents Exclaimer from placing signature after the original content
-                original_body_html = clean_original_body_for_signature(original_body_html)
-
-                # 4. Build headers block
-                headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
+            # 4. Build headers block
+            headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
 <b>From:</b> {header['from']}<br/>
 <b>Sent:</b> {header['sent']}<br/>'''
-                if header['to']:
-                    headers_html += f'''<b>To:</b> {header['to']}<br/>'''
-                if header['cc']:
-                    headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
-                headers_html += f'''<b>Subject:</b> {header['subject']}
+            if header['to']:
+                headers_html += f'''<b>To:</b> {header['to']}<br/>'''
+            if header['cc']:
+                headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+            headers_html += f'''<b>Subject:</b> {header['subject']}
 </p>'''
 
-                # 5. Construct complete body with WordSection1 for Exclaimer signature placement
-                # Exclaimer inserts signature after the closing </div> of WordSection1
-                # Wrap replied content in blockquote so Exclaimer recognizes it as quoted content
-                # Structure: [user message in WordSection1] → [signature inserted here] → [quoted replied content]
-                complete_body = f'''<div class="WordSection1">
+            # 5. Construct complete body with WordSection1 for Exclaimer signature placement
+            # Exclaimer inserts signature after the closing </div> of WordSection1
+            # Wrap replied content in blockquote so Exclaimer recognizes it as quoted content
+            # Structure: [user message in WordSection1] → [signature inserted here] → [quoted replied content]
+            complete_body = f'''<div class="WordSection1">
 {user_message}
 </div>
 
@@ -1575,22 +1530,24 @@ class ReplyEmailTool(BaseTool):
 {original_body_html}
 </blockquote>'''
 
-                self.logger.info(f"Constructed complete reply body: {len(complete_body)} characters")
+            self.logger.info(f"Constructed complete reply body: {len(complete_body)} characters")
 
-                # Create a new Message with the complete body
-                message = Message(
-                    account=account,
-                    subject=reply_subject,
-                    body=HTMLBody(complete_body),
-                    to_recipients=reply_to_recipients
-                )
+            # Create a new Message with the complete body
+            message = Message(
+                account=account,
+                subject=reply_subject,
+                body=HTMLBody(complete_body),
+                to_recipients=reply_to_recipients
+            )
 
-                # Copy original inline attachments
-                inline_count, _ = copy_attachments_to_message(original_message, message)
-                if inline_count > 0:
-                    self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
+            # Copy original inline attachments (signatures, embedded images)
+            inline_count, _ = copy_attachments_to_message(original_message, message)
+            if inline_count > 0:
+                self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
 
-                # Add new attachments
+            # Add new attachments if provided
+            new_attachment_count = 0
+            if attachments:
                 for file_path in attachments:
                     try:
                         # Use os.path.basename for cross-platform path handling
@@ -1611,19 +1568,9 @@ class ReplyEmailTool(BaseTool):
                     except Exception as e:
                         raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
-                # Send the message
-                message.send()
-                self.logger.info(f"Reply (with attachments) sent to {original_from_email}")
-            else:
-                # No attachments - use native reply
-                # Copy original inline attachments (signatures, embedded images)
-                inline_count, _ = copy_attachments_to_message(original_message, reply)
-                if inline_count > 0:
-                    self.logger.info(f"Copied {inline_count} inline attachment(s) from original message")
-
-                # Send the reply
-                reply.send()
-                self.logger.info(f"Reply sent successfully to {original_from_email}")
+            # Send the message
+            message.send()
+            self.logger.info(f"Reply sent to {original_from_email} from mailbox: {mailbox}")
 
             # Determine who the reply was sent to
             reply_to_list = []
@@ -1723,102 +1670,45 @@ class ForwardEmailTool(BaseTool):
             # Get original message details
             original_subject = safe_get(original_message, "subject", "") or ""
 
-            # Let EWS handle forward body construction for proper Exclaimer signature placement
-            # By passing the user's body directly to create_forward(), Exchange builds the
-            # forward structure with proper metadata that Exclaimer can recognize
+            # IMPORTANT: DO NOT use create_forward() - it auto-appends content we can't control
+            # This causes duplication and wrong order issues with Exclaimer signature placement.
+            # Instead, always create a fresh Message with manually constructed body.
+            self.logger.info("Creating fresh Message for forward (not using create_forward)")
 
-            # Detect if user's message body is HTML
-            is_html = bool(re.search(r'<[^>]+>', body)) if body else False
+            # Get the forward subject
+            forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
 
-            # Prepare user body for create_forward
-            if body:
-                user_body = HTMLBody(body) if is_html else Body(body)
-            else:
-                user_body = None
+            # Build the complete forward body manually
+            # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
+            user_message = body if body else ""
 
-            # Create forward using exchangelib's built-in method
-            # Pass body and recipients directly - let EWS handle the structure
-            forward = original_message.create_forward(
-                subject=None,
-                body=user_body,
-                to_recipients=[Mailbox(email_address=email) for email in to_recipients]
-            )
-            self.logger.info("Creating forward message (letting EWS handle body structure)")
+            # 2. Format the forward headers from original email metadata
+            header = format_forward_header(original_message)
 
-            # Set CC/BCC recipients
-            if cc_recipients:
-                forward.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
-            if bcc_recipients:
-                forward.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
+            # 3. Get the original email body HTML
+            original_body_html = extract_body_html(original_message)
+            self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
-            # Post-process: Add sender email to From header if missing
-            # Native EWS forward may only show name for internal senders
-            body_str = str(forward.body) if forward.body else ""
-            if '<b>From:</b>' in body_str or '<b>From:<' in body_str:
-                # Get sender email from original message
-                sender_email = ""
-                if original_message.sender and hasattr(original_message.sender, 'email_address'):
-                    sender_email = original_message.sender.email_address or ""
+            # Clean original body - rename WordSection1 to OriginalSection
+            # This prevents Exclaimer from placing signature after the original content
+            original_body_html = clean_original_body_for_signature(original_body_html)
 
-                # Only add if email exists and not already in body
-                if sender_email and sender_email not in body_str and f"&lt;{sender_email}&gt;" not in body_str:
-                    # Find: <b>From:</b> Name<br> or <b>From:</b> Name</span>
-                    # Add email after name using HTML entities for angle brackets
-                    pattern = r'(<b>From:</b>\s*)([^<]+?)(\s*<)'
-                    replacement = rf'\1\2 &lt;{sender_email}&gt;\3'
-                    modified_body = re.sub(pattern, replacement, body_str, count=1)
-                    if modified_body != body_str:
-                        forward.body = HTMLBody(modified_body)
-                        body_str = modified_body
-                        self.logger.info(f"Added sender email to From header: {sender_email}")
-
-            # Handle attachments - ForwardItem doesn't support .attach()
-            # If we have additional attachments, create a new Message with the forward body
-            inline_count = 0
-            regular_count = 0
-            total_original_attachments = 0
-            additional_attachment_count = 0
-
-            if additional_attachments:
-                # ForwardItem doesn't support attachments, create a new Message instead
-                # We need to manually construct the complete forward body since
-                # forward.body only contains user's message, not the full structure
-                self.logger.info("Additional attachments requested - creating Message object with full body")
-
-                # Get the forward subject
-                forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
-
-                # Build the complete forward body manually
-                # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
-                user_message = body if body else ""
-
-                # 2. Format the forward headers from original email metadata
-                header = format_forward_header(original_message)
-
-                # 3. Get the original email body HTML
-                original_body_html = extract_body_html(original_message)
-                self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
-
-                # Clean original body - rename WordSection1 to OriginalSection
-                # This prevents Exclaimer from placing signature after the original content
-                original_body_html = clean_original_body_for_signature(original_body_html)
-
-                # 4. Build headers block
-                headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
+            # 4. Build headers block
+            headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
 <b>From:</b> {header['from']}<br/>
 <b>Date:</b> {header['sent']}<br/>
 <b>Subject:</b> {header['subject']}<br/>'''
-                if header['to']:
-                    headers_html += f'''<b>To:</b> {header['to']}<br/>'''
-                if header['cc']:
-                    headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
-                headers_html += '''</p>'''
+            if header['to']:
+                headers_html += f'''<b>To:</b> {header['to']}<br/>'''
+            if header['cc']:
+                headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+            headers_html += '''</p>'''
 
-                # 5. Construct complete body with WordSection1 for Exclaimer signature placement
-                # Exclaimer inserts signature after the closing </div> of WordSection1
-                # Wrap forwarded content in blockquote so Exclaimer recognizes it as quoted content
-                # Structure: [user message in WordSection1] → [signature inserted here] → [quoted forwarded content]
-                complete_body = f'''<div class="WordSection1">
+            # 5. Construct complete body with WordSection1 for Exclaimer signature placement
+            # Exclaimer inserts signature after the closing </div> of WordSection1
+            # Wrap forwarded content in blockquote so Exclaimer recognizes it as quoted content
+            # Structure: [user message in WordSection1] → [signature inserted here] → [quoted forwarded content]
+            complete_body = f'''<div class="WordSection1">
 {user_message}
 </div>
 
@@ -1830,28 +1720,30 @@ class ForwardEmailTool(BaseTool):
 {original_body_html}
 </blockquote>'''
 
-                self.logger.info(f"Constructed complete forward body: {len(complete_body)} characters")
+            self.logger.info(f"Constructed complete forward body: {len(complete_body)} characters")
 
-                # Create a new Message with the complete body
-                message = Message(
-                    account=account,
-                    subject=forward_subject,
-                    body=HTMLBody(complete_body),
-                    to_recipients=[Mailbox(email_address=email) for email in to_recipients]
-                )
+            # Create a new Message with the complete body
+            message = Message(
+                account=account,
+                subject=forward_subject,
+                body=HTMLBody(complete_body),
+                to_recipients=[Mailbox(email_address=email) for email in to_recipients]
+            )
 
-                if cc_recipients:
-                    message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
-                if bcc_recipients:
-                    message.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
+            if cc_recipients:
+                message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
+            if bcc_recipients:
+                message.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
 
-                # Copy original attachments
-                inline_count, regular_count = copy_attachments_to_message(original_message, message)
-                total_original_attachments = inline_count + regular_count
-                self.logger.info(f"Copied {total_original_attachments} attachment(s) from original "
-                               f"({inline_count} inline, {regular_count} regular)")
+            # Copy original attachments
+            inline_count, regular_count = copy_attachments_to_message(original_message, message)
+            total_original_attachments = inline_count + regular_count
+            self.logger.info(f"Copied {total_original_attachments} attachment(s) from original "
+                           f"({inline_count} inline, {regular_count} regular)")
 
-                # Add additional attachments
+            # Add additional attachments if provided
+            additional_attachment_count = 0
+            if additional_attachments:
                 for file_path in additional_attachments:
                     try:
                         # Use os.path.basename for cross-platform path handling
@@ -1872,20 +1764,9 @@ class ForwardEmailTool(BaseTool):
                     except Exception as e:
                         raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
-                # Send the message
-                message.send()
-                self.logger.info(f"Email forwarded (with attachments) to {', '.join(to_recipients)} from mailbox: {mailbox}")
-            else:
-                # No additional attachments - use native forward
-                # Copy original attachments (inline images, etc.)
-                inline_count, regular_count = copy_attachments_to_message(original_message, forward)
-                total_original_attachments = inline_count + regular_count
-                self.logger.info(f"Copied {total_original_attachments} attachment(s) from original "
-                               f"({inline_count} inline, {regular_count} regular)")
-
-                # Send the forward
-                forward.send()
-                self.logger.info(f"Email forwarded successfully to {', '.join(to_recipients)} from mailbox: {mailbox}")
+            # Send the message
+            message.send()
+            self.logger.info(f"Email forwarded to {', '.join(to_recipients)} from mailbox: {mailbox}")
 
             return format_success_response(
                 "Email forwarded successfully",
