@@ -58,9 +58,13 @@ class EWSClient:
                 self.logger.warning(f"Failed to load timezone {self.config.timezone}, falling back to UTC: {e}")
                 tz = EWSTimeZone('UTC')
 
-            # Use autodiscovery or manual configuration
-            if self.config.ews_autodiscover:
-                self.logger.info("Using autodiscovery")
+            # Use manual configuration when server URL is provided, otherwise autodiscovery
+            # IMPORTANT: If EWS_SERVER_URL is set, always use it (bypass autodiscovery)
+            # This prevents autodiscovery failures when the server URL is explicitly known
+            use_manual_config = bool(self.config.ews_server_url)
+
+            if not use_manual_config and self.config.ews_autodiscover:
+                self.logger.info("Using autodiscovery (no EWS_SERVER_URL provided)")
 
                 # Set timeout for autodiscovery
                 BaseProtocol.TIMEOUT = self.config.request_timeout
@@ -72,9 +76,8 @@ class EWSClient:
                     access_type=DELEGATE,
                     default_timezone=tz
                 )
-            else:
-                if not self.config.ews_server_url:
-                    raise ConnectionError("EWS_SERVER_URL required when autodiscover is disabled")
+            elif use_manual_config:
+                # Server URL provided - use manual configuration
 
                 self.logger.info(f"Using manual configuration: {self.config.ews_server_url}")
 
@@ -121,6 +124,12 @@ class EWSClient:
                     autodiscover=False,
                     access_type=DELEGATE,
                     default_timezone=tz
+                )
+            else:
+                # No server URL and autodiscover disabled
+                raise ConnectionError(
+                    "No EWS_SERVER_URL provided and EWS_AUTODISCOVER is disabled. "
+                    "Either provide EWS_SERVER_URL or enable EWS_AUTODISCOVER."
                 )
 
             # Test the connection
@@ -209,15 +218,10 @@ class EWSClient:
             credentials = self.auth_handler.get_credentials()
 
             # Create account with same config but different target
-            if self.config.ews_autodiscover:
-                impersonated_account = Account(
-                    primary_smtp_address=target_mailbox,
-                    credentials=credentials,
-                    autodiscover=True,
-                    access_type=access_type,
-                    default_timezone=tz
-                )
-            else:
+            # Use same logic as primary account: if server URL provided, use it
+            use_manual_config = bool(self.config.ews_server_url)
+
+            if use_manual_config:
                 # Reuse existing configuration with same endpoint
                 config = Configuration(
                     service_endpoint=self._get_ews_url(),
@@ -232,6 +236,18 @@ class EWSClient:
                     autodiscover=False,
                     access_type=access_type,
                     default_timezone=tz
+                )
+            elif self.config.ews_autodiscover:
+                impersonated_account = Account(
+                    primary_smtp_address=target_mailbox,
+                    credentials=credentials,
+                    autodiscover=True,
+                    access_type=access_type,
+                    default_timezone=tz
+                )
+            else:
+                raise ConnectionError(
+                    "No EWS_SERVER_URL provided and EWS_AUTODISCOVER is disabled."
                 )
 
             # Test connection
