@@ -1,11 +1,12 @@
 """Advanced search tools for EWS MCP Server."""
 
 from typing import Any, Dict, List
+from datetime import datetime
 from exchangelib.queryset import Q
 
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, ews_id_to_str
+from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, ews_id_to_str, format_datetime
 
 
 class AdvancedSearchTool(BaseTool):
