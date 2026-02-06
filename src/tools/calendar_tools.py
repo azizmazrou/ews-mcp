@@ -181,6 +181,10 @@ class GetCalendarTool(BaseTool):
             end_date = kwargs.get("end_date")
             if end_date:
                 end_date = parse_datetime_tz_aware(end_date)
+                # If end_date is at midnight (00:00:00), it means user provided date-only
+                # Add 1 day to include the full day's events
+                if end_date.hour == 0 and end_date.minute == 0 and end_date.second == 0:
+                    end_date = end_date + timedelta(days=1)
             else:
                 # Use days_ahead parameter (default: 7, max: 90)
                 days_ahead = kwargs.get("days_ahead", 7)
