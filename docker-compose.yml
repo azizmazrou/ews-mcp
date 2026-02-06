@@ -25,11 +25,19 @@ services:
     tty: true
 
     # Networking
-    networks:
-      - mcp-network
-    ports:
-      # Optional: Expose port for SSE transport (if MCP_TRANSPORT=sse)
-      # - "8000:8000"
+    # Use host networking to access corporate Exchange servers
+    # Comment out network_mode and uncomment networks section if you need container isolation
+    network_mode: host
+    # networks:
+    #   - mcp-network
+    # ports:
+    #   # Optional: Expose port for SSE transport (if MCP_TRANSPORT=sse)
+    #   # - "8000:8000"
+
+    # DNS settings for corporate networks (uncomment if needed)
+    # dns:
+    #   - 8.8.8.8
+    #   - 8.8.4.4
 
     # Volume mounts
     volumes:
