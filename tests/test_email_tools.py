@@ -108,7 +108,7 @@ async def test_delete_email_tool(mock_ews_client):
     result = await tool.execute(message_id="test-id", permanent=False)
 
     assert result["success"] is True
-    mock_email.soft_delete.assert_called_once()
+    mock_email.move.assert_called_once()
 
 
 @pytest.mark.asyncio

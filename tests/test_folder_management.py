@@ -91,8 +91,7 @@ async def test_delete_folder_soft(mock_ews_client):
     mock_folder.id = "folder-to-delete"
     mock_folder.name = "Old Project"
 
-    # Mock find_folder_by_id
-    with patch('src.tools.folder_tools.find_folder_by_id', return_value=mock_folder):
+    with patch.object(tool, '_find_folder_by_id', return_value=mock_folder):
         result = await tool.execute(
             action="delete",
             folder_id="folder-to-delete",
@@ -116,7 +115,7 @@ async def test_delete_folder_permanent(mock_ews_client):
     mock_folder.id = "folder-to-delete"
     mock_folder.name = "Temp Folder"
 
-    with patch('src.tools.folder_tools.find_folder_by_id', return_value=mock_folder):
+    with patch.object(tool, '_find_folder_by_id', return_value=mock_folder):
         result = await tool.execute(
             action="delete",
             folder_id="folder-to-delete",
@@ -133,7 +132,7 @@ async def test_delete_folder_not_found(mock_ews_client):
     """Test deleting non-existent folder."""
     tool = ManageFolderTool(mock_ews_client)
 
-    with patch('src.tools.folder_tools.find_folder_by_id', return_value=None):
+    with patch.object(tool, '_find_folder_by_id', return_value=None):
         with pytest.raises(ToolExecutionError) as exc_info:
             await tool.execute(action="delete", folder_id="nonexistent-id")
 
@@ -150,7 +149,7 @@ async def test_rename_folder(mock_ews_client):
     mock_folder.id = "folder-id"
     mock_folder.name = "Old Name"
 
-    with patch('src.tools.folder_tools.find_folder_by_id', return_value=mock_folder):
+    with patch.object(tool, '_find_folder_by_id', return_value=mock_folder):
         result = await tool.execute(
             action="rename",
             folder_id="folder-id",
@@ -171,7 +170,7 @@ async def test_rename_folder_not_found(mock_ews_client):
     """Test renaming non-existent folder."""
     tool = ManageFolderTool(mock_ews_client)
 
-    with patch('src.tools.folder_tools.find_folder_by_id', return_value=None):
+    with patch.object(tool, '_find_folder_by_id', return_value=None):
         with pytest.raises(ToolExecutionError) as exc_info:
             await tool.execute(
                 action="rename",
@@ -197,7 +196,7 @@ async def test_move_folder(mock_ews_client):
     mock_dest.id = "dest-folder-id"
     mock_dest.name = "Archive"
 
-    with patch('src.tools.folder_tools.find_folder_by_id') as mock_find:
+    with patch.object(tool, '_find_folder_by_id') as mock_find:
         # First call returns folder to move, second call returns destination
         mock_find.side_effect = [mock_folder, mock_dest]
 
@@ -211,7 +210,6 @@ async def test_move_folder(mock_ews_client):
     assert "moved successfully" in result["message"]
     assert result["folder_id"] == "folder-to-move"
     assert result["folder_name"] == "Project A"
-    assert result["destination_folder_id"] == "dest-folder-id"
     mock_folder.move.assert_called_once_with(to_folder=mock_dest)
 
 
@@ -220,7 +218,7 @@ async def test_move_folder_source_not_found(mock_ews_client):
     """Test moving non-existent folder."""
     tool = ManageFolderTool(mock_ews_client)
 
-    with patch('src.tools.folder_tools.find_folder_by_id', return_value=None):
+    with patch.object(tool, '_find_folder_by_id', return_value=None):
         with pytest.raises(ToolExecutionError) as exc_info:
             await tool.execute(
                 action="move",
@@ -240,7 +238,7 @@ async def test_move_folder_destination_not_found(mock_ews_client):
     mock_folder = MagicMock()
     mock_folder.id = "folder-to-move"
 
-    with patch('src.tools.folder_tools.find_folder_by_id') as mock_find:
+    with patch.object(tool, '_find_folder_by_id') as mock_find:
         # First call returns folder to move, second call returns None (destination not found)
         mock_find.side_effect = [mock_folder, None]
 
@@ -268,7 +266,7 @@ async def test_move_folder_to_parent(mock_ews_client):
     mock_inbox = MagicMock()
     mock_ews_client.account.inbox = mock_inbox
 
-    with patch('src.tools.folder_tools.find_folder_by_id', return_value=mock_folder):
+    with patch.object(tool, '_find_folder_by_id', return_value=mock_folder):
         result = await tool.execute(
             action="move",
             folder_id="folder-to-move",

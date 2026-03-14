@@ -92,7 +92,7 @@ TOOL_COUNT=$(echo $HEALTH_RESPONSE | grep -o '"tools":[0-9]*' | grep -o '[0-9]*'
 
 echo -e "${GREEN}✓ EWS MCP Server Running${NC}"
 echo -e "  Base URL: ${BLUE}http://localhost:8000${NC}"
-echo -e "  Tools Available: ${YELLOW}${TOOL_COUNT:-44}${NC}"
+echo -e "  Tools Available: ${YELLOW}${TOOL_COUNT:-36}${NC}"
 echo ""
 
 echo -e "${GREEN}Available Endpoints:${NC}"
@@ -151,10 +151,10 @@ echo -e "   ${YELLOW}     -H 'Content-Type: application/json' \\${NC}"
 echo -e "   ${YELLOW}     -d '{\"days\": 7}' | jq${NC}"
 echo ""
 
-echo -e "${GREEN}4. Search Contacts:${NC}"
-echo -e "   ${YELLOW}curl -X POST http://localhost:8000/api/tools/search_contacts \\${NC}"
+echo -e "${GREEN}4. Find Person:${NC}"
+echo -e "   ${YELLOW}curl -X POST http://localhost:8000/api/tools/find_person \\${NC}"
 echo -e "   ${YELLOW}     -H 'Content-Type: application/json' \\${NC}"
-echo -e "   ${YELLOW}     -d '{\"search_term\": \"John\"}' | jq${NC}"
+echo -e "   ${YELLOW}     -d '{\"query\": \"John\", \"source\": \"all\"}' | jq${NC}"
 echo ""
 
 # Open WebUI integration instructions
@@ -173,7 +173,7 @@ echo "   • ${GREEN}Name:${NC} Exchange Web Services"
 echo "   • ${GREEN}Description:${NC} Access to Exchange emails, calendar, contacts"
 echo "5. Click ${YELLOW}Save${NC}"
 echo "6. The OpenAPI schema will be auto-discovered from /openapi.json"
-echo "7. All 44 tools will be available in your chats!"
+echo "7. All 36 tools will be available in your chats!"
 echo ""
 
 # Management commands
