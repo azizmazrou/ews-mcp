@@ -1,26 +1,22 @@
 # API Documentation
 
-Complete reference for all EWS MCP Server v3.0 tools.
+Complete reference for all EWS MCP Server v3.3 tools (36 base tools + 4 AI tools).
 
-## Contact Intelligence Tools (v3.0 Enhanced)
+## Contact Intelligence Tools (v3.3 Consolidated)
 
-These tools leverage the new person-centric architecture with multi-strategy GAL search.
+These tools leverage the person-centric architecture with multi-strategy GAL search.
 
 ### find_person
 
-Search for contacts across Global Address List (GAL), email history, and domains.
+Unified contact lookup across Global Address List (GAL), contacts, email history, and domains.
 
-**v3.0 Enhancements:**
-- Multi-strategy GAL search eliminates 0-results bug
-- Intelligent ranking by relevance
-- Smart deduplication across sources
-- Communication statistics included
+**v3.3 Changes:** Replaces `search_contacts`, `get_contacts`, and `resolve_names`. Use `source` param to select search scope.
 
 **Input Schema:**
 ```json
 {
-  "query": "Ahmed",                    // Name, email, or @domain
-  "search_scope": "all",               // all, gal, contacts, email_history, domain
+  "query": "Ahmed",                    // Name, email, or @domain (optional if source=contacts)
+  "source": "all",                     // all, gal, contacts, email_history, domain
   "include_stats": true,               // Include communication statistics
   "time_range_days": 365,              // Days back for email history
   "max_results": 50                    // Maximum results to return
@@ -71,21 +67,27 @@ Search for contacts across Global Address List (GAL), email history, and domains
 }
 ```
 
-### get_communication_history
+### analyze_contacts
 
-Analyze communication patterns with a specific contact.
+Unified contact analysis tool with multiple analysis types.
+
+**v3.3 Changes:** Replaces `get_communication_history` and `analyze_network`.
 
 **Input Schema:**
 ```json
 {
-  "email": "colleague@example.com",
-  "days_back": 365,
+  "analysis_type": "communication_history",  // communication_history, overview, top_contacts, by_domain, vip, dormant
+  "email": "colleague@example.com",          // Required for communication_history
+  "days_back": 90,
+  "top_n": 20,
   "include_topics": true,
-  "include_recent_emails": true
+  "include_recent_emails": true,
+  "vip_email_threshold": 10,
+  "dormant_threshold_days": 60
 }
 ```
 
-**Response:**
+**Response (communication_history):**
 ```json
 {
   "success": true,
@@ -101,32 +103,9 @@ Analyze communication patterns with a specific contact.
   },
   "timeline": [
     {"month": "2025-11", "count": 15},
-    {"month": "2025-10", "count": 12},
-    {"month": "2025-09", "count": 8}
+    {"month": "2025-10", "count": 12}
   ],
-  "top_topics": ["Project Update", "Meeting", "Review"],
-  "recent_emails": [
-    {
-      "subject": "RE: Q4 Budget Review",
-      "date": "2025-11-17T16:45:00",
-      "direction": "received"
-    }
-  ]
-}
-```
-
-### analyze_network
-
-Professional network analysis with multiple analysis types.
-
-**Input Schema:**
-```json
-{
-  "analysis_type": "overview",         // overview, top_contacts, by_domain, vip, dormant
-  "days_back": 90,
-  "top_n": 20,
-  "vip_email_threshold": 10,
-  "dormant_threshold_days": 60
+  "top_topics": ["Project Update", "Meeting", "Review"]
 }
 ```
 
@@ -226,11 +205,14 @@ Read emails from a specified folder.
 
 ### search_emails
 
-Search emails with advanced filters.
+Unified search with 3 modes: quick (default), advanced, and full_text.
 
-**Input Schema:**
+**v3.3 Changes:** Replaces `advanced_search` and `full_text_search`. Use `mode` param to select search type.
+
+**Input Schema (mode: "quick" — default):**
 ```json
 {
+  "mode": "quick",
   "folder": "inbox",
   "subject_contains": "report",
   "from_address": "boss@example.com",
@@ -238,6 +220,33 @@ Search emails with advanced filters.
   "is_read": false,
   "start_date": "2025-01-01T00:00:00",
   "end_date": "2025-01-31T23:59:59",
+  "max_results": 50
+}
+```
+
+**Input Schema (mode: "advanced"):**
+```json
+{
+  "mode": "advanced",
+  "keywords": "quarterly report",
+  "from_address": "boss@example.com",
+  "folders": ["inbox", "sent"],
+  "importance": "High",
+  "categories": ["Work"],
+  "sort_by": "datetime_received",
+  "sort_order": "descending",
+  "max_results": 100
+}
+```
+
+**Input Schema (mode: "full_text"):**
+```json
+{
+  "mode": "full_text",
+  "search_query": "project budget",
+  "folder": "inbox",
+  "search_in": ["subject", "body"],
+  "exact_phrase": false,
   "max_results": 50
 }
 ```
@@ -588,29 +597,6 @@ Create a new contact in Exchange.
 }
 ```
 
-### search_contacts
-
-Search contacts by name or email.
-
-**Input Schema:**
-```json
-{
-  "query": "john",
-  "max_results": 50
-}
-```
-
-### get_contacts
-
-List all contacts.
-
-**Input Schema:**
-```json
-{
-  "max_results": 50
-}
-```
-
 ### update_contact
 
 Update an existing contact.
@@ -636,50 +622,7 @@ Delete a contact.
 }
 ```
 
-### resolve_names
-
-Resolve partial names or email addresses to full contact information from Active Directory or Contacts.
-
-**Input Schema:**
-```json
-{
-  "name_query": "john",                  // Partial name or email to resolve
-  "return_full_info": false,             // Optional: return detailed contact info
-  "search_scope": "All"                  // Optional: Contacts, ActiveDirectory, All
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Found 2 match(es) for 'john'",
-  "query": "john",
-  "count": 2,
-  "results": [
-    {
-      "name": "John Doe",
-      "email": "john.doe@example.com",
-      "routing_type": "SMTP",
-      "mailbox_type": "Mailbox"
-    },
-    {
-      "name": "Johnny Smith",
-      "email": "johnny.smith@example.com",
-      "routing_type": "SMTP",
-      "mailbox_type": "Mailbox",
-      "contact_details": {          // Only if return_full_info is true
-        "given_name": "Johnny",
-        "surname": "Smith",
-        "company": "Acme Corp",
-        "job_title": "Manager",
-        "phone_numbers": ["+1-555-0200"],
-        "department": "Sales"
-      }
-    }
-  ]
-}
-```
+> **Note:** `search_contacts`, `get_contacts`, and `resolve_names` have been merged into `find_person` (see Contact Intelligence Tools above). Use `find_person(source="contacts")` to list contacts, `find_person(source="gal")` for GAL resolution.
 
 ## Task Tools
 
@@ -768,58 +711,7 @@ Delete a task.
 
 ## Search Tools
 
-### advanced_search
-
-Perform complex multi-criteria searches across multiple mailbox folders with extensive filtering options.
-
-**Input Schema:**
-```json
-{
-  "search_filter": {
-    "keywords": "quarterly report",        // Search in subject and body
-    "from_address": "boss@example.com",
-    "to_address": "team@example.com",
-    "subject": "Q4",
-    "body": "financial",
-    "has_attachments": true,
-    "importance": "High",
-    "categories": ["Work", "Important"],
-    "is_read": false,
-    "start_date": "2025-01-01T00:00:00+00:00",
-    "end_date": "2025-01-31T23:59:59+00:00"
-  },
-  "search_scope": ["inbox", "sent"],      // Folders to search
-  "max_results": 100,                      // Max: 1000
-  "sort_by": "datetime_received",          // datetime_received, datetime_sent, from, subject, importance
-  "sort_order": "descending"               // ascending or descending
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Found 15 result(s)",
-  "count": 15,
-  "results": [
-    {
-      "message_id": "AAMkAGI...",
-      "subject": "Q4 Quarterly Report - Financial Results",
-      "from": "boss@example.com",
-      "to": ["team@example.com"],
-      "received_time": "2025-01-15T14:30:00+00:00",
-      "is_read": false,
-      "has_attachments": true,
-      "importance": "High",
-      "categories": ["Work", "Important"],
-      "body_preview": "Please review the attached quarterly financial report...",
-      "folder": "inbox"
-    }
-  ],
-  "search_filter": { /* original search criteria */ },
-  "folders_searched": ["inbox", "sent"]
-}
-```
+> **Note:** `advanced_search` and `full_text_search` have been merged into `search_emails` (see Email Tools above). Use `search_emails(mode="advanced")` for multi-criteria search and `search_emails(mode="full_text")` for full-text search.
 
 ## Folder Tools
 
@@ -888,98 +780,46 @@ Get mailbox folder hierarchy with configurable depth and details.
 }
 ```
 
-### create_folder
+### manage_folder
 
-Create a new mailbox folder with optional parent folder and folder class.
+Unified folder management with 4 actions: create, delete, rename, move.
 
-**Input Schema:**
+**v3.3 Changes:** Replaces `create_folder`, `delete_folder`, `rename_folder`, `move_folder`.
+
+**Input Schema (action: "create"):**
 ```json
 {
-  "folder_name": "Projects",           // Required: Name of new folder
-  "parent_folder": "inbox",            // Optional: root, inbox, sent, drafts, etc. (default: inbox)
-  "folder_class": "IPF.Note"           // Optional: Folder class (default: IPF.Note)
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Folder 'Projects' created successfully",
-  "folder_id": "AAMkAGF...",
+  "action": "create",
   "folder_name": "Projects",
   "parent_folder": "inbox",
   "folder_class": "IPF.Note"
 }
 ```
 
-### delete_folder
-
-Delete a mailbox folder (soft delete or permanent).
-
-**Input Schema:**
+**Input Schema (action: "delete"):**
 ```json
 {
-  "folder_id": "AAMkAGF...",           // Required: ID of folder to delete
-  "permanent": false                    // Optional: true for hard delete (default: false)
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Folder deleted successfully",
+  "action": "delete",
   "folder_id": "AAMkAGF...",
-  "folder_name": "Old Projects",
   "permanent": false
 }
 ```
 
-### rename_folder
-
-Rename an existing mailbox folder.
-
-**Input Schema:**
+**Input Schema (action: "rename"):**
 ```json
 {
-  "folder_id": "AAMkAGF...",           // Required: ID of folder to rename
-  "new_name": "Archived Projects"      // Required: New folder name
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Folder renamed successfully",
+  "action": "rename",
   "folder_id": "AAMkAGF...",
-  "old_name": "Projects",
   "new_name": "Archived Projects"
 }
 ```
 
-### move_folder
-
-Move a folder to a new parent location.
-
-**Input Schema:**
+**Input Schema (action: "move"):**
 ```json
 {
-  "folder_id": "AAMkAGF...",                    // Required: ID of folder to move
-  "destination_folder_id": "AAMkAGH...",       // Provide either folder_id...
-  "destination_parent_folder": "archive"        // ...or parent folder name
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Folder moved successfully",
+  "action": "move",
   "folder_id": "AAMkAGF...",
-  "folder_name": "Q1 Reports",
-  "destination_folder_id": "AAMkAGH..."
+  "destination": "archive"
 }
 ```
 
@@ -1087,86 +927,34 @@ Find all emails in a conversation thread.
 }
 ```
 
-### full_text_search
-
-Full-text search across email content with advanced options.
-
-**Input Schema:**
-```json
-{
-  "query": "project budget",           // Required: Search query
-  "folder": "inbox",                   // Optional: Folder to search (default: inbox)
-  "search_in": ["subject", "body"],    // Optional: Where to search (default: both)
-  "case_sensitive": false,             // Optional: Case-sensitive search (default: false)
-  "exact_phrase": false,               // Optional: Exact phrase match (default: false)
-  "max_results": 50                    // Optional: Maximum results (default: 50)
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Found 12 emails matching 'project budget'",
-  "query": "project budget",
-  "result_count": 12,
-  "search_in": ["subject", "body"],
-  "case_sensitive": false,
-  "exact_phrase": false,
-  "emails": [
-    {
-      "id": "AAMkAGF...",
-      "subject": "Q4 Project Budget Approval",
-      "from": "finance@example.com",
-      "datetime_received": "2025-01-08T14:30:00+00:00",
-      "preview": "The project budget has been approved...",
-      "relevance_score": 95
-    }
-  ]
-}
-```
+> **Note:** `full_text_search` has been merged into `search_emails(mode="full_text")`. See Email Tools above.
 
 ## Out-of-Office Tools
 
-### set_oof_settings
+### oof_settings
 
-Configure Out-of-Office automatic reply settings.
+Unified Out-of-Office tool with get and set actions.
 
-**Input Schema:**
+**v3.3 Changes:** Replaces `set_oof_settings` and `get_oof_settings`.
+
+**Input Schema (action: "set"):**
 ```json
 {
-  "state": "Scheduled",                         // Required: Enabled, Scheduled, or Disabled
-  "internal_reply": "I'm out of the office",   // Optional: Message for internal senders
-  "external_reply": "I'm currently away",       // Optional: Message for external senders
-  "start_time": "2025-12-20T00:00:00+00:00",   // Required for Scheduled: ISO 8601 format
-  "end_time": "2025-12-31T23:59:59+00:00",     // Required for Scheduled: ISO 8601 format
-  "external_audience": "Known"                  // Optional: None, Known, All (default: Known)
+  "action": "set",
+  "state": "Scheduled",
+  "internal_reply": "I'm out of the office",
+  "external_reply": "I'm currently away",
+  "start_time": "2025-12-20T00:00:00+00:00",
+  "end_time": "2025-12-31T23:59:59+00:00",
+  "external_audience": "Known"
 }
 ```
 
-**Response:**
+**Input Schema (action: "get"):**
 ```json
 {
-  "success": true,
-  "message": "Out-of-Office settings updated to Scheduled",
-  "settings": {
-    "state": "Scheduled",
-    "internal_reply": "I'm out of the office",
-    "external_reply": "I'm currently away",
-    "external_audience": "Known",
-    "start_time": "2025-12-20T00:00:00+00:00",
-    "end_time": "2025-12-31T23:59:59+00:00"
-  }
+  "action": "get"
 }
-```
-
-### get_oof_settings
-
-Retrieve current Out-of-Office settings and active status.
-
-**Input Schema:**
-```json
-{}  // No parameters required
 ```
 
 **Response:**
