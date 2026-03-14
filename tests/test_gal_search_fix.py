@@ -101,8 +101,8 @@ class TestGALSearchTupleFormat:
         mock_contact_info = Mock()
         mock_contact_info.display_name = "Jane Doe"
         mock_contact_info.phone_numbers = [mock_phone1, mock_phone2]
-        mock_contact_info.business_phone = "+1-555-0100"
-        mock_contact_info.mobile_phone = "+1-555-0101"
+        mock_contact_info.business_phone = None
+        mock_contact_info.mobile_phone = None
 
         mock_result = (mock_mailbox, mock_contact_info)
         mock_ews_client.account.protocol.resolve_names.return_value = [mock_result]

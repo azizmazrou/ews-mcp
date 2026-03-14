@@ -191,26 +191,23 @@ async def test_move_folder(mock_ews_client):
     mock_folder.id = "folder-to-move"
     mock_folder.name = "Project A"
 
-    # Mock destination folder
-    mock_dest = MagicMock()
-    mock_dest.id = "dest-folder-id"
-    mock_dest.name = "Archive"
+    # Mock destination folder (standard folder name)
+    mock_sent = MagicMock()
+    mock_ews_client.account.sent = mock_sent
 
-    with patch.object(tool, '_find_folder_by_id') as mock_find:
-        # First call returns folder to move, second call returns destination
-        mock_find.side_effect = [mock_folder, mock_dest]
-
+    with patch.object(tool, '_find_folder_by_id', return_value=mock_folder):
         result = await tool.execute(
             action="move",
             folder_id="folder-to-move",
-            destination="dest-folder-id"
+            destination="sent"
         )
 
     assert result["success"] is True
     assert "moved successfully" in result["message"]
     assert result["folder_id"] == "folder-to-move"
     assert result["folder_name"] == "Project A"
-    mock_folder.move.assert_called_once_with(to_folder=mock_dest)
+    assert mock_folder.parent == mock_sent
+    mock_folder.save.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -275,4 +272,5 @@ async def test_move_folder_to_parent(mock_ews_client):
 
     assert result["success"] is True
     assert result["folder_name"] == "Reports"
-    mock_folder.move.assert_called_once_with(to_folder=mock_inbox)
+    assert mock_folder.parent == mock_inbox
+    mock_folder.save.assert_called_once()

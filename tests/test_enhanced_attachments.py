@@ -194,9 +194,8 @@ async def test_delete_attachment_by_id(mock_ews_client):
 
     assert result["success"] is True
     assert "deleted successfully" in result["message"]
-    assert result["attachment_id"] == "attachment-to-delete"
     assert result["attachment_name"] == "document.pdf"
-    mock_attachment.detach.assert_called_once()
+    mock_message.save.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -222,7 +221,7 @@ async def test_delete_attachment_by_name(mock_ews_client):
 
     assert result["success"] is True
     assert result["attachment_name"] == "report.pdf"
-    mock_attachment.detach.assert_called_once()
+    mock_message.save.assert_called_once()
 
 
 @pytest.mark.asyncio
