@@ -9,12 +9,12 @@ from ..utils import format_success_response, parse_datetime_tz_aware, format_dat
 
 
 class SetOOFSettingsTool(BaseTool):
-    """Tool for configuring Out-of-Office automatic replies. Supports impersonation to manage out-of-office settings for another user."""
+    """Tool for configuring Out-of-Office automatic replies."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "set_oof_settings",
-            "description": "Configure Out-of-Office automatic reply settings. Supports impersonation to manage out-of-office settings for another user.",
+            "description": "Configure Out-of-Office automatic reply settings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -146,12 +146,12 @@ class SetOOFSettingsTool(BaseTool):
 
 
 class GetOOFSettingsTool(BaseTool):
-    """Tool for retrieving current Out-of-Office settings. Supports impersonation to manage out-of-office settings for another user."""
+    """Tool for retrieving current Out-of-Office settings."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_oof_settings",
-            "description": "Get current Out-of-Office automatic reply settings. Supports impersonation to manage out-of-office settings for another user.",
+            "description": "Get current Out-of-Office settings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -499,7 +499,7 @@ class SendEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "send_email",
-            "description": "Send an email through Exchange with optional attachments and CC/BCC. Supports impersonation to send on behalf of another user.",
+            "description": "Send an email with optional attachments and CC/BCC.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -734,7 +734,7 @@ class ReadEmailsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "read_emails",
-            "description": "Read emails from a specified folder (default: inbox). Supports impersonation to read from another user's mailbox.",
+            "description": "Read emails from a folder (default: inbox).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -831,7 +831,7 @@ class SearchEmailsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "search_emails",
-            "description": "Search emails with various filters (subject, sender, date range, etc.). Supports impersonation to search in another user's mailbox.",
+            "description": "Search emails by subject, sender, date range, or other filters.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1021,7 +1021,7 @@ class GetEmailDetailsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_email_details",
-            "description": "Get full details of a specific email by ID. Supports impersonation to access another user's mailbox.",
+            "description": "Get full details of a specific email by ID.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1101,7 +1101,7 @@ class DeleteEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_email",
-            "description": "Delete an email by ID (moves to trash). Supports impersonation to delete from another user's mailbox.",
+            "description": "Delete an email by ID (moves to trash).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1165,7 +1165,7 @@ class MoveEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "move_email",
-            "description": "Move an email to a different folder. Supports impersonation to move emails in another user's mailbox.",
+            "description": "Move an email to a different folder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1233,7 +1233,7 @@ class UpdateEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_email",
-            "description": "Update email properties (read status, flags, categories, importance). Supports impersonation to update in another user's mailbox.",
+            "description": "Update email properties (read status, flags, categories, importance).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1339,7 +1339,7 @@ class CopyEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "copy_email",
-            "description": "Copy an email to another folder (keeping original in current location). Supports impersonation to copy in another user's mailbox.",
+            "description": "Copy an email to another folder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1475,7 +1475,7 @@ class ReplyEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "reply_email",
-            "description": "Reply to an existing email while preserving the conversation thread. Uses Exchange's built-in reply mechanism to maintain In-Reply-To headers, conversation ID, and thread relationship. Supports impersonation to reply from another user's mailbox.",
+            "description": "Reply to an email, preserving the conversation thread.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1683,7 +1683,7 @@ class ForwardEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "forward_email",
-            "description": "Forward an existing email to new recipients while preserving the original content, formatting, and attachments. Supports impersonation to forward from another user's mailbox.",
+            "description": "Forward an email to new recipients with original content and attachments.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

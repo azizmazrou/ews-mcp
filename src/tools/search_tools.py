@@ -15,7 +15,7 @@ class AdvancedSearchTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "advanced_search",
-            "description": "Perform complex searches across mailbox with multiple criteria and filters. Supports impersonation to search in another user's mailbox",
+            "description": "Search mailbox with multiple criteria and filters.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -277,7 +277,7 @@ class SearchByConversationTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "search_by_conversation",
-            "description": "Find all emails in a conversation thread using conversation ID or initial message. Supports impersonation to search in another user's mailbox",
+            "description": "Find all emails in a conversation thread.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -433,7 +433,7 @@ class FullTextSearchTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "full_text_search",
-            "description": "Perform full-text search across subject, body, and attachment names. Supports impersonation to search in another user's mailbox",
+            "description": "Full-text search across subject, body, and attachment names.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

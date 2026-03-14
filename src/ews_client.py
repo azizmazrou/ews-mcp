@@ -2,7 +2,7 @@
 
 from exchangelib import Account, Configuration, DELEGATE, IMPERSONATION, Version, EWSTimeZone
 from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, retry_if_not_exception_type
 import logging
 import pytz
 from typing import Optional, Dict
@@ -39,7 +39,7 @@ class EWSClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((ConnectionError, Exception))
+        retry=retry_if_not_exception_type(AuthenticationError)
     )
     def _create_account(self) -> Account:
         """Create Exchange account with retry logic."""
