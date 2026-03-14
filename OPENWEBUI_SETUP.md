@@ -23,17 +23,18 @@ EWS MCP Server now includes **built-in OpenAPI/REST support**, eliminating the n
 │          └─────────┬───────────────┘                   │
 │                    │                                   │
 │         ┌──────────▼──────────┐                        │
-│         │   43+ Exchange      │                        │
-│         │   Tools             │                        │
-│         │                     │                        │
-│         │  • Email (8)        │                        │
-│         │  • Calendar (7)     │                        │
-│         │  • Contacts (9)     │                        │
-│         │  • Tasks (5)        │                        │
-│         │  • Attachments (5)  │                        │
-│         │  • Search (3)       │                        │
-│         │  • Folders (5)      │                        │
-│         │  • Out-of-Office (2)│                        │
+│         │   36+ Exchange       │                        │
+│         │   Tools              │                        │
+│         │                      │                        │
+│         │  • Email (11)        │                        │
+│         │  • Calendar (7)      │                        │
+│         │  • Contacts (3)      │                        │
+│         │  • Intelligence (2)  │                        │
+│         │  • Tasks (5)         │                        │
+│         │  • Attachments (5)   │                        │
+│         │  • Search (1)        │                        │
+│         │  • Folders (2)       │                        │
+│         │  • Out-of-Office (1) │                        │
 │         └─────────────────────┘                        │
 └─────────────────────────────────────────────────────────┘
            │                          │
@@ -98,10 +99,10 @@ curl -X POST http://localhost:8000/api/tools/get_calendar \
   -H 'Content-Type: application/json' \
   -d '{"days": 7}' | jq
 
-# Search contacts
-curl -X POST http://localhost:8000/api/tools/search_contacts \
+# Find a person (unified contact lookup)
+curl -X POST http://localhost:8000/api/tools/find_person \
   -H 'Content-Type: application/json' \
-  -d '{"search_term": "John"}' | jq
+  -d '{"query": "John", "source": "all"}' | jq
 ```
 
 ## Open WebUI Integration
@@ -131,7 +132,7 @@ curl -X POST http://localhost:8000/api/tools/search_contacts \
 
 4. **Auto-Discovery**:
    - Open WebUI will automatically fetch `/openapi.json`
-   - All 43+ tools will be discovered and made available
+   - All 36+ tools will be discovered and made available
    - Tools will appear in the function picker during chats
 
 5. **Start Using**:
@@ -333,22 +334,31 @@ curl -X POST http://localhost:8000/api/tools/create_contact \
   }' | jq
 ```
 
-#### Search Contacts
+#### Find Person (Unified Contact Lookup)
 ```bash
-curl -X POST http://localhost:8000/api/tools/search_contacts \
+# Search all sources
+curl -X POST http://localhost:8000/api/tools/find_person \
   -H 'Content-Type: application/json' \
   -d '{
-    "search_term": "John",
+    "query": "John",
+    "source": "all",
     "max_results": 20
   }' | jq
-```
 
-#### Get Contacts
-```bash
-curl -X POST http://localhost:8000/api/tools/get_contacts \
+# List all contacts
+curl -X POST http://localhost:8000/api/tools/find_person \
   -H 'Content-Type: application/json' \
   -d '{
+    "source": "contacts",
     "max_results": 50
+  }' | jq
+
+# GAL search only
+curl -X POST http://localhost:8000/api/tools/find_person \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "john.doe",
+    "source": "gal"
   }' | jq
 ```
 
@@ -360,15 +370,6 @@ curl -X POST http://localhost:8000/api/tools/update_contact \
     "contact_id": "AAMkAD...",
     "phone_number": "+9876543210",
     "job_title": "Senior Engineer"
-  }' | jq
-```
-
-#### Resolve Names (GAL Search)
-```bash
-curl -X POST http://localhost:8000/api/tools/resolve_names \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "john.doe"
   }' | jq
 ```
 
@@ -438,23 +439,24 @@ curl -X POST http://localhost:8000/api/tools/add_attachment \
 
 ### Search Tools
 
-#### Advanced Search
+#### Search Emails (Advanced Mode)
 ```bash
-curl -X POST http://localhost:8000/api/tools/advanced_search \
+curl -X POST http://localhost:8000/api/tools/search_emails \
   -H 'Content-Type: application/json' \
   -d '{
-    "query": "project proposal",
-    "item_types": ["email", "appointment"],
+    "mode": "advanced",
+    "keywords": "project proposal",
     "max_results": 50
   }' | jq
 ```
 
-#### Full Text Search
+#### Search Emails (Full Text Mode)
 ```bash
-curl -X POST http://localhost:8000/api/tools/full_text_search \
+curl -X POST http://localhost:8000/api/tools/search_emails \
   -H 'Content-Type: application/json' \
   -d '{
-    "query": "quarterly report",
+    "mode": "full_text",
+    "search_query": "quarterly report",
     "max_results": 30
   }' | jq
 ```
@@ -468,33 +470,36 @@ curl -X POST http://localhost:8000/api/tools/list_folders \
   -d '{}' | jq
 ```
 
-#### Create Folder
+#### Manage Folder (Create)
 ```bash
-curl -X POST http://localhost:8000/api/tools/create_folder \
+curl -X POST http://localhost:8000/api/tools/manage_folder \
   -H 'Content-Type: application/json' \
   -d '{
+    "action": "create",
     "folder_name": "Project Archive",
     "parent_folder": "Inbox"
   }' | jq
 ```
 
-#### Rename Folder
+#### Manage Folder (Rename)
 ```bash
-curl -X POST http://localhost:8000/api/tools/rename_folder \
+curl -X POST http://localhost:8000/api/tools/manage_folder \
   -H 'Content-Type: application/json' \
   -d '{
-    "folder_name": "Old Name",
-    "new_folder_name": "New Name"
+    "action": "rename",
+    "folder_id": "AAMkAD...",
+    "new_name": "New Name"
   }' | jq
 ```
 
 ### Out-of-Office Tools
 
-#### Set Out-of-Office
+#### OOF Settings (Set)
 ```bash
-curl -X POST http://localhost:8000/api/tools/set_oof_settings \
+curl -X POST http://localhost:8000/api/tools/oof_settings \
   -H 'Content-Type: application/json' \
   -d '{
+    "action": "set",
     "state": "enabled",
     "internal_reply": "I am out of office",
     "external_reply": "I am currently unavailable",
@@ -503,11 +508,11 @@ curl -X POST http://localhost:8000/api/tools/set_oof_settings \
   }' | jq
 ```
 
-#### Get Out-of-Office Settings
+#### OOF Settings (Get)
 ```bash
-curl -X POST http://localhost:8000/api/tools/get_oof_settings \
+curl -X POST http://localhost:8000/api/tools/oof_settings \
   -H 'Content-Type: application/json' \
-  -d '{}' | jq
+  -d '{"action": "get"}' | jq
 ```
 
 ## Response Format

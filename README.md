@@ -1,4 +1,4 @@
-# EWS MCP Server v3.2
+# EWS MCP Server v3.3
 
 <div align="center">
 
@@ -6,7 +6,7 @@
 
 *Transform how AI assistants interact with Microsoft Exchange*
 
-[![Version](https://img.shields.io/badge/version-3.2.0-blue.svg)](https://github.com/azizmazrou/ews-mcp)
+[![Version](https://img.shields.io/badge/version-3.3.0-blue.svg)](https://github.com/azizmazrou/ews-mcp)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/azizmazrou/ews-mcp)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
@@ -17,53 +17,35 @@
 
 ---
 
-## What's New in v3.2
+## What's New in v3.3
 
-### Reply & Forward - Finally Done Right
+### Tool Consolidation — 46 → 36 Tools
 
-No more broken emails! v3.2 introduces **production-grade** reply and forward capabilities:
+v3.3 merges 10 tools into 5 unified tools, reducing token cost by **~55%** per `list_tools` call:
 
-| Before v3.2 | After v3.2 |
-|-------------|------------|
-| Empty forwarded bodies | Full HTML content preserved |
-| Broken signature images | Inline images display perfectly |
-| Lost conversation threads | Complete threading maintained |
-| Inconsistent headers | Outlook-style formatting |
-
-```python
-# Reply with full conversation preservation
-reply_email(
-    message_id="AAMkADc3...",
-    body="<p>Thanks! I'll review this <b>today</b>.</p>",
-    reply_all=True
-)
-
-# Forward with all attachments and signatures intact
-forward_email(
-    message_id="AAMkADc3...",
-    to=["manager@company.com"],
-    body="FYI - Important update below."
-)
-```
-
-### Multi-Mailbox Impersonation
-
-Access **any mailbox** with a single service account:
+| Merge | Before | After |
+|-------|--------|-------|
+| Search | `search_emails` + `advanced_search` + `full_text_search` | `search_emails` with `mode` param |
+| Contact Lookup | `search_contacts` + `get_contacts` + `resolve_names` | `find_person` with `source` param |
+| Folder Mgmt | `create_folder` + `delete_folder` + `rename_folder` + `move_folder` | `manage_folder` with `action` param |
+| OOF | `set_oof_settings` + `get_oof_settings` | `oof_settings` with `action` param |
+| Network Analysis | `get_communication_history` + `analyze_network` | `analyze_contacts` with `analysis_type` param |
 
 ```python
-# Read from shared mailbox
-read_emails(folder="inbox", target_mailbox="support@company.com")
+# Unified search with mode
+search_emails(mode="advanced", keywords="report", folders=["inbox", "sent"])
+search_emails(mode="full_text", search_query="quarterly budget")
 
-# Send as another user
-send_email(
-    to=["client@external.com"],
-    subject="Your Request",
-    body="Thank you for contacting us...",
-    target_mailbox="sales@company.com"
-)
+# Unified contact lookup with source
+find_person(query="Ahmed", source="all")
+find_person(source="contacts")  # list all contacts
+
+# Unified folder management
+manage_folder(action="create", folder_name="Archive")
+manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
 ```
 
-> All **46 tools** now support `target_mailbox` parameter!
+> All **36 tools** support `target_mailbox` parameter!
 
 ---
 
@@ -78,7 +60,7 @@ send_email(
 - **Reply** with thread preservation
 - **Forward** with inline images intact
 - Move, copy, update email properties
-- Full attachment support
+- **Unified search**: quick, advanced, full-text modes
 
 </td>
 <td width="50%">
@@ -95,11 +77,9 @@ send_email(
 <tr>
 <td>
 
-### Contact Intelligence (3 tools)
-- Multi-source person search
-- Communication history analysis
-- Professional network mapping
-- VIP & dormant contact detection
+### Contact Intelligence (2 tools)
+- **find_person**: Multi-source search (GAL + Contacts + Email)
+- **analyze_contacts**: Network analysis, communication history, VIP detection
 
 </td>
 <td>
@@ -164,7 +144,7 @@ python -m src.main
 
 ---
 
-## All 46 Tools
+## All 36 Tools
 
 ### Email Tools (11)
 
@@ -172,14 +152,14 @@ python -m src.main
 |------|-------------|
 | `send_email` | Send with attachments, CC/BCC, importance levels |
 | `read_emails` | Read from any folder with pagination |
-| `search_emails` | Advanced filters: date, sender, subject, attachments |
+| `search_emails` | **Unified search** — `mode: "quick"` (default), `"advanced"`, `"full_text"` |
 | `get_email_details` | Full email content including HTML body |
 | `delete_email` | Soft delete (trash) or permanent removal |
 | `move_email` | Move between folders |
 | `copy_email` | Duplicate to another folder |
 | `update_email` | Mark read/unread, flag, categorize |
-| `reply_email` | **NEW** Reply with thread & signature preservation |
-| `forward_email` | **NEW** Forward with full body & inline images |
+| `reply_email` | Reply with thread & signature preservation |
+| `forward_email` | Forward with full body & inline images |
 | `list_attachments` | List all email attachments |
 
 ### Attachment Tools (5)
@@ -204,24 +184,20 @@ python -m src.main
 | `check_availability` | Get free/busy information |
 | `find_meeting_times` | AI-powered optimal time suggestions |
 
-### Contact Tools (6)
+### Contact Tools (3)
 
 | Tool | Description |
 |------|-------------|
 | `create_contact` | Add new contacts with full details |
-| `search_contacts` | Find by name, email, company |
-| `get_contacts` | List all contacts |
 | `update_contact` | Modify contact information |
 | `delete_contact` | Remove contacts |
-| `resolve_names` | Resolve partial names to full info |
 
-### Contact Intelligence Tools (3)
+### Contact Intelligence Tools (2)
 
 | Tool | Description |
 |------|-------------|
-| `find_person` | Multi-source search: GAL + Contacts + Email history |
-| `get_communication_history` | Analyze relationship timeline & topics |
-| `analyze_network` | Map professional network, find VIPs |
+| `find_person` | **Unified lookup** — `source: "all"` (default), `"gal"`, `"contacts"`, `"email_history"`, `"domain"` |
+| `analyze_contacts` | **Unified analysis** — `analysis_type: "communication_history"`, `"overview"`, `"top_contacts"`, `"by_domain"`, `"dormant"`, `"vip"` |
 
 ### Task Tools (5)
 
@@ -233,30 +209,24 @@ python -m src.main
 | `complete_task` | Mark as complete |
 | `delete_task` | Remove tasks |
 
-### Search Tools (3)
+### Search Tools (1)
 
 | Tool | Description |
 |------|-------------|
-| `advanced_search` | Multi-criteria search across folders |
 | `search_by_conversation` | Find all emails in a thread |
-| `full_text_search` | Full-text search with options |
 
-### Folder Tools (5)
+### Folder Tools (2)
 
 | Tool | Description |
 |------|-------------|
 | `list_folders` | Get folder hierarchy with counts |
-| `create_folder` | Create new folders |
-| `delete_folder` | Remove folders |
-| `rename_folder` | Rename existing folders |
-| `move_folder` | Reorganize folder structure |
+| `manage_folder` | **Unified management** — `action: "create"`, `"delete"`, `"rename"`, `"move"` |
 
-### Out-of-Office Tools (2)
+### Out-of-Office Tools (1)
 
 | Tool | Description |
 |------|-------------|
-| `set_oof_settings` | Configure automatic replies |
-| `get_oof_settings` | Retrieve current OOF settings |
+| `oof_settings` | **Unified OOF** — `action: "get"` or `"set"` |
 
 ---
 
@@ -337,7 +307,7 @@ for mailbox in ["sales@company.com", "support@company.com"]:
 # Never get 0 results - multi-strategy search
 person = find_person(
     query="Ahmed",
-    search_scope="all",
+    source="all",
     include_stats=True
 )
 
@@ -434,18 +404,18 @@ Add to your Claude Desktop config:
 ## Architecture
 
 ```
-EWS MCP Server v3.2
+EWS MCP Server v3.3
 ├── MCP Protocol Layer (stdio/SSE)
-├── Tool Registry (46 tools)
-│   ├── Email Tools (11) ─────────── send, read, search, reply, forward...
+├── Tool Registry (36 tools)
+│   ├── Email Tools (11) ─────────── send, read, search (3 modes), reply, forward...
 │   ├── Calendar Tools (7) ──────── appointments, meetings, availability
-│   ├── Contact Tools (6) ───────── CRUD operations
-│   ├── Intelligence Tools (3) ──── find_person, network analysis
+│   ├── Contact Tools (3) ───────── create, update, delete
+│   ├── Intelligence Tools (2) ──── find_person (5 sources), analyze_contacts (6 types)
 │   ├── Task Tools (5) ──────────── task management
-│   ├── Search Tools (3) ────────── advanced search, conversation threads
-│   ├── Folder Tools (5) ────────── folder management
+│   ├── Search Tools (1) ────────── conversation threads
+│   ├── Folder Tools (2) ────────── list + manage_folder (4 actions)
 │   ├── Attachment Tools (5) ────── read, download, content extraction
-│   └── OOF Tools (2) ───────────── out-of-office settings
+│   └── OOF Tools (1) ───────────── oof_settings (get/set)
 ├── Service Layer
 │   ├── PersonService ───────────── person discovery & ranking
 │   ├── EmailService ────────────── email operations
@@ -486,9 +456,17 @@ EWS MCP Server v3.2
 
 ## Version History
 
+### v3.3 - Tool Consolidation
+- **10 tools merged into 5**: 46 → 36 tools, ~55% token savings on `list_tools`
+- **Unified search**: `search_emails` with quick/advanced/full_text modes
+- **Unified contacts**: `find_person` with 5 source types, `analyze_contacts` with 6 analysis types
+- **Unified folders**: `manage_folder` with create/delete/rename/move actions
+- **Unified OOF**: `oof_settings` with get/set actions
+- **Server-side filtering**: `analyze_contacts` communication history uses EWS sender filter
+
 ### v3.2 - Reply, Forward & Impersonation
 - **Reply & Forward**: Full body preservation, inline images, Outlook-style headers
-- **Impersonation**: All 46 tools support `target_mailbox` parameter
+- **Impersonation**: All tools support `target_mailbox` parameter
 - **Documentation**: Comprehensive guides for new features
 
 ### v3.0 - Person-Centric Architecture

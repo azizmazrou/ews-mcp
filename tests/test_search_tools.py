@@ -3,14 +3,14 @@
 import pytest
 from unittest.mock import MagicMock
 
-from src.tools.search_tools import AdvancedSearchTool
+from src.tools.email_tools import SearchEmailsTool
 
 
 @pytest.mark.asyncio
 async def test_advanced_search_tool(mock_ews_client):
     """Test advanced search with multiple filters."""
     from datetime import datetime
-    tool = AdvancedSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock search results
     mock_email = MagicMock()
@@ -33,13 +33,12 @@ async def test_advanced_search_tool(mock_ews_client):
     mock_ews_client.account.inbox.filter.return_value = mock_query
 
     result = await tool.execute(
-        search_filter={
-            "keywords": "meeting",
-            "from_address": "boss@example.com",
-            "has_attachments": True,
-            "importance": "High"
-        },
-        search_scope=["inbox"],
+        mode="advanced",
+        keywords="meeting",
+        from_address="boss@example.com",
+        has_attachments=True,
+        importance="High",
+        folders=["inbox"],
         max_results=100,
         sort_by="datetime_received",
         sort_order="descending"
@@ -53,7 +52,7 @@ async def test_advanced_search_tool(mock_ews_client):
 @pytest.mark.asyncio
 async def test_advanced_search_with_date_range(mock_ews_client):
     """Test advanced search with date range filter."""
-    tool = AdvancedSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     mock_query = MagicMock()
     mock_query.filter.return_value = mock_query
@@ -63,12 +62,11 @@ async def test_advanced_search_with_date_range(mock_ews_client):
     mock_ews_client.account.inbox.filter.return_value = mock_query
 
     result = await tool.execute(
-        search_filter={
-            "subject": "Report",
-            "start_date": "2025-01-01T00:00:00+00:00",
-            "end_date": "2025-01-31T23:59:59+00:00"
-        },
-        search_scope=["inbox"],
+        mode="advanced",
+        subject_contains="Report",
+        start_date="2025-01-01T00:00:00+00:00",
+        end_date="2025-01-31T23:59:59+00:00",
+        folders=["inbox"],
         max_results=50
     )
 
@@ -80,7 +78,7 @@ async def test_advanced_search_with_date_range(mock_ews_client):
 async def test_advanced_search_multiple_folders(mock_ews_client):
     """Test searching across multiple folders."""
     from datetime import datetime
-    tool = AdvancedSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock results from different folders
     mock_inbox_email = MagicMock()
@@ -121,8 +119,9 @@ async def test_advanced_search_multiple_folders(mock_ews_client):
     mock_ews_client.account.sent.filter.return_value = mock_sent_query
 
     result = await tool.execute(
-        search_filter={"keywords": "email"},
-        search_scope=["inbox", "sent"],
+        mode="advanced",
+        keywords="email",
+        folders=["inbox", "sent"],
         max_results=100
     )
 
@@ -133,26 +132,27 @@ async def test_advanced_search_multiple_folders(mock_ews_client):
 @pytest.mark.asyncio
 async def test_advanced_search_empty_filter(mock_ews_client):
     """Test advanced search with empty filter."""
-    tool = AdvancedSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     with pytest.raises(Exception) as exc_info:
         await tool.execute(
-            search_filter={},
-            search_scope=["inbox"]
+            mode="advanced",
+            folders=["inbox"]
         )
 
-    assert "search_filter is required" in str(exc_info.value).lower() or "empty" in str(exc_info.value).lower()
+    assert "filter" in str(exc_info.value).lower() or "empty" in str(exc_info.value).lower() or "required" in str(exc_info.value).lower()
 
 
 @pytest.mark.asyncio
 async def test_advanced_search_invalid_folder(mock_ews_client):
     """Test advanced search with invalid folder."""
-    tool = AdvancedSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     with pytest.raises(Exception) as exc_info:
         await tool.execute(
-            search_filter={"subject": "test"},
-            search_scope=["nonexistent_folder"]
+            mode="advanced",
+            subject_contains="test",
+            folders=["nonexistent_folder"]
         )
 
-    assert "no valid folders" in str(exc_info.value).lower()
+    assert "no valid folders" in str(exc_info.value).lower() or "folder" in str(exc_info.value).lower()

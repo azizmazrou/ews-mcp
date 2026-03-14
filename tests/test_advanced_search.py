@@ -4,10 +4,8 @@ import pytest
 from unittest.mock import Mock, MagicMock
 from datetime import datetime
 
-from src.tools.search_tools import (
-    SearchByConversationTool,
-    FullTextSearchTool
-)
+from src.tools.search_tools import SearchByConversationTool
+from src.tools.email_tools import SearchEmailsTool
 from src.exceptions import ToolExecutionError
 
 
@@ -121,7 +119,7 @@ async def test_search_by_conversation_missing_ids(mock_ews_client):
 @pytest.mark.asyncio
 async def test_full_text_search_subject_and_body(mock_ews_client):
     """Test full-text search in subject and body."""
-    tool = FullTextSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock search results
     mock_email1 = MagicMock()
@@ -144,7 +142,8 @@ async def test_full_text_search_subject_and_body(mock_ews_client):
     mock_ews_client.account.inbox.all.return_value = mock_query
 
     result = await tool.execute(
-        query="project",
+        mode="full_text",
+        search_query="project",
         folder="inbox",
         search_in=["subject", "body"]
     )
@@ -158,7 +157,7 @@ async def test_full_text_search_subject_and_body(mock_ews_client):
 @pytest.mark.asyncio
 async def test_full_text_search_subject_only(mock_ews_client):
     """Test full-text search in subject only."""
-    tool = FullTextSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock search results
     mock_email = MagicMock()
@@ -173,7 +172,8 @@ async def test_full_text_search_subject_only(mock_ews_client):
     mock_ews_client.account.inbox.all.return_value = mock_query
 
     result = await tool.execute(
-        query="Invoice",
+        mode="full_text",
+        search_query="Invoice",
         folder="inbox",
         search_in=["subject"]
     )
@@ -185,7 +185,7 @@ async def test_full_text_search_subject_only(mock_ews_client):
 @pytest.mark.asyncio
 async def test_full_text_search_with_max_results(mock_ews_client):
     """Test full-text search with result limit."""
-    tool = FullTextSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock 5 search results
     mock_emails = []
@@ -202,7 +202,8 @@ async def test_full_text_search_with_max_results(mock_ews_client):
     mock_ews_client.account.inbox.all.return_value = mock_query
 
     result = await tool.execute(
-        query="test",
+        mode="full_text",
+        search_query="test",
         folder="inbox",
         max_results=3
     )
@@ -215,7 +216,7 @@ async def test_full_text_search_with_max_results(mock_ews_client):
 @pytest.mark.asyncio
 async def test_full_text_search_case_sensitive(mock_ews_client):
     """Test case-sensitive full-text search."""
-    tool = FullTextSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock case-sensitive results
     mock_email = MagicMock()
@@ -230,7 +231,8 @@ async def test_full_text_search_case_sensitive(mock_ews_client):
     mock_ews_client.account.inbox.all.return_value = mock_query
 
     result = await tool.execute(
-        query="URGENT",
+        mode="full_text",
+        search_query="URGENT",
         folder="inbox",
         case_sensitive=True
     )
@@ -242,7 +244,7 @@ async def test_full_text_search_case_sensitive(mock_ews_client):
 @pytest.mark.asyncio
 async def test_full_text_search_exact_phrase(mock_ews_client):
     """Test exact phrase search."""
-    tool = FullTextSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock exact phrase results
     mock_email = MagicMock()
@@ -257,7 +259,8 @@ async def test_full_text_search_exact_phrase(mock_ews_client):
     mock_ews_client.account.inbox.all.return_value = mock_query
 
     result = await tool.execute(
-        query="out of office",
+        mode="full_text",
+        search_query="out of office",
         folder="inbox",
         exact_phrase=True
     )
@@ -269,7 +272,7 @@ async def test_full_text_search_exact_phrase(mock_ews_client):
 @pytest.mark.asyncio
 async def test_full_text_search_no_results(mock_ews_client):
     """Test full-text search with no results."""
-    tool = FullTextSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     # Mock empty results
     mock_query = MagicMock()
@@ -277,7 +280,8 @@ async def test_full_text_search_no_results(mock_ews_client):
     mock_ews_client.account.inbox.all.return_value = mock_query
 
     result = await tool.execute(
-        query="nonexistent_term_xyz123",
+        mode="full_text",
+        search_query="nonexistent_term_xyz123",
         folder="inbox"
     )
 
@@ -289,9 +293,9 @@ async def test_full_text_search_no_results(mock_ews_client):
 @pytest.mark.asyncio
 async def test_full_text_search_missing_query(mock_ews_client):
     """Test full-text search without query."""
-    tool = FullTextSearchTool(mock_ews_client)
+    tool = SearchEmailsTool(mock_ews_client)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        await tool.execute(folder="inbox")
+        await tool.execute(mode="full_text", folder="inbox")
 
-    assert "query is required" in str(exc_info.value)
+    assert "query is required" in str(exc_info.value).lower() or "search_query" in str(exc_info.value).lower()

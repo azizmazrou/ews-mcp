@@ -1,6 +1,6 @@
-# Architecture Overview - v3.0
+# Architecture Overview - v3.3
 
-Technical architecture and design decisions for EWS MCP Server v3.0 (Person-Centric Rewrite).
+Technical architecture and design decisions for EWS MCP Server v3.3 (Tool Consolidation).
 
 ## System Architecture
 
@@ -10,7 +10,7 @@ Technical architecture and design decisions for EWS MCP Server v3.0 (Person-Cent
 └──────────────────────────┬──────────────────────────────────┘
                            │ MCP Protocol (stdio/SSE)
 ┌──────────────────────────▼──────────────────────────────────┐
-│                   EWS MCP Server v3.0                        │
+│                   EWS MCP Server v3.3                        │
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │              MCP Protocol Handler                       │ │
 │  │  - list_tools()                                        │ │
@@ -19,10 +19,10 @@ Technical architecture and design decisions for EWS MCP Server v3.0 (Person-Cent
 │               │                                              │
 │  ┌────────────▼───────────────────────────────────────────┐ │
 │  │              Tool Registry & Router                     │ │
-│  │  - Contact Intelligence (3)  - Email (9)               │ │
-│  │  - Calendar (6)              - Contacts (6)            │ │
-│  │  - Tasks (5)                 - Search (3)              │ │
-│  │  - Folders (5)               - Out-of-Office (2)       │ │
+│  │  - Contact Intelligence (2)  - Email (11)              │ │
+│  │  - Calendar (7)              - Contacts (3)            │ │
+│  │  - Tasks (5)                 - Search (1)              │ │
+│  │  - Folders (2)               - Out-of-Office (1)       │ │
 │  │  - Attachments (5)                                     │ │
 │  └────────────┬───────────────────────────────────────────┘ │
 │               │                                              │
@@ -78,7 +78,7 @@ Technical architecture and design decisions for EWS MCP Server v3.0 (Person-Cent
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## v3.0 Directory Structure
+## v3.3 Directory Structure
 
 ```
 src/

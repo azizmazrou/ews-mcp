@@ -4,17 +4,14 @@ import pytest
 from unittest.mock import Mock, MagicMock, patch
 from datetime import datetime
 
-from src.tools.oof_tools import (
-    SetOOFSettingsTool,
-    GetOOFSettingsTool
-)
+from src.tools.oof_tools import OofSettingsTool
 from src.exceptions import ToolExecutionError
 
 
 @pytest.mark.asyncio
 async def test_set_oof_enabled(mock_ews_client):
     """Test enabling OOF with messages."""
-    tool = SetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     # Mock OOF settings
     mock_oof = MagicMock()
@@ -27,6 +24,7 @@ async def test_set_oof_enabled(mock_ews_client):
         mock_oof_settings.return_value = mock_oof_instance
 
         result = await tool.execute(
+            action="set",
             state="Enabled",
             internal_reply="I am out of office",
             external_reply="I am currently unavailable",
@@ -44,7 +42,7 @@ async def test_set_oof_enabled(mock_ews_client):
 @pytest.mark.asyncio
 async def test_set_oof_scheduled(mock_ews_client):
     """Test scheduling OOF with start and end times."""
-    tool = SetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     # Mock OOF settings
     mock_oof = MagicMock()
@@ -57,6 +55,7 @@ async def test_set_oof_scheduled(mock_ews_client):
         mock_oof_settings.return_value = mock_oof_instance
 
         result = await tool.execute(
+            action="set",
             state="Scheduled",
             internal_reply="I will be out",
             external_reply="I will be unavailable",
@@ -75,7 +74,7 @@ async def test_set_oof_scheduled(mock_ews_client):
 @pytest.mark.asyncio
 async def test_set_oof_disabled(mock_ews_client):
     """Test disabling OOF."""
-    tool = SetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     # Mock OOF settings
     mock_oof = MagicMock()
@@ -85,7 +84,7 @@ async def test_set_oof_disabled(mock_ews_client):
         mock_oof_instance = MagicMock()
         mock_oof_settings.return_value = mock_oof_instance
 
-        result = await tool.execute(state="Disabled")
+        result = await tool.execute(action="set", state="Disabled")
 
     assert result["success"] is True
     assert "updated to Disabled" in result["message"]
@@ -95,10 +94,11 @@ async def test_set_oof_disabled(mock_ews_client):
 @pytest.mark.asyncio
 async def test_set_oof_scheduled_missing_times(mock_ews_client):
     """Test scheduled OOF without required start/end times."""
-    tool = SetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     with pytest.raises(ToolExecutionError) as exc_info:
         await tool.execute(
+            action="set",
             state="Scheduled",
             internal_reply="I am out"
         )
@@ -109,11 +109,12 @@ async def test_set_oof_scheduled_missing_times(mock_ews_client):
 @pytest.mark.asyncio
 async def test_set_oof_invalid_time_range(mock_ews_client):
     """Test OOF with end time before start time."""
-    tool = SetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     with patch('src.tools.oof_tools.OofSettings'):
         with pytest.raises(ToolExecutionError) as exc_info:
             await tool.execute(
+                action="set",
                 state="Scheduled",
                 start_time="2025-12-31T23:59:59",
                 end_time="2025-12-20T00:00:00"
@@ -125,10 +126,10 @@ async def test_set_oof_invalid_time_range(mock_ews_client):
 @pytest.mark.asyncio
 async def test_set_oof_missing_state(mock_ews_client):
     """Test OOF without required state parameter."""
-    tool = SetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        await tool.execute()
+        await tool.execute(action="set")
 
     assert "state is required" in str(exc_info.value)
 
@@ -136,7 +137,7 @@ async def test_set_oof_missing_state(mock_ews_client):
 @pytest.mark.asyncio
 async def test_get_oof_enabled(mock_ews_client):
     """Test getting OOF settings when enabled."""
-    tool = GetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     # Mock OOF settings
     mock_oof = MagicMock()
@@ -153,7 +154,7 @@ async def test_get_oof_enabled(mock_ews_client):
 
     mock_ews_client.account.oof_settings = mock_oof
 
-    result = await tool.execute()
+    result = await tool.execute(action="get")
 
     assert result["success"] is True
     assert result["settings"]["state"] == "Enabled"
@@ -166,7 +167,7 @@ async def test_get_oof_enabled(mock_ews_client):
 @pytest.mark.asyncio
 async def test_get_oof_scheduled(mock_ews_client):
     """Test getting OOF settings when scheduled."""
-    tool = GetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     # Mock OOF settings
     mock_oof = MagicMock()
@@ -191,7 +192,7 @@ async def test_get_oof_scheduled(mock_ews_client):
 
     mock_ews_client.account.oof_settings = mock_oof
 
-    result = await tool.execute()
+    result = await tool.execute(action="get")
 
     assert result["success"] is True
     assert result["settings"]["state"] == "Scheduled"
@@ -203,7 +204,7 @@ async def test_get_oof_scheduled(mock_ews_client):
 @pytest.mark.asyncio
 async def test_get_oof_disabled(mock_ews_client):
     """Test getting OOF settings when disabled."""
-    tool = GetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     # Mock OOF settings
     mock_oof = MagicMock()
@@ -214,7 +215,7 @@ async def test_get_oof_disabled(mock_ews_client):
 
     mock_ews_client.account.oof_settings = mock_oof
 
-    result = await tool.execute()
+    result = await tool.execute(action="get")
 
     assert result["success"] is True
     assert result["settings"]["state"] == "Disabled"
@@ -226,12 +227,12 @@ async def test_get_oof_disabled(mock_ews_client):
 @pytest.mark.asyncio
 async def test_get_oof_no_settings(mock_ews_client):
     """Test getting OOF settings when none configured."""
-    tool = GetOOFSettingsTool(mock_ews_client)
+    tool = OofSettingsTool(mock_ews_client)
 
     # Mock no OOF settings
     mock_ews_client.account.oof_settings = None
 
-    result = await tool.execute()
+    result = await tool.execute(action="get")
 
     assert result["success"] is True
     assert result["settings"]["state"] == "Disabled"

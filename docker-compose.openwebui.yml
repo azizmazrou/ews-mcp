@@ -31,7 +31,7 @@ services:
       - API_BASE_URL_INTERNAL=${API_BASE_URL_INTERNAL:-}
       # Customize API metadata
       - API_TITLE=${API_TITLE:-Exchange Web Services (EWS) MCP API}
-      - API_VERSION=${API_VERSION:-3.0.0}
+      - API_VERSION=${API_VERSION:-3.3.0}
 
       # Timezone Configuration
       - TIMEZONE=${TIMEZONE:-Asia/Riyadh}
@@ -68,7 +68,7 @@ services:
   # 1. Access Open WebUI at http://localhost:3000
   # 2. Go to Settings > Functions
   # 3. Add External API: http://ews-mcp:8000
-  # 4. Auto-discovery will find all 43+ Exchange tools
+  # 4. Auto-discovery will find all 36+ Exchange tools
   # open-webui:
   #   image: ghcr.io/open-webui/open-webui:main
   #   container_name: open-webui
