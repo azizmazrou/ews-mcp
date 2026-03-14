@@ -7,7 +7,39 @@ from exchangelib import CalendarItem, Mailbox, Attendee
 from .base import BaseTool
 from ..models import CreateAppointmentRequest, MeetingResponse
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str
+from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files
+
+# Shared schema for inline_attachments parameter (base64-encoded files)
+INLINE_ATTACHMENTS_SCHEMA = {
+    "inline_attachments": {
+        "description": "Attachments as base64-encoded content (e.g. agendas, maps, barcodes for calendar invites).",
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "file_name": {
+                    "type": "string",
+                    "description": "File name with extension (e.g. 'agenda.pdf', 'barcode.png')"
+                },
+                "file_content": {
+                    "type": "string",
+                    "description": "Base64-encoded file content"
+                },
+                "content_type": {
+                    "type": "string",
+                    "default": "application/octet-stream",
+                    "description": "MIME type (e.g. 'image/png', 'application/pdf')"
+                },
+                "is_inline": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "True = embedded in body (use cid:file_name to reference in HTML)"
+                }
+            },
+            "required": ["file_name", "file_content"]
+        }
+    }
+}
 
 
 class CreateAppointmentTool(BaseTool):
@@ -55,6 +87,7 @@ class CreateAppointmentTool(BaseTool):
                         "description": "Reminder minutes before (optional)",
                         "default": 15
                     },
+                    **INLINE_ATTACHMENTS_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
@@ -105,6 +138,11 @@ class CreateAppointmentTool(BaseTool):
                     Attendee(mailbox=Mailbox(email_address=email))
                     for email in request.attendees
                 ]
+
+            # Add inline (base64) attachments if provided
+            inline_count = attach_inline_files(item, kwargs.get("inline_attachments", []))
+            if inline_count > 0:
+                self.logger.info(f"Added {inline_count} inline (base64) attachment(s) to appointment")
 
             # Save the appointment
             item.save()
@@ -281,6 +319,7 @@ class UpdateAppointmentTool(BaseTool):
                         "type": "string",
                         "description": "New body (optional)"
                     },
+                    **INLINE_ATTACHMENTS_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
@@ -317,6 +356,11 @@ class UpdateAppointmentTool(BaseTool):
 
             if "body" in kwargs:
                 item.body = kwargs["body"]
+
+            # Add inline (base64) attachments if provided
+            inline_count = attach_inline_files(item, kwargs.get("inline_attachments", []))
+            if inline_count > 0:
+                self.logger.info(f"Added {inline_count} inline (base64) attachment(s) to appointment")
 
             # Save changes
             item.save()
