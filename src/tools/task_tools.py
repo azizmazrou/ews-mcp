@@ -17,7 +17,7 @@ class CreateTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_task",
-            "description": "Create a new task in Exchange. Supports impersonation to access another user's tasks",
+            "description": "Create a new task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -114,7 +114,7 @@ class GetTasksTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_tasks",
-            "description": "Retrieve tasks, optionally filtered by status. Supports impersonation to access another user's tasks",
+            "description": "Retrieve tasks, optionally filtered by status.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -193,7 +193,7 @@ class UpdateTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_task",
-            "description": "Update an existing task. Supports impersonation to access another user's tasks",
+            "description": "Update an existing task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -289,7 +289,7 @@ class CompleteTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "complete_task",
-            "description": "Mark a task as complete. Supports impersonation to access another user's tasks",
+            "description": "Mark a task as complete.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -341,7 +341,7 @@ class DeleteTaskTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_task",
-            "description": "Delete a task. Supports impersonation to access another user's tasks",
+            "description": "Delete a task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

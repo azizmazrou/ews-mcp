@@ -48,7 +48,7 @@ class CreateAppointmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_appointment",
-            "description": "Create a calendar appointment or meeting with attendees. Supports impersonation to operate on another user's calendar/mailbox",
+            "description": "Create a calendar appointment or meeting with attendees.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -169,7 +169,7 @@ class GetCalendarTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_calendar",
-            "description": "Retrieve calendar events for a date range. Supports impersonation to operate on another user's calendar/mailbox",
+            "description": "Retrieve calendar events for a date range.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -291,7 +291,7 @@ class UpdateAppointmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_appointment",
-            "description": "Update an existing calendar appointment. Supports impersonation to operate on another user's calendar/mailbox",
+            "description": "Update an existing calendar appointment.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -384,7 +384,7 @@ class DeleteAppointmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_appointment",
-            "description": "Delete a calendar appointment. Supports impersonation to operate on another user's calendar/mailbox",
+            "description": "Delete a calendar appointment.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -447,7 +447,7 @@ class RespondToMeetingTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "respond_to_meeting",
-            "description": "Accept, tentatively accept, or decline a meeting invitation. Supports impersonation to operate on another user's calendar/mailbox",
+            "description": "Respond to a meeting invitation (accept, tentative, or decline).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -520,7 +520,7 @@ class CheckAvailabilityTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "check_availability",
-            "description": "Get free/busy information for email addresses in a time range. Supports impersonation to operate on another user's calendar/mailbox",
+            "description": "Check free/busy availability for users in a time range.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -655,7 +655,7 @@ class FindMeetingTimesTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "find_meeting_times",
-            "description": "Find optimal meeting times based on attendee availability and preferences. Supports impersonation to operate on another user's calendar/mailbox",
+            "description": "Find optimal meeting times based on attendee availability.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

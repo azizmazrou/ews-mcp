@@ -5,7 +5,7 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 3.0.0 - PERSON-CENTRIC REWRITE
+VERSION: 3.2.0 - PERSON-CENTRIC REWRITE
 CHANGES:
 - NOW USES PersonService with multi-strategy GAL search (FIXES 0-RESULTS BUG!)
 - Person-centric architecture with proper Person objects
@@ -38,7 +38,7 @@ class FindPersonTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "find_person",
-            "description": "Search for contacts across Global Address List (GAL), email history, and domains. Supports Arabic text (UTF-8). Supports impersonation to analyze contacts in another user's mailbox.",
+            "description": "Search for people across GAL, email history, and domains.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -181,160 +181,6 @@ class FindPersonTool(BaseTool):
             import traceback
             self.logger.error(traceback.format_exc())
             raise ToolExecutionError(f"Failed to search for person: {e}")
-
-    # DEPRECATED: Old implementation kept for reference but not used
-    async def _search_gal_legacy(self, query: str, include_personal_contacts: bool = False) -> List[Dict[str, Any]]:
-        """DEPRECATED: Old GAL search implementation.
-
-        This method is kept for reference but is NO LONGER USED.
-        The new PersonService with multi-strategy search is used instead.
-        """
-        # Implementation kept but not called
-        pass
-
-    # DEPRECATED: Old implementation kept for reference but not used
-    async def _search_email_history_legacy(
-        self,
-        name_query: Optional[str],
-        domain_query: Optional[str],
-        days_back: int,
-        include_stats: bool = True
-    ) -> List[Dict[str, Any]]:
-        """DEPRECATED: Old email history search implementation.
-
-        This method is kept for reference but is NO LONGER USED.
-        The new PersonService handles email history search.
-        """
-        # Implementation kept but not called
-        pass
-
-    # DEPRECATED: Old _search_gal implementation - NO LONGER USED
-    async def _search_gal(self, query: str, include_personal_contacts: bool = False) -> List[Dict[str, Any]]:
-        """Search Global Address List with enhanced contact data extraction.
-
-        This is a direct port of the working search_gal() function with:
-        - Simple resolve_names() call with return_full_contact_data=True
-        - Proper tuple handling: (mailbox, contact_info)
-        - Fallback for object format
-        - Enhanced phone number extraction
-        - Comprehensive logging
-
-        Args:
-            query: Search query string
-            include_personal_contacts: If True, also search Contacts folder (currently not implemented)
-        """
-        contacts = []
-
-        try:
-            self.logger.info(f"=== GAL Search Start === Query: '{query}'")
-
-            # ONE simple call to resolve_names - matches working Python code
-            results = self.ews_client.account.protocol.resolve_names(
-                names=[query],
-                return_full_contact_data=True
-            )
-
-            if not results:
-                self.logger.warning("GAL search returned 0 results")
-                return contacts
-
-            self.logger.info(f"GAL returned {len(results)} raw result(s)")
-
-            for idx, result in enumerate(results):
-                try:
-                    # Handle tuple format: (mailbox, contact_info)
-                    if isinstance(result, tuple):
-                        mailbox = result[0]
-                        contact_info = result[1] if len(result) > 1 else None
-
-                        contact = {
-                            'name': getattr(mailbox, 'name', 'N/A'),
-                            'email': getattr(mailbox, 'email_address', 'N/A'),
-                            'routing_type': getattr(mailbox, 'routing_type', 'SMTP'),
-                        }
-
-                        # Extract additional details from contact_info
-                        if contact_info:
-                            if hasattr(contact_info, 'display_name') and contact_info.display_name:
-                                contact['display_name'] = contact_info.display_name
-                            if hasattr(contact_info, 'given_name') and contact_info.given_name:
-                                contact['given_name'] = contact_info.given_name
-                            if hasattr(contact_info, 'surname') and contact_info.surname:
-                                contact['surname'] = contact_info.surname
-                            if hasattr(contact_info, 'company_name') and contact_info.company_name:
-                                contact['company'] = contact_info.company_name
-                            if hasattr(contact_info, 'department') and contact_info.department:
-                                contact['department'] = contact_info.department
-                            if hasattr(contact_info, 'job_title') and contact_info.job_title:
-                                contact['job_title'] = contact_info.job_title
-
-                            # Extract phone numbers
-                            if hasattr(contact_info, 'phone_numbers') and contact_info.phone_numbers:
-                                phones = []
-                                for phone in contact_info.phone_numbers:
-                                    phone_entry = {}
-                                    if hasattr(phone, 'label'):
-                                        phone_entry['type'] = phone.label
-                                    if hasattr(phone, 'phone_number'):
-                                        phone_entry['number'] = phone.phone_number
-                                    if phone_entry:
-                                        phones.append(phone_entry)
-                                if phones:
-                                    contact['phone_numbers'] = phones
-
-                            # Also check individual phone fields
-                            if hasattr(contact_info, 'business_phone') and contact_info.business_phone:
-                                contact['business_phone'] = contact_info.business_phone
-                            if hasattr(contact_info, 'mobile_phone') and contact_info.mobile_phone:
-                                contact['mobile_phone'] = contact_info.mobile_phone
-                            if hasattr(contact_info, 'office_location') and contact_info.office_location:
-                                contact['office'] = contact_info.office_location
-
-                    else:
-                        # Handle object format (fallback)
-                        contact = {
-                            'name': result.mailbox.name if hasattr(result, 'mailbox') else 'N/A',
-                            'email': result.mailbox.email_address if hasattr(result, 'mailbox') else 'N/A',
-                            'routing_type': result.mailbox.routing_type if hasattr(result, 'mailbox') else 'SMTP',
-                        }
-
-                        if hasattr(result, 'contact') and result.contact:
-                            c = result.contact
-                            if hasattr(c, 'display_name') and c.display_name:
-                                contact['display_name'] = c.display_name
-                            if hasattr(c, 'given_name') and c.given_name:
-                                contact['given_name'] = c.given_name
-                            if hasattr(c, 'surname') and c.surname:
-                                contact['surname'] = c.surname
-                            if hasattr(c, 'company_name') and c.company_name:
-                                contact['company'] = c.company_name
-                            if hasattr(c, 'department') and c.department:
-                                contact['department'] = c.department
-                            if hasattr(c, 'job_title') and c.job_title:
-                                contact['job_title'] = c.job_title
-
-                    contacts.append(contact)
-
-                    # Log each contact found
-                    name = contact.get('name', 'N/A')
-                    email = contact.get('email', 'N/A')
-                    company = contact.get('company', '')
-                    self.logger.debug(f"  GAL [{idx + 1}] {name} <{email}>" + (f" @ {company}" if company else ""))
-
-                except Exception as e:
-                    self.logger.error(f"Error processing GAL result {idx}: {e}")
-                    import traceback
-                    self.logger.error(traceback.format_exc())
-                    continue
-
-            self.logger.info(f"=== GAL Search Complete === Found {len(contacts)} contact(s)")
-            return contacts
-
-        except Exception as e:
-            self.logger.error(f"=== GAL Search Failed === Error: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-            return contacts
 
     async def _search_email_history(
         self,
@@ -485,7 +331,7 @@ class GetCommunicationHistoryTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_communication_history",
-            "description": "Get detailed communication history and statistics with a specific person. Supports impersonation to analyze contacts in another user's mailbox.",
+            "description": "Get communication history and statistics with a person.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -744,7 +590,7 @@ class AnalyzeNetworkTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "analyze_network",
-            "description": "Analyze professional network, identify top contacts, VIPs, dormant relationships, and domain statistics. Supports impersonation to analyze contacts in another user's mailbox.",
+            "description": "Analyze professional network: top contacts, VIPs, and domain stats.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
