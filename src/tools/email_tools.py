@@ -27,7 +27,39 @@ import re
 from .base import BaseTool
 from ..models import SendEmailRequest, EmailSearchRequest, EmailDetails
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str
+from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str, attach_inline_files
+
+# Shared schema for inline_attachments parameter (base64-encoded files)
+INLINE_ATTACHMENTS_SCHEMA = {
+    "inline_attachments": {
+        "description": "Attachments as base64-encoded content. Use when file paths are not accessible (e.g. in cloud/Docker environments).",
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "file_name": {
+                    "type": "string",
+                    "description": "File name with extension (e.g. 'report.pdf', 'image.png')"
+                },
+                "file_content": {
+                    "type": "string",
+                    "description": "Base64-encoded file content"
+                },
+                "content_type": {
+                    "type": "string",
+                    "default": "application/octet-stream",
+                    "description": "MIME type (e.g. 'image/png', 'application/pdf')"
+                },
+                "is_inline": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "True = embedded in body (use cid:file_name to reference in HTML)"
+                }
+            },
+            "required": ["file_name", "file_content"]
+        }
+    }
+}
 
 
 def extract_body_html(message) -> str:
@@ -504,6 +536,7 @@ class SendEmailTool(BaseTool):
                         "items": {"type": "string"},
                         "description": "Attachment file paths (optional)"
                     },
+                    **INLINE_ATTACHMENTS_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to send on behalf of (requires impersonation/delegate access)"
@@ -658,6 +691,12 @@ class SendEmailTool(BaseTool):
                         raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
                 self.logger.info(f"Total attachments added: {attachment_count}")
+
+            # Add inline (base64) attachments if provided
+            inline_count = attach_inline_files(message, kwargs.get("inline_attachments", []))
+            if inline_count > 0:
+                attachment_count += inline_count
+                self.logger.info(f"Added {inline_count} inline (base64) attachment(s)")
 
             # Send the message (attachments are included automatically)
             message.send()
@@ -1458,6 +1497,7 @@ class ReplyEmailTool(BaseTool):
                         "items": {"type": "string"},
                         "description": "File paths to attach to the reply (optional)"
                     },
+                    **INLINE_ATTACHMENTS_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to reply from (requires impersonation/delegate access)"
@@ -1602,6 +1642,12 @@ class ReplyEmailTool(BaseTool):
                     except Exception as e:
                         raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
 
+            # Add inline (base64) attachments if provided
+            inline_b64_count = attach_inline_files(message, kwargs.get("inline_attachments", []))
+            if inline_b64_count > 0:
+                new_attachment_count += inline_b64_count
+                self.logger.info(f"Added {inline_b64_count} inline (base64) attachment(s)")
+
             # Send the message
             message.send()
             self.logger.info(f"Reply sent to {original_from_email} from mailbox: {mailbox}")
@@ -1669,6 +1715,7 @@ class ForwardEmailTool(BaseTool):
                         "items": {"type": "string"},
                         "description": "Additional file paths to attach (optional)"
                     },
+                    **INLINE_ATTACHMENTS_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to forward from (requires impersonation/delegate access)"
@@ -1797,6 +1844,12 @@ class ForwardEmailTool(BaseTool):
                         raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
                     except Exception as e:
                         raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
+
+            # Add inline (base64) attachments if provided
+            inline_b64_count = attach_inline_files(message, kwargs.get("inline_attachments", []))
+            if inline_b64_count > 0:
+                additional_attachment_count += inline_b64_count
+                self.logger.info(f"Added {inline_b64_count} inline (base64) attachment(s)")
 
             # Send the message
             message.send()

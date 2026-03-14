@@ -510,3 +510,41 @@ def find_message_across_folders(ews_client, message_id):
         ToolExecutionError if message not found in any folder
     """
     return find_message_for_account(ews_client.account, message_id)
+
+
+def attach_inline_files(message, inline_attachments: list) -> int:
+    """Attach base64-encoded files to an EWS message or calendar item.
+
+    Args:
+        message: An exchangelib Message or CalendarItem object
+        inline_attachments: List of dicts with file_name, file_content (base64),
+                           optional content_type and is_inline
+
+    Returns:
+        Number of attachments added
+    """
+    if not inline_attachments:
+        return 0
+
+    import base64
+    from exchangelib import FileAttachment
+
+    count = 0
+    for att in inline_attachments:
+        file_name = att.get("file_name")
+        file_content = att.get("file_content")
+        if not file_name or not file_content:
+            continue
+
+        is_inline = att.get("is_inline", False)
+        file_attachment = FileAttachment(
+            name=file_name,
+            content=base64.b64decode(file_content),
+            content_type=att.get("content_type", "application/octet-stream"),
+            is_inline=is_inline,
+            content_id=file_name if is_inline else None,
+        )
+        message.attach(file_attachment)
+        count += 1
+
+    return count
