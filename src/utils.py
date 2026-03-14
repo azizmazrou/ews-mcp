@@ -560,3 +560,36 @@ def attach_inline_files(message, inline_attachments: list) -> int:
         count += 1
 
     return count
+
+
+# Shared schema for inline_attachments parameter (base64-encoded files)
+INLINE_ATTACHMENTS_SCHEMA = {
+    "inline_attachments": {
+        "description": "Attachments as base64-encoded content. Use when file paths are not accessible (e.g. in cloud/Docker environments).",
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "file_name": {
+                    "type": "string",
+                    "description": "File name with extension (e.g. 'report.pdf', 'image.png')"
+                },
+                "file_content": {
+                    "type": "string",
+                    "description": "Base64-encoded file content"
+                },
+                "content_type": {
+                    "type": "string",
+                    "default": "application/octet-stream",
+                    "description": "MIME type (e.g. 'image/png', 'application/pdf')"
+                },
+                "is_inline": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "True = embedded in body (use cid:file_name to reference in HTML)"
+                }
+            },
+            "required": ["file_name", "file_content"]
+        }
+    }
+}

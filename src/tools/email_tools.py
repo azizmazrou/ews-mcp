@@ -27,39 +27,7 @@ import re
 from .base import BaseTool
 from ..models import SendEmailRequest, EmailSearchRequest, EmailDetails
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str, attach_inline_files
-
-# Shared schema for inline_attachments parameter (base64-encoded files)
-INLINE_ATTACHMENTS_SCHEMA = {
-    "inline_attachments": {
-        "description": "Attachments as base64-encoded content. Use when file paths are not accessible (e.g. in cloud/Docker environments).",
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "file_name": {
-                    "type": "string",
-                    "description": "File name with extension (e.g. 'report.pdf', 'image.png')"
-                },
-                "file_content": {
-                    "type": "string",
-                    "description": "Base64-encoded file content"
-                },
-                "content_type": {
-                    "type": "string",
-                    "default": "application/octet-stream",
-                    "description": "MIME type (e.g. 'image/png', 'application/pdf')"
-                },
-                "is_inline": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "True = embedded in body (use cid:file_name to reference in HTML)"
-                }
-            },
-            "required": ["file_name", "file_content"]
-        }
-    }
-}
+from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA
 
 
 def extract_body_html(message) -> str:
@@ -558,55 +526,6 @@ class SendEmailTool(BaseTool):
             # Get account (primary or impersonated)
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
-
-            # Validate recipients before sending (helps catch invalid addresses early)
-            all_recipients = request.to + (request.cc or []) + (request.bcc or [])
-            invalid_recipients = []
-            unresolved_external = []
-
-            for recipient in all_recipients:
-                try:
-                    # Try to resolve the recipient via EWS
-                    resolved = account.protocol.resolve_names(
-                        names=[recipient],
-                        return_full_contact_data=False
-                    )
-                    # Check if resolution succeeded
-                    if not resolved or not any(resolved):
-                        # Recipient couldn't be resolved - determine if internal or external
-                        recipient_domain = recipient.split('@')[1] if '@' in recipient else ''
-                        sender_domain = account.primary_smtp_address.split('@')[1]
-
-                        if recipient_domain == sender_domain:
-                            # Internal address that can't be resolved - error
-                            invalid_recipients.append(recipient)
-                        else:
-                            # External address that can't be resolved - warning
-                            unresolved_external.append(recipient)
-                            self.logger.warning(f"Could not verify external recipient: {recipient}")
-                except Exception as e:
-                    # resolve_names failed - likely external address
-                    recipient_domain = recipient.split('@')[1] if '@' in recipient else ''
-                    sender_domain = account.primary_smtp_address.split('@')[1]
-                    if recipient_domain == sender_domain:
-                        invalid_recipients.append(recipient)
-                    else:
-                        unresolved_external.append(recipient)
-                        self.logger.warning(f"Could not validate recipient {recipient}: {e}")
-
-            # Raise error if any internal recipients are invalid
-            if invalid_recipients:
-                raise ToolExecutionError(
-                    f"Invalid or non-existent recipients: {', '.join(invalid_recipients)}"
-                )
-
-            # Warn user about unresolved external recipients
-            if unresolved_external:
-                self.logger.warning(
-                    f"Warning: {len(unresolved_external)} external recipient(s) could not be verified "
-                    f"and may bounce: {', '.join(unresolved_external[:3])}"
-                    + ("..." if len(unresolved_external) > 3 else "")
-                )
 
             # Clean and prepare email body
             email_body = request.body.strip()
