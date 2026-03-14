@@ -36,14 +36,14 @@ async def test_search_by_conversation_with_conversation_id(mock_ews_client):
 
     result = await tool.execute(
         conversation_id="conversation-123",
-        folder="inbox"
+        search_scope=["inbox"]
     )
 
     assert result["success"] is True
     assert result["conversation_id"] == "conversation-123"
-    assert result["thread_count"] == 2
-    assert len(result["emails"]) == 2
-    assert result["emails"][0]["subject"] == "Project Discussion"
+    assert result["total_results"] == 2
+    assert len(result["results"]) == 2
+    assert result["results"][0]["subject"] == "Project Discussion"
 
 
 @pytest.mark.asyncio
@@ -80,12 +80,12 @@ async def test_search_by_conversation_with_message_id(mock_ews_client):
 
     result = await tool.execute(
         message_id="email-1",
-        folder="inbox"
+        search_scope=["inbox"]
     )
 
     assert result["success"] is True
     assert result["conversation_id"] == "conversation-456"
-    assert result["thread_count"] == 2
+    assert result["total_results"] == 2
 
 
 @pytest.mark.asyncio
@@ -101,8 +101,8 @@ async def test_search_by_conversation_no_results(mock_ews_client):
     result = await tool.execute(conversation_id="nonexistent-conversation")
 
     assert result["success"] is True
-    assert result["thread_count"] == 0
-    assert len(result["emails"]) == 0
+    assert result["total_results"] == 0
+    assert len(result["results"]) == 0
 
 
 @pytest.mark.asyncio
@@ -111,7 +111,7 @@ async def test_search_by_conversation_missing_ids(mock_ews_client):
     tool = SearchByConversationTool(mock_ews_client)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        await tool.execute(folder="inbox")
+        await tool.execute(search_scope=["inbox"])
 
     assert "conversation_id or message_id" in str(exc_info.value)
 
