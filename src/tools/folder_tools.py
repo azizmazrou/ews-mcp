@@ -9,12 +9,12 @@ from ..utils import format_success_response, safe_get, ews_id_to_str
 
 
 class ListFoldersTool(BaseTool):
-    """Tool for listing mailbox folder hierarchy. Supports impersonation to manage folders in another user's mailbox."""
+    """Tool for listing mailbox folder hierarchy."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "list_folders",
-            "description": "Get mailbox folder hierarchy with folder details. Supports impersonation to manage folders in another user's mailbox.",
+            "description": "List mailbox folder hierarchy.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -188,12 +188,12 @@ class ListFoldersTool(BaseTool):
 
 
 class CreateFolderTool(BaseTool):
-    """Tool for creating new mailbox folders. Supports impersonation to manage folders in another user's mailbox."""
+    """Tool for creating new mailbox folders."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_folder",
-            "description": "Create a new folder in the mailbox. Supports impersonation to manage folders in another user's mailbox.",
+            "description": "Create a new mailbox folder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -276,12 +276,12 @@ class CreateFolderTool(BaseTool):
 
 
 class DeleteFolderTool(BaseTool):
-    """Tool for deleting mailbox folders. Supports impersonation to manage folders in another user's mailbox."""
+    """Tool for deleting mailbox folders."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_folder",
-            "description": "Delete a mailbox folder (moves to Deleted Items or permanently deletes). Supports impersonation to manage folders in another user's mailbox.",
+            "description": "Delete a mailbox folder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -367,12 +367,12 @@ class DeleteFolderTool(BaseTool):
 
 
 class RenameFolderTool(BaseTool):
-    """Tool for renaming mailbox folders. Supports impersonation to manage folders in another user's mailbox."""
+    """Tool for renaming mailbox folders."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "rename_folder",
-            "description": "Rename an existing mailbox folder. Supports impersonation to manage folders in another user's mailbox.",
+            "description": "Rename a mailbox folder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -449,12 +449,12 @@ class RenameFolderTool(BaseTool):
 
 
 class MoveFolderTool(BaseTool):
-    """Tool for moving folders to a new parent folder. Supports impersonation to manage folders in another user's mailbox."""
+    """Tool for moving folders to a new parent folder."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "move_folder",
-            "description": "Move a folder to a new parent folder. Supports impersonation to manage folders in another user's mailbox.",
+            "description": "Move a folder to a new parent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

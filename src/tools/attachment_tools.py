@@ -11,12 +11,12 @@ from ..utils import format_success_response, safe_get, find_message_across_folde
 
 
 class ListAttachmentsTool(BaseTool):
-    """Tool for listing email attachments. Supports impersonation to access attachments in another user's mailbox."""
+    """Tool for listing email attachments."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "list_attachments",
-            "description": "List all attachments for a specific email message. Supports impersonation to access attachments in another user's mailbox",
+            "description": "List attachments for an email message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -104,12 +104,12 @@ class ListAttachmentsTool(BaseTool):
 
 
 class DownloadAttachmentTool(BaseTool):
-    """Tool for downloading email attachments. Supports impersonation to access attachments in another user's mailbox."""
+    """Tool for downloading email attachments."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "download_attachment",
-            "description": "Download an email attachment by message ID and attachment ID. Supports impersonation to access attachments in another user's mailbox",
+            "description": "Download an attachment by name or index.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -244,12 +244,12 @@ class DownloadAttachmentTool(BaseTool):
 
 
 class AddAttachmentTool(BaseTool):
-    """Tool for adding attachments to draft or existing emails. Supports impersonation to access attachments in another user's mailbox."""
+    """Tool for adding attachments to draft or existing emails."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "add_attachment",
-            "description": "Add an attachment to a draft or existing email message. Supports impersonation to access attachments in another user's mailbox",
+            "description": "Add an attachment to a draft or existing email.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -384,12 +384,12 @@ class AddAttachmentTool(BaseTool):
 
 
 class DeleteAttachmentTool(BaseTool):
-    """Tool for removing attachments from email messages. Supports impersonation to access attachments in another user's mailbox."""
+    """Tool for removing attachments from email messages."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_attachment",
-            "description": "Remove an attachment from an email message. Supports impersonation to access attachments in another user's mailbox",
+            "description": "Remove an attachment from an email.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -509,12 +509,12 @@ class DeleteAttachmentTool(BaseTool):
 
 
 class ReadAttachmentTool(BaseTool):
-    """Tool for reading and extracting text content from email attachments. Supports impersonation to access attachments in another user's mailbox."""
+    """Tool for reading and extracting text content from email attachments."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "read_attachment",
-            "description": "Extract text content from email attachments (PDF, DOCX, XLSX, TXT). Supports Arabic (UTF-8) text. Supports impersonation to access attachments in another user's mailbox",
+            "description": "Extract text content from attachments (PDF, DOCX, XLSX, TXT).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

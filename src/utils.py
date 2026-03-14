@@ -467,13 +467,14 @@ def find_message_for_account(account, message_id):
         ("junk", account.junk),
     ]
 
-    # Also search custom subfolders under inbox (like CC, Archive, etc.)
-    try:
-        for child in account.inbox.children:
-            child_name = safe_get(child, 'name', 'unknown')
-            folders_to_search.append((f"inbox/{child_name}", child))
-    except Exception:
-        pass  # If we can't list subfolders, continue with standard folders
+    # Also search subfolders of all standard folders (not just inbox)
+    for parent_name, parent_folder in list(folders_to_search):
+        try:
+            for child in parent_folder.children:
+                child_name = safe_get(child, 'name', 'unknown')
+                folders_to_search.append((f"{parent_name}/{child_name}", child))
+        except Exception:
+            pass
 
     # Search each folder for the message
     for folder_name, folder in folders_to_search:
@@ -482,14 +483,25 @@ def find_message_for_account(account, message_id):
             if item:
                 return item
         except Exception:
-            # Message not in this folder, continue searching
             continue
 
-    # If we get here, message wasn't found in any folder
+    # Fallback: search from root recursively for custom top-level folders
+    try:
+        for folder in account.root.walk():
+            if folder in [f for _, f in folders_to_search]:
+                continue
+            try:
+                item = folder.get(id=message_id)
+                if item:
+                    return item
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     raise ToolExecutionError(
         f"Message not found: {message_id}. "
-        f"The message may have been deleted, moved to a folder not in the search path, "
-        f"or the ID may be invalid."
+        f"The message may have been deleted or the ID may be invalid."
     )
 
 
