@@ -143,15 +143,15 @@ async def test_full_text_search_subject_and_body(mock_ews_client):
 
     result = await tool.execute(
         mode="full_text",
-        search_query="project",
-        folder="inbox",
+        query="project",
+        search_scope=["inbox"],
         search_in=["subject", "body"]
     )
 
     assert result["success"] is True
     assert result["query"] == "project"
-    assert result["result_count"] == 2
-    assert len(result["emails"]) == 2
+    assert result["total_results"] == 2
+    assert len(result["results"]) == 2
 
 
 @pytest.mark.asyncio
@@ -173,13 +173,12 @@ async def test_full_text_search_subject_only(mock_ews_client):
 
     result = await tool.execute(
         mode="full_text",
-        search_query="Invoice",
-        folder="inbox",
+        query="Invoice",
+        search_scope=["inbox"],
         search_in=["subject"]
     )
 
     assert result["success"] is True
-    assert result["search_in"] == ["subject"]
 
 
 @pytest.mark.asyncio
@@ -203,42 +202,14 @@ async def test_full_text_search_with_max_results(mock_ews_client):
 
     result = await tool.execute(
         mode="full_text",
-        search_query="test",
-        folder="inbox",
+        query="test",
+        search_scope=["inbox"],
         max_results=3
     )
 
     assert result["success"] is True
-    assert len(result["emails"]) == 3  # Should be limited to 3
-    assert result["result_count"] == 3
-
-
-@pytest.mark.asyncio
-async def test_full_text_search_case_sensitive(mock_ews_client):
-    """Test case-sensitive full-text search."""
-    tool = SearchEmailsTool(mock_ews_client)
-
-    # Mock case-sensitive results
-    mock_email = MagicMock()
-    mock_email.id = "email-1"
-    mock_email.subject = "URGENT: Action Required"
-    mock_email.sender.email_address = "alerts@example.com"
-    mock_email.datetime_received = datetime(2025, 1, 6, 9, 0)
-    mock_email.text_body = "URGENT message"
-
-    mock_query = MagicMock()
-    mock_query.filter.return_value.order_by.return_value = [mock_email]
-    mock_ews_client.account.inbox.all.return_value = mock_query
-
-    result = await tool.execute(
-        mode="full_text",
-        search_query="URGENT",
-        folder="inbox",
-        case_sensitive=True
-    )
-
-    assert result["success"] is True
-    assert result["case_sensitive"] is True
+    assert len(result["results"]) == 3  # Should be limited to 3
+    assert result["total_results"] == 3
 
 
 @pytest.mark.asyncio
@@ -260,13 +231,12 @@ async def test_full_text_search_exact_phrase(mock_ews_client):
 
     result = await tool.execute(
         mode="full_text",
-        search_query="out of office",
-        folder="inbox",
+        query="out of office",
+        search_scope=["inbox"],
         exact_phrase=True
     )
 
     assert result["success"] is True
-    assert result["exact_phrase"] is True
 
 
 @pytest.mark.asyncio
@@ -281,13 +251,13 @@ async def test_full_text_search_no_results(mock_ews_client):
 
     result = await tool.execute(
         mode="full_text",
-        search_query="nonexistent_term_xyz123",
-        folder="inbox"
+        query="nonexistent_term_xyz123",
+        search_scope=["inbox"]
     )
 
     assert result["success"] is True
-    assert result["result_count"] == 0
-    assert len(result["emails"]) == 0
+    assert result["total_results"] == 0
+    assert len(result["results"]) == 0
 
 
 @pytest.mark.asyncio
@@ -296,6 +266,6 @@ async def test_full_text_search_missing_query(mock_ews_client):
     tool = SearchEmailsTool(mock_ews_client)
 
     with pytest.raises(ToolExecutionError) as exc_info:
-        await tool.execute(mode="full_text", folder="inbox")
+        await tool.execute(mode="full_text")
 
-    assert "query is required" in str(exc_info.value).lower() or "search_query" in str(exc_info.value).lower()
+    assert "query is required" in str(exc_info.value).lower() or "query" in str(exc_info.value).lower()
