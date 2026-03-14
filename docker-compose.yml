@@ -1,6 +1,6 @@
 version: '3.8'
 
-# EWS MCP v3.0 - Person-Centric Exchange Server
+# EWS MCP v3.3 - Person-Centric Exchange Server
 # Build from source for development/testing
 
 services:

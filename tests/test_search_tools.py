@@ -38,7 +38,7 @@ async def test_advanced_search_tool(mock_ews_client):
         from_address="boss@example.com",
         has_attachments=True,
         importance="High",
-        folders=["inbox"],
+        search_scope=["inbox"],
         max_results=100,
         sort_by="datetime_received",
         sort_order="descending"
@@ -66,7 +66,7 @@ async def test_advanced_search_with_date_range(mock_ews_client):
         subject_contains="Report",
         start_date="2025-01-01T00:00:00+00:00",
         end_date="2025-01-31T23:59:59+00:00",
-        folders=["inbox"],
+        search_scope=["inbox"],
         max_results=50
     )
 
@@ -121,7 +121,7 @@ async def test_advanced_search_multiple_folders(mock_ews_client):
     result = await tool.execute(
         mode="advanced",
         keywords="email",
-        folders=["inbox", "sent"],
+        search_scope=["inbox", "sent"],
         max_results=100
     )
 
@@ -137,7 +137,7 @@ async def test_advanced_search_empty_filter(mock_ews_client):
     with pytest.raises(Exception) as exc_info:
         await tool.execute(
             mode="advanced",
-            folders=["inbox"]
+            search_scope=["inbox"]
         )
 
     assert "filter" in str(exc_info.value).lower() or "empty" in str(exc_info.value).lower() or "required" in str(exc_info.value).lower()
@@ -152,7 +152,7 @@ async def test_advanced_search_invalid_folder(mock_ews_client):
         await tool.execute(
             mode="advanced",
             subject_contains="test",
-            folders=["nonexistent_folder"]
+            search_scope=["nonexistent_folder"]
         )
 
     assert "no valid folders" in str(exc_info.value).lower() or "folder" in str(exc_info.value).lower()

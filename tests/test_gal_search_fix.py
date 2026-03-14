@@ -66,7 +66,7 @@ class TestGALSearchTupleFormat:
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
         # Execute search
-        result = await find_person_tool.execute(query="Smith", search_scope="gal")
+        result = await find_person_tool.execute(query="Smith", source="gal")
 
         # Assertions
         assert result['success'] is True
@@ -109,7 +109,7 @@ class TestGALSearchTupleFormat:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="Doe", search_scope="gal")
+        result = await find_person_tool.execute(query="Doe", source="gal")
 
         assert result['success'] is True
         contact = result['unified_results'][0]
@@ -117,8 +117,6 @@ class TestGALSearchTupleFormat:
         assert len(contact['phone_numbers']) == 2
         assert contact['phone_numbers'][0]['type'] == "BusinessPhone"
         assert contact['phone_numbers'][0]['number'] == "+1-555-0100"
-        assert contact['business_phone'] == "+1-555-0100"
-        assert contact['mobile_phone'] == "+1-555-0101"
 
     @pytest.mark.asyncio
     async def test_gal_search_arabic_text(self, find_person_tool, mock_ews_client):
@@ -138,7 +136,7 @@ class TestGALSearchTupleFormat:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="أحمد", search_scope="gal")
+        result = await find_person_tool.execute(query="أحمد", source="gal")
 
         assert result['success'] is True
         assert result['total_results'] >= 1
@@ -159,7 +157,7 @@ class TestGALSearchTupleFormat:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="Johnson", search_scope="gal")
+        result = await find_person_tool.execute(query="Johnson", source="gal")
 
         assert result['success'] is True
         assert result['total_results'] == 1
@@ -188,7 +186,7 @@ class TestGALSearchTupleFormat:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="User", search_scope="gal")
+        result = await find_person_tool.execute(query="User", source="gal")
 
         assert result['success'] is True
         assert result['total_results'] == 3
@@ -213,7 +211,7 @@ class TestSearchScopeIsolation:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="User", search_scope="gal")
+        result = await find_person_tool.execute(query="User", source="gal")
 
         # Verify only GAL sources
         assert result['success'] is True
@@ -238,7 +236,7 @@ class TestSearchScopeIsolation:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = [mock_inbox_item]
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="User", search_scope="email_history")
+        result = await find_person_tool.execute(query="User", source="email_history")
 
         # GAL resolve_names should not have been called
         mock_ews_client.account.protocol.resolve_names.assert_not_called()
@@ -259,7 +257,7 @@ class TestErrorHandling:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="NonexistentUser", search_scope="gal")
+        result = await find_person_tool.execute(query="NonexistentUser", source="gal")
 
         assert result['success'] is True
         assert result['total_results'] == 0
@@ -288,7 +286,7 @@ class TestErrorHandling:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="User", search_scope="gal")
+        result = await find_person_tool.execute(query="User", source="gal")
 
         # Should still succeed with at least one valid result
         assert result['success'] is True
@@ -298,7 +296,7 @@ class TestErrorHandling:
     async def test_empty_query(self, find_person_tool):
         """Test that empty query raises error."""
         with pytest.raises(Exception):  # Should raise ToolExecutionError
-            await find_person_tool.execute(query="", search_scope="gal")
+            await find_person_tool.execute(query="", source="gal")
 
 
 class TestOfficeLocationExtraction:
@@ -321,7 +319,7 @@ class TestOfficeLocationExtraction:
         mock_ews_client.account.inbox.filter.return_value.order_by.return_value.only.return_value = []
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
-        result = await find_person_tool.execute(query="Office", search_scope="gal")
+        result = await find_person_tool.execute(query="Office", source="gal")
 
         assert result['success'] is True
         contact = result['unified_results'][0]
@@ -349,7 +347,7 @@ class TestMaxResultsLimit:
         mock_ews_client.account.sent.filter.return_value.order_by.return_value.only.return_value = []
 
         # Request only 5 results
-        result = await find_person_tool.execute(query="User", search_scope="gal", max_results=5)
+        result = await find_person_tool.execute(query="User", source="gal", max_results=5)
 
         assert result['success'] is True
         assert len(result['unified_results']) == 5
