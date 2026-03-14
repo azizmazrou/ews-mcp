@@ -16,7 +16,7 @@ class CreateContactTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_contact",
-            "description": "Create a new contact in Exchange. Supports impersonation to access another user's contacts",
+            "description": "Create a new contact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -131,7 +131,7 @@ class SearchContactsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "search_contacts",
-            "description": "Search contacts by name or email. Supports impersonation to access another user's contacts",
+            "description": "Search contacts by name or email.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -228,7 +228,7 @@ class GetContactsTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "get_contacts",
-            "description": "List all contacts. Supports impersonation to access another user's contacts",
+            "description": "List all contacts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -301,7 +301,7 @@ class UpdateContactTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "update_contact",
-            "description": "Update an existing contact. Supports impersonation to access another user's contacts",
+            "description": "Update an existing contact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -398,7 +398,7 @@ class DeleteContactTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_contact",
-            "description": "Delete a contact. Supports impersonation to access another user's contacts",
+            "description": "Delete a contact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -448,7 +448,7 @@ class ResolveNamesTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "resolve_names",
-            "description": "Resolve partial names or email addresses to full contact information from Active Directory or Contacts. Supports impersonation to access another user's contacts",
+            "description": "Resolve partial names or emails to full contact info from Active Directory.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
