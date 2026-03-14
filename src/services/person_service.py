@@ -339,20 +339,28 @@ class PersonService:
         try:
             start_date = datetime.now(self.ews_client.account.default_timezone) - timedelta(days=days_back)
 
-            # Determine if this is a domain search
+            # Determine search type
             is_domain_search = query.startswith("@")
             domain_query = query[1:].lower() if is_domain_search else None
+            is_email_query = not is_domain_search and '@' in query
 
             # Track contacts: email -> info
             contacts: Dict[str, Dict[str, Any]] = {}
 
             MAX_ITEMS = 2000  # Limit to prevent timeouts
 
-            # Search Inbox
+            # Search Inbox - use server-side filter when query is an email address
             inbox = self.ews_client.account.inbox
-            inbox_items = inbox.filter(
-                datetime_received__gte=start_date
-            ).order_by('-datetime_received').only('sender', 'datetime_received')
+            if is_email_query:
+                # Server-side filter by sender email - much faster than client-side
+                inbox_items = inbox.filter(
+                    datetime_received__gte=start_date,
+                    sender__email_address=query
+                ).order_by('-datetime_received').only('sender', 'datetime_received')
+            else:
+                inbox_items = inbox.filter(
+                    datetime_received__gte=start_date
+                ).order_by('-datetime_received').only('sender', 'datetime_received')
 
             items_scanned = 0
             for item in inbox_items:
@@ -365,14 +373,15 @@ class PersonService:
                     email = safe_get(sender, 'email_address', '').lower()
                     name = safe_get(sender, 'name', '')
 
-                    # Apply filters
-                    if domain_query:
-                        if not email.endswith(f"@{domain_query}"):
-                            continue
-                    elif query:
-                        query_lower = query.lower()
-                        if query_lower not in name.lower() and query_lower not in email:
-                            continue
+                    # Apply client-side filters only when not already filtered server-side
+                    if not is_email_query:
+                        if domain_query:
+                            if not email.endswith(f"@{domain_query}"):
+                                continue
+                        elif query:
+                            query_lower = query.lower()
+                            if query_lower not in name.lower() and query_lower not in email:
+                                continue
 
                     # Track contact
                     if email:
@@ -412,7 +421,11 @@ class PersonService:
                     name = safe_get(recipient, 'name', '')
 
                     # Apply filters
-                    if domain_query:
+                    if is_email_query:
+                        # Exact email match
+                        if email != query.lower():
+                            continue
+                    elif domain_query:
                         if not email.endswith(f"@{domain_query}"):
                             continue
                     elif query:

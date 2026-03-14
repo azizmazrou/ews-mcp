@@ -251,34 +251,31 @@ class GALAdapter:
         Strategy 4: Fuzzy matching.
 
         Last resort: try to match similar names using fuzzy matching.
-
-        This handles typos and variations like:
-        - "Ahmed" matches "Ahmad"
-        - "Al-Rashid" matches "AlRashid"
+        Uses the first character of the query as a single broad GAL search
+        instead of iterating over hardcoded prefixes.
         """
         try:
-            # Get a broad set of GAL results
-            # Try searching with common prefixes
+            # Single broad query using the first character of the search term
+            prefix = query[0] if query else ''
+            if not prefix:
+                return []
+
             all_persons = []
-
-            for prefix in ['A', 'M', 'S', 'K', 'F', 'H', 'N', 'R']:
-                try:
-                    results = self.ews_client.account.protocol.resolve_names(
-                        names=[prefix],
-                        return_full_contact_data=False  # Don't need full data for fuzzy
-                    )
-
-                    if results:
-                        for result in results[:10]:  # Limit per prefix
-                            try:
-                                person = self._parse_resolve_result(result, False)
-                                if person:
-                                    all_persons.append(person)
-                            except:
-                                continue
-
-                except:
-                    continue
+            try:
+                results = self.ews_client.account.protocol.resolve_names(
+                    names=[prefix],
+                    return_full_contact_data=False
+                )
+                if results:
+                    for result in results[:80]:  # Limit total results
+                        try:
+                            person = self._parse_resolve_result(result, False)
+                            if person:
+                                all_persons.append(person)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
             if not all_persons:
                 self.logger.debug("    No GAL entries for fuzzy matching")
@@ -289,32 +286,21 @@ class GALAdapter:
             query_lower = query.lower()
 
             for person in all_persons:
-                # Calculate similarity scores
                 name_score = SequenceMatcher(
-                    None,
-                    query_lower,
-                    person.name.lower()
+                    None, query_lower, person.name.lower()
                 ).ratio()
 
                 email_score = 0.0
                 if person.primary_email:
                     email_score = SequenceMatcher(
-                        None,
-                        query_lower,
-                        person.primary_email.lower()
+                        None, query_lower, person.primary_email.lower()
                     ).ratio()
 
-                # Use best score
                 score = max(name_score, email_score)
-
-                # Threshold: 60% similarity
                 if score >= 0.6:
                     matches.append((score, person))
 
-            # Sort by score
             matches.sort(reverse=True, key=lambda x: x[0])
-
-            # Get top matches
             fuzzy_results = [person for _, person in matches[:20]]
 
             if fuzzy_results:
