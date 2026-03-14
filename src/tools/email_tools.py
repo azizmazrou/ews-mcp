@@ -745,18 +745,24 @@ class ReadEmailsTool(BaseTool):
 
 
 class SearchEmailsTool(BaseTool):
-    """Tool for searching emails with filters."""
+    """Unified email search tool with quick/advanced/full_text modes."""
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "search_emails",
-            "description": "Search emails by subject, sender, date range, or other filters.",
+            "description": "Search emails with quick, advanced, or full-text modes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["quick", "advanced", "full_text"],
+                        "description": "Search mode: quick (filter by subject/sender/date), advanced (multi-folder with sort/categories/importance), full_text (search across subject/body/attachments)",
+                        "default": "quick"
+                    },
                     "folder": {
                         "type": "string",
-                        "description": "Folder to search in (standard names: inbox, sent, drafts; paths: Inbox/CC; or folder ID)",
+                        "description": "Folder to search (quick mode). Standard names: inbox, sent, drafts; paths: Inbox/CC; or folder ID",
                         "default": "inbox"
                     },
                     "subject_contains": {
@@ -766,6 +772,10 @@ class SearchEmailsTool(BaseTool):
                     "from_address": {
                         "type": "string",
                         "description": "Filter by sender email address"
+                    },
+                    "to_address": {
+                        "type": "string",
+                        "description": "Filter by recipient email (advanced mode)"
                     },
                     "has_attachments": {
                         "type": "boolean",
@@ -789,6 +799,57 @@ class SearchEmailsTool(BaseTool):
                         "default": 50,
                         "maximum": 1000
                     },
+                    "keywords": {
+                        "type": "string",
+                        "description": "Keywords to search in subject and body (advanced mode)"
+                    },
+                    "body_contains": {
+                        "type": "string",
+                        "description": "Filter by body containing text (advanced mode)"
+                    },
+                    "importance": {
+                        "type": "string",
+                        "enum": ["Low", "Normal", "High"],
+                        "description": "Filter by importance level (advanced mode)"
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by email categories (advanced mode)"
+                    },
+                    "search_scope": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Folders to search (advanced/full_text mode, e.g. ['inbox', 'sent'])",
+                        "default": ["inbox"]
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["datetime_received", "datetime_sent", "from", "subject", "importance"],
+                        "description": "Sort field (advanced mode)",
+                        "default": "datetime_received"
+                    },
+                    "sort_order": {
+                        "type": "string",
+                        "enum": ["ascending", "descending"],
+                        "description": "Sort order (advanced mode)",
+                        "default": "descending"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Full-text search query (full_text mode)"
+                    },
+                    "search_in": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["subject", "body", "attachments"]},
+                        "description": "Where to search (full_text mode)",
+                        "default": ["subject", "body"]
+                    },
+                    "exact_phrase": {
+                        "type": "boolean",
+                        "description": "Search for exact phrase match (full_text mode)",
+                        "default": False
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to search in (requires impersonation/delegate access)"
@@ -798,22 +859,30 @@ class SearchEmailsTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        """Search emails with filters."""
+        """Route to appropriate search mode."""
+        mode = kwargs.get("mode", "quick")
+
+        if mode == "advanced":
+            return await self._search_advanced(**kwargs)
+        elif mode == "full_text":
+            return await self._search_full_text(**kwargs)
+        else:
+            return await self._search_quick(**kwargs)
+
+    async def _search_quick(self, **kwargs) -> Dict[str, Any]:
+        """Quick search: filter by subject, sender, date, read status, attachments."""
         from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
         from exchangelib.errors import ErrorTimeoutExpired
         import socket
 
-        # Get target mailbox for impersonation
         target_mailbox = kwargs.get("target_mailbox")
 
         try:
-            # Get account (primary or impersonated)
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
             # Auto-add date range to prevent timeouts in large mailboxes
             if not kwargs.get("start_date") and not kwargs.get("end_date"):
-                # If no other specific filters are provided, enforce a default date range
                 has_filters = (
                     kwargs.get("subject_contains") or
                     kwargs.get("from_address") or
@@ -822,74 +891,51 @@ class SearchEmailsTool(BaseTool):
                 )
 
                 if not has_filters:
-                    # No filters at all - default to last 30 days to prevent timeout
                     from datetime import timedelta
                     default_days_back = 30
                     auto_start_date = datetime.now() - timedelta(days=default_days_back)
                     kwargs["start_date"] = auto_start_date.isoformat()
                     self.logger.info(
-                        f"No filters or date range provided. Automatically limiting search to last {default_days_back} days "
-                        f"to prevent timeout. Specify start_date/end_date to search a different range."
-                    )
-                else:
-                    # Has filters but no date range - warn but allow
-                    self.logger.warning(
-                        "Searching without date range may be slow for large mailboxes. "
-                        "Consider adding start_date/end_date for better performance."
+                        f"No filters or date range provided. Limiting to last {default_days_back} days."
                     )
 
-            # Get folder - supports standard names, paths, and folder IDs
             folder_name = kwargs.get("folder", "inbox")
             folder = await resolve_folder_for_account(account, folder_name)
-            self.logger.info(f"Resolved folder '{folder_name}' to: {safe_get(folder, 'name', folder_name)} in mailbox: {mailbox}")
 
-            # Build query
             query = folder.all()
 
-            # Apply filters
             if kwargs.get("subject_contains"):
                 query = query.filter(subject__contains=kwargs["subject_contains"])
-
             if kwargs.get("from_address"):
                 query = query.filter(sender=kwargs["from_address"])
-
             if kwargs.get("has_attachments") is not None:
                 query = query.filter(has_attachments=kwargs["has_attachments"])
-
             if kwargs.get("is_read") is not None:
                 query = query.filter(is_read=kwargs["is_read"])
-
             if kwargs.get("start_date"):
                 start = parse_datetime_tz_aware(kwargs["start_date"])
                 query = query.filter(datetime_received__gte=start)
-
             if kwargs.get("end_date"):
                 end = parse_datetime_tz_aware(kwargs["end_date"])
                 query = query.filter(datetime_received__lte=end)
 
-            # Order and limit
             query = query.order_by('-datetime_received')
             max_results = kwargs.get("max_results", 50)
 
-            # Retry wrapper for EWS query execution
             @retry(
                 stop=stop_after_attempt(2),
                 wait=wait_exponential(multiplier=2, min=4, max=10),
                 retry=retry_if_exception_type((ErrorTimeoutExpired, socket.timeout))
             )
             def execute_query():
-                """Execute EWS query with retry logic."""
                 results = []
                 for item in query[:max_results]:
-                    # Get sender email safely
                     sender = safe_get(item, "sender", None)
                     from_email = ""
                     if sender and hasattr(sender, "email_address"):
                         from_email = sender.email_address or ""
 
-                    # Get text body safely
                     text_body = safe_get(item, "text_body", "") or ""
-
                     email_data = {
                         "message_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
                         "subject": safe_get(item, "subject", "") or "",
@@ -905,10 +951,7 @@ class SearchEmailsTool(BaseTool):
                     results.append(email_data)
                 return results
 
-            # Execute with retry
             emails = execute_query()
-
-            self.logger.info(f"Found {len(emails)} emails matching search criteria in mailbox: {mailbox}")
 
             return format_success_response(
                 f"Found {len(emails)} matching emails",
@@ -919,19 +962,236 @@ class SearchEmailsTool(BaseTool):
 
         except (ErrorTimeoutExpired, socket.timeout) as e:
             self.logger.error(f"Search timed out: {e}")
-            # Provide helpful error message with suggestions
-            error_msg = (
-                f"Search timed out. Try these optimizations:\n"
-                f"1. Add a date range (start_date and end_date)\n"
-                f"2. Reduce max_results (currently {kwargs.get('max_results', 50)})\n"
-                f"3. Add more specific filters\n"
-                f"4. Increase REQUEST_TIMEOUT in .env (current: {self.ews_client.config.request_timeout}s)\n"
-                f"Example: search_emails(subject_contains='Re: xxx', start_date='2024-11-01', max_results=20)"
+            raise ToolExecutionError(
+                f"Search timed out. Try adding start_date/end_date, reducing max_results, or adding more filters."
             )
-            raise ToolExecutionError(error_msg)
+        except ToolExecutionError:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to search emails: {e}")
             raise ToolExecutionError(f"Failed to search emails: {e}")
+
+    async def _search_advanced(self, **kwargs) -> Dict[str, Any]:
+        """Advanced search: multi-folder with sort, categories, importance, keywords."""
+        target_mailbox = kwargs.get("target_mailbox")
+        search_scope = kwargs.get("search_scope", ["inbox"])
+        max_results = kwargs.get("max_results", 250)
+        sort_by = kwargs.get("sort_by", "datetime_received")
+        sort_order = kwargs.get("sort_order", "descending")
+
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
+            folder_map = {
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk
+            }
+
+            folders = []
+            for folder_name in search_scope:
+                folder = folder_map.get(folder_name.lower())
+                if folder:
+                    folders.append(folder)
+
+            if not folders:
+                raise ToolExecutionError(f"No valid folders found in search_scope: {search_scope}")
+
+            # Build query filters
+            q_filters = []
+
+            if kwargs.get("keywords"):
+                kw = kwargs["keywords"]
+                q_filters.append(Q(subject__contains=kw) | Q(body__contains=kw))
+            if kwargs.get("from_address"):
+                q_filters.append(Q(sender=kwargs["from_address"]))
+            if kwargs.get("to_address"):
+                q_filters.append(Q(to_recipients__contains=kwargs["to_address"]))
+            if kwargs.get("subject_contains"):
+                q_filters.append(Q(subject__contains=kwargs["subject_contains"]))
+            if kwargs.get("body_contains"):
+                q_filters.append(Q(body__contains=kwargs["body_contains"]))
+            if "has_attachments" in kwargs and kwargs["has_attachments"] is not None:
+                q_filters.append(Q(has_attachments=kwargs["has_attachments"]))
+            if kwargs.get("importance"):
+                q_filters.append(Q(importance=kwargs["importance"]))
+            if kwargs.get("categories"):
+                q_filters.append(Q(categories__contains=kwargs["categories"]))
+            if "is_read" in kwargs and kwargs["is_read"] is not None:
+                q_filters.append(Q(is_read=kwargs["is_read"]))
+            if kwargs.get("start_date"):
+                start_date = parse_datetime_tz_aware(kwargs["start_date"])
+                if start_date:
+                    q_filters.append(Q(datetime_received__gte=start_date))
+            if kwargs.get("end_date"):
+                end_date = parse_datetime_tz_aware(kwargs["end_date"])
+                if end_date:
+                    q_filters.append(Q(datetime_received__lte=end_date))
+
+            if not q_filters:
+                raise ToolExecutionError("No valid search filters provided for advanced mode")
+
+            combined_filter = q_filters[0]
+            for q_filter in q_filters[1:]:
+                combined_filter &= q_filter
+
+            all_results = []
+            for folder in folders:
+                try:
+                    query = folder.filter(combined_filter)
+                    sort_field = sort_by
+                    if sort_order == "descending" and not sort_field.startswith('-'):
+                        sort_field = f"-{sort_field}"
+                    query = query.order_by(sort_field)
+
+                    results_per_folder = max_results // len(folders) if len(folders) > 1 else max_results
+                    for email in query[:results_per_folder]:
+                        all_results.append({
+                            "message_id": safe_get(email, 'id', ''),
+                            "subject": safe_get(email, 'subject', ''),
+                            "from": safe_get(email, 'sender', {}).email_address if hasattr(safe_get(email, 'sender', {}), 'email_address') else '',
+                            "to": [r.email_address for r in safe_get(email, 'to_recipients', []) if hasattr(r, 'email_address')],
+                            "received_time": safe_get(email, 'datetime_received', '').isoformat() if safe_get(email, 'datetime_received') else None,
+                            "is_read": safe_get(email, 'is_read', False),
+                            "has_attachments": safe_get(email, 'has_attachments', False),
+                            "importance": safe_get(email, 'importance', 'Normal'),
+                            "categories": safe_get(email, 'categories', []),
+                            "body_preview": truncate_text(safe_get(email, 'text_body', ''), 200),
+                            "folder": folder.name
+                        })
+                except Exception as e:
+                    self.logger.warning(f"Error searching folder {folder.name}: {e}")
+                    continue
+
+            if len(folders) > 1:
+                reverse = (sort_order == "descending")
+                if sort_by == "datetime_received":
+                    all_results.sort(key=lambda x: x.get("received_time", ""), reverse=reverse)
+                elif sort_by == "subject":
+                    all_results.sort(key=lambda x: x.get("subject", ""), reverse=reverse)
+
+            all_results = all_results[:max_results]
+
+            return format_success_response(
+                f"Found {len(all_results)} result(s)",
+                results=all_results,
+                count=len(all_results),
+                folders_searched=search_scope,
+                mailbox=mailbox
+            )
+
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to perform advanced search: {e}")
+            raise ToolExecutionError(f"Failed to perform advanced search: {e}")
+
+    async def _search_full_text(self, **kwargs) -> Dict[str, Any]:
+        """Full-text search across subject, body, and attachment names."""
+        target_mailbox = kwargs.get("target_mailbox")
+        query_text = kwargs.get("query")
+        search_scope = kwargs.get("search_scope", ["inbox", "sent"])
+        max_results = kwargs.get("max_results", 50)
+        search_in = kwargs.get("search_in", ["subject", "body"])
+        exact_phrase = kwargs.get("exact_phrase", False)
+
+        if not query_text:
+            raise ToolExecutionError("query is required for full_text mode")
+
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
+            search_query = query_text.lower()
+
+            folder_map = {
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "deleted": account.trash,
+                "junk": account.junk
+            }
+
+            folders_to_search = []
+            for folder_name in search_scope:
+                folder = folder_map.get(folder_name.lower())
+                if folder:
+                    folders_to_search.append(folder)
+
+            if not folders_to_search:
+                raise ToolExecutionError("No valid folders to search")
+
+            all_results = []
+            for folder in folders_to_search:
+                try:
+                    q_filters = []
+                    if "subject" in search_in:
+                        q_filters.append(Q(subject__contains=query_text))
+                    if "body" in search_in:
+                        q_filters.append(Q(body__contains=query_text))
+
+                    if q_filters:
+                        combined_filter = q_filters[0]
+                        for f in q_filters[1:]:
+                            combined_filter |= f
+
+                        items = folder.filter(combined_filter).order_by('-datetime_received')[:max_results]
+
+                        for item in items:
+                            item_text = ""
+                            if "subject" in search_in:
+                                item_text += safe_get(item, 'subject', '').lower() + " "
+                            if "body" in search_in:
+                                item_text += safe_get(item, 'text_body', '').lower() + " "
+
+                            attachment_match = False
+                            if "attachments" in search_in and hasattr(item, 'attachments') and item.attachments:
+                                for att in item.attachments:
+                                    att_name = safe_get(att, 'name', '').lower()
+                                    if search_query in att_name:
+                                        attachment_match = True
+                                        break
+
+                            if exact_phrase and search_query not in item_text and not attachment_match:
+                                continue
+
+                            result = {
+                                "id": ews_id_to_str(safe_get(item, 'id', None)) or '',
+                                "subject": safe_get(item, 'subject', ''),
+                                "from": safe_get(safe_get(item, 'sender', {}), 'email_address', ''),
+                                "to": [r.email_address for r in safe_get(item, 'to_recipients', []) if hasattr(r, 'email_address')],
+                                "received": safe_get(item, 'datetime_received', '').isoformat() if safe_get(item, 'datetime_received') else None,
+                                "is_read": safe_get(item, 'is_read', False),
+                                "has_attachments": safe_get(item, 'has_attachments', False),
+                                "folder": safe_get(folder, 'name', 'Unknown'),
+                                "preview": safe_get(item, 'text_body', '')[:200] if "body" in search_in else ""
+                            }
+                            all_results.append(result)
+
+                except Exception as e:
+                    self.logger.warning(f"Error searching folder {safe_get(folder, 'name', 'Unknown')}: {e}")
+                    continue
+
+            all_results.sort(key=lambda x: x.get('received', ''), reverse=True)
+            all_results = all_results[:max_results]
+
+            return format_success_response(
+                f"Found {len(all_results)} emails matching '{query_text}'",
+                results=all_results,
+                query=query_text,
+                total_results=len(all_results),
+                searched_folders=search_scope,
+                mailbox=mailbox
+            )
+
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to perform full-text search: {e}")
+            raise ToolExecutionError(f"Failed to perform full-text search: {e}")
 
 
 class GetEmailDetailsTool(BaseTool):

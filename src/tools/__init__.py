@@ -2,14 +2,14 @@
 
 from .email_tools import SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool, DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool, ReplyEmailTool, ForwardEmailTool
 from .calendar_tools import CreateAppointmentTool, GetCalendarTool, UpdateAppointmentTool, DeleteAppointmentTool, RespondToMeetingTool, CheckAvailabilityTool, FindMeetingTimesTool
-from .contact_tools import CreateContactTool, SearchContactsTool, GetContactsTool, UpdateContactTool, DeleteContactTool, ResolveNamesTool
+from .contact_tools import CreateContactTool, UpdateContactTool, DeleteContactTool
 from .task_tools import CreateTaskTool, GetTasksTool, UpdateTaskTool, CompleteTaskTool, DeleteTaskTool
 from .attachment_tools import ListAttachmentsTool, DownloadAttachmentTool, AddAttachmentTool, DeleteAttachmentTool, ReadAttachmentTool
-from .search_tools import AdvancedSearchTool, SearchByConversationTool, FullTextSearchTool
-from .folder_tools import ListFoldersTool, CreateFolderTool, DeleteFolderTool, RenameFolderTool, MoveFolderTool
-from .oof_tools import SetOOFSettingsTool, GetOOFSettingsTool
+from .search_tools import SearchByConversationTool
+from .folder_tools import ListFoldersTool, ManageFolderTool
+from .oof_tools import OofSettingsTool
 from .ai_tools import SemanticSearchEmailsTool, ClassifyEmailTool, SummarizeEmailTool, SuggestRepliesTool
-from .contact_intelligence_tools import FindPersonTool, GetCommunicationHistoryTool, AnalyzeNetworkTool
+from .contact_intelligence_tools import FindPersonTool, AnalyzeContactsTool
 
 __all__ = [
     # Email tools (10)
@@ -31,13 +31,10 @@ __all__ = [
     "RespondToMeetingTool",
     "CheckAvailabilityTool",
     "FindMeetingTimesTool",
-    # Contact tools (6)
+    # Contact tools (3)
     "CreateContactTool",
-    "SearchContactsTool",
-    "GetContactsTool",
     "UpdateContactTool",
     "DeleteContactTool",
-    "ResolveNamesTool",
     # Task tools (5)
     "CreateTaskTool",
     "GetTasksTool",
@@ -50,26 +47,19 @@ __all__ = [
     "AddAttachmentTool",
     "DeleteAttachmentTool",
     "ReadAttachmentTool",
-    # Search tools (3)
-    "AdvancedSearchTool",
+    # Search tools (1)
     "SearchByConversationTool",
-    "FullTextSearchTool",
-    # Folder tools (5)
+    # Folder tools (2)
     "ListFoldersTool",
-    "CreateFolderTool",
-    "DeleteFolderTool",
-    "RenameFolderTool",
-    "MoveFolderTool",
-    # Out-of-Office tools (2)
-    "SetOOFSettingsTool",
-    "GetOOFSettingsTool",
+    "ManageFolderTool",
+    # Out-of-Office tools (1)
+    "OofSettingsTool",
     # AI tools (4)
     "SemanticSearchEmailsTool",
     "ClassifyEmailTool",
     "SummarizeEmailTool",
     "SuggestRepliesTool",
-    # Contact Intelligence tools (3)
+    # Contact Intelligence tools (2)
     "FindPersonTool",
-    "GetCommunicationHistoryTool",
-    "AnalyzeNetworkTool",
+    "AnalyzeContactsTool",
 ]

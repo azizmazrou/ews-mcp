@@ -5,7 +5,7 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 3.2.0 - PERSON-CENTRIC REWRITE
+VERSION: 3.3.0 - TOOL CONSOLIDATION
 CHANGES:
 - NOW USES PersonService with multi-strategy GAL search (FIXES 0-RESULTS BUG!)
 - Person-centric architecture with proper Person objects
@@ -33,23 +33,26 @@ from ..services.person_service import PersonService
 
 
 class FindPersonTool(BaseTool):
-    """Unified contact search across multiple sources."""
+    """Unified contact search across GAL, contacts folder, and email history.
+
+    Replaces: find_person, resolve_names, search_contacts, get_contacts.
+    """
 
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "find_person",
-            "description": "Search for people across GAL, email history, and domains.",
+            "description": "Search for people across GAL, contacts, and email history.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Name, email, or domain to search (e.g., 'John Doe', 'john@example.com', '@example.com')"
+                        "description": "Name, email, or domain to search. Optional when source='contacts' (lists all contacts)"
                     },
-                    "search_scope": {
+                    "source": {
                         "type": "string",
-                        "enum": ["all", "gal", "email_history", "domain"],
-                        "description": "Where to search for contacts",
+                        "enum": ["all", "gal", "contacts", "email_history", "domain"],
+                        "description": "Where to search: all (GAL+contacts+email), gal (Active Directory only), contacts (personal contacts), email_history, domain",
                         "default": "all"
                     },
                     "include_stats": {
@@ -66,54 +69,51 @@ class FindPersonTool(BaseTool):
                         "type": "integer",
                         "description": "Maximum results to return",
                         "default": 50,
-                        "maximum": 100
+                        "maximum": 1000
                     },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
-                },
-                "required": ["query"]
+                }
             }
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        """
-        Execute unified contact search using PersonService v3.0.
-
-        This method now uses the enhanced PersonService with multi-strategy
-        GAL search that FIXES the 0-results bug!
-        """
+        """Execute unified contact search."""
         query = kwargs.get("query", "").strip()
-        search_scope = kwargs.get("search_scope", "all")
+        source = kwargs.get("source", "all")
         include_stats = kwargs.get("include_stats", True)
         time_range_days = kwargs.get("time_range_days", 365)
         max_results = kwargs.get("max_results", 50)
         target_mailbox = kwargs.get("target_mailbox")
 
+        # source="contacts" with no query lists all contacts
+        if source == "contacts" and not query:
+            return await self._list_contacts(max_results, target_mailbox)
+
         if not query:
-            raise ToolExecutionError("Query parameter is required")
+            raise ToolExecutionError("Query parameter is required (except when source='contacts' to list all)")
 
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            # Create PersonService (v3.0)
             person_service = PersonService(self.ews_client)
 
-            # Map search_scope to sources
+            # Map source to PersonService sources
             sources = []
-            if search_scope == "all":
+            if source == "all":
                 sources = ["gal", "contacts", "email_history"]
-            elif search_scope == "gal":
+            elif source == "gal":
                 sources = ["gal"]
-            elif search_scope == "email_history":
+            elif source == "contacts":
+                sources = ["contacts"]
+            elif source == "email_history":
                 sources = ["email_history"]
-            elif search_scope == "domain":
-                # For domain search, use all sources but query should start with @
+            elif source == "domain":
                 sources = ["gal", "email_history"]
 
-            # Use PersonService to find people (with multi-strategy GAL search!)
             persons = await person_service.find_person(
                 query=query,
                 sources=sources,
@@ -122,7 +122,6 @@ class FindPersonTool(BaseTool):
                 max_results=max_results
             )
 
-            # Format results for backward compatibility
             formatted_results = []
             for person in persons:
                 result = {
@@ -131,7 +130,6 @@ class FindPersonTool(BaseTool):
                     "sources": [s.value for s in person.sources],
                 }
 
-                # Add optional fields
                 if person.display_name:
                     result["display_name"] = person.display_name
                 if person.given_name:
@@ -147,14 +145,12 @@ class FindPersonTool(BaseTool):
                 if person.office_location:
                     result["office"] = person.office_location
 
-                # Add phone numbers
                 if person.phone_numbers:
                     result["phone_numbers"] = [
                         {"type": p.type, "number": p.number}
                         for p in person.phone_numbers
                     ]
 
-                # Add communication stats
                 if include_stats and person.communication_stats:
                     stats = person.communication_stats
                     result["email_count"] = stats.total_emails
@@ -165,12 +161,10 @@ class FindPersonTool(BaseTool):
 
                 formatted_results.append(result)
 
-            self.logger.info(f"✅ Found {len(formatted_results)} person(s) via PersonService v3.0")
-
             return format_success_response(
                 f"Found {len(formatted_results)} contact(s) for '{query}'",
                 query=query,
-                search_scope=search_scope,
+                source=source,
                 total_results=len(formatted_results),
                 unified_results=formatted_results,
                 mailbox=mailbox
@@ -178,51 +172,123 @@ class FindPersonTool(BaseTool):
 
         except Exception as e:
             self.logger.error(f"Failed to search for person: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
             raise ToolExecutionError(f"Failed to search for person: {e}")
 
+    async def _list_contacts(self, max_results: int, target_mailbox) -> Dict[str, Any]:
+        """List all personal contacts (replaces get_contacts tool)."""
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
 
-class GetCommunicationHistoryTool(BaseTool):
-    """Analyze communication history with a specific contact."""
+            items = account.contacts.all()[:max_results]
+
+            contacts = []
+            for item in items:
+                given_name = safe_get(item, "given_name", "") or ""
+                surname = safe_get(item, "surname", "") or ""
+                display_name = safe_get(item, "display_name", "") or ""
+                email_addrs = safe_get(item, "email_addresses", [])
+
+                email = ""
+                if email_addrs:
+                    email = email_addrs[0].email if hasattr(email_addrs[0], 'email') else ""
+                email = email or ""
+
+                from ..utils import ews_id_to_str as _ews_id
+                contacts.append({
+                    "item_id": _ews_id(safe_get(item, "id", None)) or "unknown",
+                    "display_name": display_name or f"{given_name} {surname}".strip(),
+                    "given_name": given_name,
+                    "surname": surname,
+                    "email": email,
+                    "company": safe_get(item, "company_name", "") or "",
+                    "job_title": safe_get(item, "job_title", "") or ""
+                })
+
+            return format_success_response(
+                f"Retrieved {len(contacts)} contacts",
+                contacts=contacts,
+                mailbox=mailbox
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to list contacts: {e}")
+            raise ToolExecutionError(f"Failed to list contacts: {e}")
+
+
+class AnalyzeContactsTool(BaseTool):
+    """Unified contact analysis: communication history, network analysis, VIPs, dormant contacts.
+
+    Replaces: get_communication_history, analyze_network.
+    """
 
     def get_schema(self) -> Dict[str, Any]:
         return {
-            "name": "get_communication_history",
-            "description": "Get communication history and statistics with a person.",
+            "name": "analyze_contacts",
+            "description": "Analyze communication history, network patterns, top contacts, VIPs, and dormant relationships.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "analysis_type": {
+                        "type": "string",
+                        "enum": ["communication_history", "overview", "top_contacts", "by_domain", "dormant", "vip"],
+                        "description": "Type of analysis: communication_history (with a specific person), overview/top_contacts/by_domain/dormant/vip (network analysis)"
+                    },
                     "email": {
                         "type": "string",
-                        "description": "Email address of the contact"
+                        "description": "Email address (required for communication_history)"
                     },
                     "days_back": {
                         "type": "integer",
-                        "description": "Number of days back to analyze",
-                        "default": 365
+                        "description": "Days back to analyze",
+                        "default": 90
                     },
                     "max_emails": {
                         "type": "integer",
-                        "description": "Maximum number of recent emails to include",
+                        "description": "Max recent emails to include (communication_history)",
                         "default": 10
                     },
                     "include_topics": {
                         "type": "boolean",
-                        "description": "Extract topics from email subjects",
+                        "description": "Extract topics from subjects (communication_history)",
                         "default": True
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Number of top results (network analysis)",
+                        "default": 20,
+                        "maximum": 50
+                    },
+                    "dormant_threshold_days": {
+                        "type": "integer",
+                        "description": "Days without contact to consider dormant",
+                        "default": 60
+                    },
+                    "vip_email_threshold": {
+                        "type": "integer",
+                        "description": "Minimum emails to qualify as VIP",
+                        "default": 10
                     },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
-                "required": ["email"]
+                "required": ["analysis_type"]
             }
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        """Get communication history with a contact."""
+        """Route to appropriate analysis type."""
+        analysis_type = kwargs.get("analysis_type")
+
+        if analysis_type == "communication_history":
+            return await self._communication_history(**kwargs)
+        else:
+            return await self._network_analysis(**kwargs)
+
+    async def _communication_history(self, **kwargs) -> Dict[str, Any]:
+        """Get communication history with a specific contact. Uses server-side sender filter."""
         email = kwargs.get("email", "").strip().lower()
         days_back = kwargs.get("days_back", 365)
         max_emails = kwargs.get("max_emails", 10)
@@ -230,7 +296,7 @@ class GetCommunicationHistoryTool(BaseTool):
         target_mailbox = kwargs.get("target_mailbox")
 
         if not email:
-            raise ToolExecutionError("Email parameter is required")
+            raise ToolExecutionError("email is required for communication_history analysis")
 
         try:
             account = self.get_account(target_mailbox)
@@ -238,73 +304,37 @@ class GetCommunicationHistoryTool(BaseTool):
 
             start_date = datetime.now(account.default_timezone) - timedelta(days=days_back)
 
-            # Statistics
-            stats = {
-                "total_emails": 0,
-                "received": 0,
-                "sent": 0,
-                "first_contact": None,
-                "last_contact": None
-            }
-
-            # Timeline: month -> count
+            stats = {"total_emails": 0, "received": 0, "sent": 0, "first_contact": None, "last_contact": None}
             timeline = defaultdict(int)
-
-            # Topics: subject keywords
             topics = defaultdict(int)
-
-            # Recent emails
             recent_emails = []
 
-            # 1. Search Inbox (received emails)
-            # Add pagination to prevent timeouts with large mailboxes
-            MAX_ITEMS_TO_SCAN = 2000  # Limit total items scanned to prevent timeout
+            MAX_ITEMS_TO_SCAN = 2000
+
+            # 1. Search Inbox — server-side filter by sender email
             inbox = account.inbox
             received_items = inbox.filter(
-                datetime_received__gte=start_date
+                datetime_received__gte=start_date,
+                sender__email_address=email
             ).order_by('-datetime_received').only('sender', 'subject', 'datetime_received', 'text_body')
 
             received_list = []
-            items_scanned = 0
-            for item in received_items:
-                items_scanned += 1
-                if items_scanned > MAX_ITEMS_TO_SCAN:
-                    self.logger.warning(
-                        f"Reached scan limit of {MAX_ITEMS_TO_SCAN} items. "
-                        f"Results may be incomplete for very active contacts. "
-                        f"Consider reducing days_back parameter."
-                    )
-                    break
-
-                sender = safe_get(item, 'sender')
-                if sender:
-                    sender_email = safe_get(sender, 'email_address', '').lower()
-                    if sender_email == email:
-                        received_list.append(item)
+            for item in received_items[:MAX_ITEMS_TO_SCAN]:
+                received_list.append(item)
 
             stats["received"] = len(received_list)
 
-            # Process received emails
             for item in received_list:
                 received_time = safe_get(item, 'datetime_received')
                 if received_time:
-                    # Update first/last contact
                     if not stats["first_contact"] or received_time < stats["first_contact"]:
                         stats["first_contact"] = received_time
                     if not stats["last_contact"] or received_time > stats["last_contact"]:
                         stats["last_contact"] = received_time
-
-                    # Update timeline
-                    month_key = received_time.strftime("%Y-%m")
-                    timeline[month_key] += 1
-
-                    # Extract topics from subject
+                    timeline[received_time.strftime("%Y-%m")] += 1
                     if include_topics:
-                        subject = safe_get(item, 'subject', '')
-                        self._extract_topics(subject, topics)
+                        self._extract_topics(safe_get(item, 'subject', ''), topics)
 
-            # Get recent received emails
-            received_list.sort(key=lambda x: safe_get(x, 'datetime_received', datetime.min), reverse=True)
             for item in received_list[:max_emails]:
                 recent_emails.append({
                     "direction": "received",
@@ -313,8 +343,7 @@ class GetCommunicationHistoryTool(BaseTool):
                     "preview": (safe_get(item, 'text_body', '') or '')[:200]
                 })
 
-            # 2. Search Sent Items (sent emails)
-            # Add pagination to prevent timeouts with large mailboxes
+            # 2. Search Sent Items — client-side filter (no server-side recipient filter in EWS)
             sent_items = account.sent
             sent_query = sent_items.filter(
                 datetime_sent__gte=start_date
@@ -325,44 +354,28 @@ class GetCommunicationHistoryTool(BaseTool):
             for item in sent_query:
                 items_scanned += 1
                 if items_scanned > MAX_ITEMS_TO_SCAN:
-                    self.logger.warning(
-                        f"Reached scan limit of {MAX_ITEMS_TO_SCAN} items in Sent folder. "
-                        f"Results may be incomplete. Consider reducing days_back parameter."
-                    )
                     break
-
-                # Ensure recipients is always a list (can be None from EWS)
                 recipients = safe_get(item, 'to_recipients', []) or []
                 for recipient in recipients:
-                    recipient_email = safe_get(recipient, 'email_address', '').lower()
-                    if recipient_email == email:
+                    if safe_get(recipient, 'email_address', '').lower() == email:
                         sent_list.append(item)
-                        break  # Only count each email once
+                        break
 
             stats["sent"] = len(sent_list)
 
-            # Process sent emails
             for item in sent_list:
                 sent_time = safe_get(item, 'datetime_sent')
                 if sent_time:
-                    # Update first/last contact
                     if not stats["first_contact"] or sent_time < stats["first_contact"]:
                         stats["first_contact"] = sent_time
                     if not stats["last_contact"] or sent_time > stats["last_contact"]:
                         stats["last_contact"] = sent_time
-
-                    # Update timeline
-                    month_key = sent_time.strftime("%Y-%m")
-                    timeline[month_key] += 1
-
-                    # Extract topics from subject
+                    timeline[sent_time.strftime("%Y-%m")] += 1
                     if include_topics:
-                        subject = safe_get(item, 'subject', '')
-                        self._extract_topics(subject, topics)
+                        self._extract_topics(safe_get(item, 'subject', ''), topics)
 
-            # Get recent sent emails
             sent_list.sort(key=lambda x: safe_get(x, 'datetime_sent', datetime.min), reverse=True)
-            for item in sent_list[:max_emails // 2]:  # Half of max for sent
+            for item in sent_list[:max_emails // 2]:
                 recent_emails.append({
                     "direction": "sent",
                     "subject": safe_get(item, 'subject', ''),
@@ -370,38 +383,21 @@ class GetCommunicationHistoryTool(BaseTool):
                     "preview": (safe_get(item, 'text_body', '') or '')[:200]
                 })
 
-            # 3. Calculate total and format results
             stats["total_emails"] = stats["received"] + stats["sent"]
-
-            # Format timestamps
             if stats["first_contact"]:
                 stats["first_contact"] = stats["first_contact"].isoformat()
             if stats["last_contact"]:
                 stats["last_contact"] = stats["last_contact"].isoformat()
-
-            # Calculate frequency (emails per month)
             if days_back > 0:
                 months = days_back / 30
                 stats["emails_per_month"] = round(stats["total_emails"] / months, 1) if months > 0 else 0
 
-            # Sort timeline
-            timeline_list = [
-                {"month": month, "count": count}
-                for month, count in sorted(timeline.items())
-            ]
-
-            # Sort topics by frequency
+            timeline_list = [{"month": m, "count": c} for m, c in sorted(timeline.items())]
             top_topics = sorted(
-                [{"topic": topic, "count": count} for topic, count in topics.items()],
-                key=lambda x: x["count"],
-                reverse=True
-            )[:10]  # Top 10 topics
-
-            # Sort recent emails by date
-            recent_emails.sort(
-                key=lambda x: x["date"] if x["date"] else "",
-                reverse=True
-            )
+                [{"topic": t, "count": c} for t, c in topics.items()],
+                key=lambda x: x["count"], reverse=True
+            )[:10]
+            recent_emails.sort(key=lambda x: x["date"] if x["date"] else "", reverse=True)
 
             return format_success_response(
                 f"Communication history with {email}",
@@ -421,74 +417,20 @@ class GetCommunicationHistoryTool(BaseTool):
         """Extract keywords from email subject."""
         if not subject:
             return
-
-        # Remove common prefixes
         subject = re.sub(r'^(RE:|FW:|FWD:)\s*', '', subject, flags=re.IGNORECASE)
-
-        # Extract words (at least 3 characters, not all caps unless acronym)
         words = re.findall(r'\b[A-Za-z]{3,}\b', subject)
-
-        # Common stop words to ignore
         stop_words = {
             'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'your',
             'from', 'with', 'have', 'this', 'that', 'will', 'was', 'been', 'has'
         }
-
         for word in words:
             word_lower = word.lower()
             if word_lower not in stop_words and len(word) >= 4:
-                # Use original case if it's likely an acronym (all caps)
                 key = word if word.isupper() and len(word) <= 5 else word_lower.capitalize()
                 topics[key] += 1
 
-
-class AnalyzeNetworkTool(BaseTool):
-    """Analyze professional network and communication patterns."""
-
-    def get_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "analyze_network",
-            "description": "Analyze professional network: top contacts, VIPs, and domain stats.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "analysis_type": {
-                        "type": "string",
-                        "enum": ["overview", "top_contacts", "by_domain", "dormant", "vip"],
-                        "description": "Type of network analysis to perform",
-                        "default": "overview"
-                    },
-                    "days_back": {
-                        "type": "integer",
-                        "description": "Number of days back to analyze",
-                        "default": 90
-                    },
-                    "top_n": {
-                        "type": "integer",
-                        "description": "Number of top results to return",
-                        "default": 20,
-                        "maximum": 50
-                    },
-                    "dormant_threshold_days": {
-                        "type": "integer",
-                        "description": "Days without contact to consider dormant",
-                        "default": 60
-                    },
-                    "vip_email_threshold": {
-                        "type": "integer",
-                        "description": "Minimum emails to qualify as VIP",
-                        "default": 10
-                    },
-                    "target_mailbox": {
-                        "type": "string",
-                        "description": "Email address to operate on (requires impersonation/delegate access)"
-                    }
-                }
-            }
-        }
-
-    async def execute(self, **kwargs) -> Dict[str, Any]:
-        """Analyze professional network."""
+    async def _network_analysis(self, **kwargs) -> Dict[str, Any]:
+        """Analyze professional network patterns."""
         analysis_type = kwargs.get("analysis_type", "overview")
         days_back = kwargs.get("days_back", 90)
         top_n = kwargs.get("top_n", 20)
@@ -500,8 +442,6 @@ class AnalyzeNetworkTool(BaseTool):
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            # Gather all contacts from email history
-            self.logger.info(f"Analyzing network for past {days_back} days")
             contacts = await self._gather_contacts(days_back, account)
 
             if not contacts:
@@ -511,7 +451,6 @@ class AnalyzeNetworkTool(BaseTool):
                     results=[]
                 )
 
-            # Perform analysis based on type
             if analysis_type == "top_contacts":
                 results = self._analyze_top_contacts(contacts, top_n)
             elif analysis_type == "by_domain":
@@ -520,7 +459,7 @@ class AnalyzeNetworkTool(BaseTool):
                 results = self._analyze_dormant(contacts, dormant_threshold, days_back, account)
             elif analysis_type == "vip":
                 results = self._analyze_vip(contacts, vip_threshold, days_back, account)
-            else:  # overview
+            else:
                 results = self._analyze_overview(contacts, top_n, dormant_threshold, vip_threshold, days_back, account)
 
             return format_success_response(
@@ -541,224 +480,100 @@ class AnalyzeNetworkTool(BaseTool):
         start_date = datetime.now(account.default_timezone) - timedelta(days=days_back)
         contacts = {}
 
-        # Search Inbox
         inbox = account.inbox
-        inbox_items = inbox.filter(
-            datetime_received__gte=start_date
-        ).only('sender', 'datetime_received')
-
-        for item in inbox_items[:2000]:  # Limit for performance
+        for item in inbox.filter(datetime_received__gte=start_date).only('sender', 'datetime_received')[:2000]:
             sender = safe_get(item, 'sender')
             if sender:
                 email = safe_get(sender, 'email_address', '').lower()
                 name = safe_get(sender, 'name', '')
                 received_time = safe_get(item, 'datetime_received')
-
                 if email and received_time:
                     if email not in contacts:
-                        # Extract domain
                         domain = email.split('@')[1] if '@' in email else 'unknown'
-                        contacts[email] = {
-                            "email": email,
-                            "name": name,
-                            "domain": domain,
-                            "received": 0,
-                            "sent": 0,
-                            "last_contact": None,
-                            "first_contact": None
-                        }
-
+                        contacts[email] = {"email": email, "name": name, "domain": domain, "received": 0, "sent": 0, "last_contact": None, "first_contact": None}
                     contacts[email]["received"] += 1
-
                     if not contacts[email]["last_contact"] or received_time > contacts[email]["last_contact"]:
                         contacts[email]["last_contact"] = received_time
                     if not contacts[email]["first_contact"] or received_time < contacts[email]["first_contact"]:
                         contacts[email]["first_contact"] = received_time
 
-        # Search Sent Items
         sent_items = account.sent
-        sent_query = sent_items.filter(
-            datetime_sent__gte=start_date
-        ).only('to_recipients', 'datetime_sent')
-
-        for item in sent_query[:2000]:  # Limit for performance
+        for item in sent_items.filter(datetime_sent__gte=start_date).only('to_recipients', 'datetime_sent')[:2000]:
             recipients = safe_get(item, 'to_recipients', [])
             sent_time = safe_get(item, 'datetime_sent')
-
             for recipient in recipients:
                 email = safe_get(recipient, 'email_address', '').lower()
                 name = safe_get(recipient, 'name', '')
-
                 if email and sent_time:
                     if email not in contacts:
-                        # Extract domain
                         domain = email.split('@')[1] if '@' in email else 'unknown'
-                        contacts[email] = {
-                            "email": email,
-                            "name": name,
-                            "domain": domain,
-                            "received": 0,
-                            "sent": 0,
-                            "last_contact": None,
-                            "first_contact": None
-                        }
-
+                        contacts[email] = {"email": email, "name": name, "domain": domain, "received": 0, "sent": 0, "last_contact": None, "first_contact": None}
                     contacts[email]["sent"] += 1
-
                     if not contacts[email]["last_contact"] or sent_time > contacts[email]["last_contact"]:
                         contacts[email]["last_contact"] = sent_time
                     if not contacts[email]["first_contact"] or sent_time < contacts[email]["first_contact"]:
                         contacts[email]["first_contact"] = sent_time
 
-        # Calculate total emails for each contact
         for contact in contacts.values():
             contact["total_emails"] = contact["received"] + contact["sent"]
-
         return contacts
 
     def _analyze_top_contacts(self, contacts: Dict, top_n: int) -> Dict[str, Any]:
-        """Analyze top contacts by email volume."""
-        sorted_contacts = sorted(
-            contacts.values(),
-            key=lambda x: x["total_emails"],
-            reverse=True
-        )[:top_n]
-
-        results = []
-        for contact in sorted_contacts:
-            results.append({
-                "name": contact["name"],
-                "email": contact["email"],
-                "total_emails": contact["total_emails"],
-                "received": contact["received"],
-                "sent": contact["sent"],
-                "last_contact": contact["last_contact"].isoformat() if contact["last_contact"] else None
-            })
-
-        return {"top_contacts": results}
+        sorted_contacts = sorted(contacts.values(), key=lambda x: x["total_emails"], reverse=True)[:top_n]
+        return {"top_contacts": [
+            {"name": c["name"], "email": c["email"], "total_emails": c["total_emails"],
+             "received": c["received"], "sent": c["sent"],
+             "last_contact": c["last_contact"].isoformat() if c["last_contact"] else None}
+            for c in sorted_contacts
+        ]}
 
     def _analyze_by_domain(self, contacts: Dict, top_n: int) -> Dict[str, Any]:
-        """Analyze contacts grouped by domain."""
-        # Group by domain
         domains = defaultdict(lambda: {"count": 0, "emails": 0, "contacts": []})
-
-        for contact in contacts.values():
-            domain = contact["domain"]
-            domains[domain]["count"] += 1
-            domains[domain]["emails"] += contact["total_emails"]
-            domains[domain]["contacts"].append({
-                "name": contact["name"],
-                "email": contact["email"],
-                "total_emails": contact["total_emails"]
-            })
-
-        # Sort domains by email volume
-        sorted_domains = sorted(
-            [
-                {
-                    "domain": domain,
-                    "contact_count": info["count"],
-                    "total_emails": info["emails"],
-                    "top_contacts": sorted(info["contacts"], key=lambda x: x["total_emails"], reverse=True)[:5]
-                }
-                for domain, info in domains.items()
-            ],
-            key=lambda x: x["total_emails"],
-            reverse=True
-        )[:top_n]
-
+        for c in contacts.values():
+            domains[c["domain"]]["count"] += 1
+            domains[c["domain"]]["emails"] += c["total_emails"]
+            domains[c["domain"]]["contacts"].append({"name": c["name"], "email": c["email"], "total_emails": c["total_emails"]})
+        sorted_domains = sorted([
+            {"domain": d, "contact_count": info["count"], "total_emails": info["emails"],
+             "top_contacts": sorted(info["contacts"], key=lambda x: x["total_emails"], reverse=True)[:5]}
+            for d, info in domains.items()
+        ], key=lambda x: x["total_emails"], reverse=True)[:top_n]
         return {"domains": sorted_domains}
 
     def _analyze_dormant(self, contacts: Dict, threshold_days: int, analysis_days: int, account) -> Dict[str, Any]:
-        """Identify dormant relationships."""
         now = datetime.now(account.default_timezone)
         threshold_date = now - timedelta(days=threshold_days)
-        analysis_start = now - timedelta(days=analysis_days)
-
         dormant = []
-        for contact in contacts.values():
-            last_contact = contact["last_contact"]
-            first_contact = contact["first_contact"]
-
-            # Dormant: last contact was before threshold, but was active before
-            if last_contact and last_contact < threshold_date:
-                # Must have had reasonable activity (at least 3 emails)
-                if contact["total_emails"] >= 3:
-                    days_since = (now - last_contact).days
-                    dormant.append({
-                        "name": contact["name"],
-                        "email": contact["email"],
-                        "total_emails": contact["total_emails"],
-                        "last_contact": last_contact.isoformat(),
-                        "days_since_contact": days_since
-                    })
-
-        # Sort by total emails (most important dormant relationships first)
+        for c in contacts.values():
+            if c["last_contact"] and c["last_contact"] < threshold_date and c["total_emails"] >= 3:
+                dormant.append({"name": c["name"], "email": c["email"], "total_emails": c["total_emails"],
+                                "last_contact": c["last_contact"].isoformat(), "days_since_contact": (now - c["last_contact"]).days})
         dormant.sort(key=lambda x: x["total_emails"], reverse=True)
-
-        return {
-            "dormant_contacts": dormant,
-            "threshold_days": threshold_days
-        }
+        return {"dormant_contacts": dormant, "threshold_days": threshold_days}
 
     def _analyze_vip(self, contacts: Dict, email_threshold: int, analysis_days: int, account) -> Dict[str, Any]:
-        """Identify VIP contacts."""
         now = datetime.now(account.default_timezone)
-        recent_threshold = now - timedelta(days=30)  # Active in last 30 days
-
+        recent_threshold = now - timedelta(days=30)
         vips = []
-        for contact in contacts.values():
-            # VIP criteria: high email volume AND recent contact
-            if contact["total_emails"] >= email_threshold:
-                last_contact = contact["last_contact"]
-                if last_contact and last_contact >= recent_threshold:
-                    vips.append({
-                        "name": contact["name"],
-                        "email": contact["email"],
-                        "domain": contact["domain"],
-                        "total_emails": contact["total_emails"],
-                        "received": contact["received"],
-                        "sent": contact["sent"],
-                        "last_contact": last_contact.isoformat(),
-                        "emails_per_day": round(contact["total_emails"] / analysis_days, 2)
-                    })
-
-        # Sort by total emails
+        for c in contacts.values():
+            if c["total_emails"] >= email_threshold and c["last_contact"] and c["last_contact"] >= recent_threshold:
+                vips.append({"name": c["name"], "email": c["email"], "domain": c["domain"],
+                             "total_emails": c["total_emails"], "received": c["received"], "sent": c["sent"],
+                             "last_contact": c["last_contact"].isoformat(),
+                             "emails_per_day": round(c["total_emails"] / analysis_days, 2)})
         vips.sort(key=lambda x: x["total_emails"], reverse=True)
+        return {"vip_contacts": vips, "criteria": f"Minimum {email_threshold} emails and contact within last 30 days"}
 
-        return {
-            "vip_contacts": vips,
-            "criteria": f"Minimum {email_threshold} emails and contact within last 30 days"
-        }
-
-    def _analyze_overview(
-        self,
-        contacts: Dict,
-        top_n: int,
-        dormant_threshold: int,
-        vip_threshold: int,
-        analysis_days: int,
-        account
-    ) -> Dict[str, Any]:
-        """Comprehensive network overview."""
-        # Get all analyses
+    def _analyze_overview(self, contacts: Dict, top_n: int, dormant_threshold: int, vip_threshold: int, analysis_days: int, account) -> Dict[str, Any]:
         top_contacts = self._analyze_top_contacts(contacts, min(top_n, 10))
         domains = self._analyze_by_domain(contacts, min(top_n, 10))
         dormant = self._analyze_dormant(contacts, dormant_threshold, analysis_days, account)
         vips = self._analyze_vip(contacts, vip_threshold, analysis_days, account)
-
-        # Calculate summary statistics
         total_emails = sum(c["total_emails"] for c in contacts.values())
-        avg_emails_per_contact = round(total_emails / len(contacts), 1) if contacts else 0
-
+        avg = round(total_emails / len(contacts), 1) if contacts else 0
         return {
-            "summary": {
-                "total_contacts": len(contacts),
-                "total_emails": total_emails,
-                "avg_emails_per_contact": avg_emails_per_contact,
-                "vip_count": len(vips["vip_contacts"]),
-                "dormant_count": len(dormant["dormant_contacts"])
-            },
+            "summary": {"total_contacts": len(contacts), "total_emails": total_emails, "avg_emails_per_contact": avg,
+                        "vip_count": len(vips["vip_contacts"]), "dormant_count": len(dormant["dormant_contacts"])},
             "top_contacts": top_contacts["top_contacts"][:5],
             "top_domains": domains["domains"][:5],
             "vip_contacts": vips["vip_contacts"][:5],

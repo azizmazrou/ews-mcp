@@ -1,4 +1,4 @@
-"""Out-of-Office (OOF) automatic reply tools for EWS MCP Server."""
+"""Out-of-Office (OOF) tools for EWS MCP Server."""
 
 from typing import Any, Dict
 from datetime import datetime
@@ -8,20 +8,28 @@ from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, parse_datetime_tz_aware, format_datetime
 
 
-class SetOOFSettingsTool(BaseTool):
-    """Tool for configuring Out-of-Office automatic replies."""
+class OofSettingsTool(BaseTool):
+    """Unified OOF settings: get or set Out-of-Office configuration.
+
+    Replaces: get_oof_settings, set_oof_settings.
+    """
 
     def get_schema(self) -> Dict[str, Any]:
         return {
-            "name": "set_oof_settings",
-            "description": "Configure Out-of-Office automatic reply settings.",
+            "name": "oof_settings",
+            "description": "Get or set Out-of-Office automatic reply settings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "set"],
+                        "description": "Get current OOF settings or set new ones"
+                    },
                     "state": {
                         "type": "string",
-                        "description": "OOF state",
-                        "enum": ["Enabled", "Scheduled", "Disabled"]
+                        "enum": ["Enabled", "Scheduled", "Disabled"],
+                        "description": "OOF state (required for set action)"
                     },
                     "internal_reply": {
                         "type": "string",
@@ -33,16 +41,16 @@ class SetOOFSettingsTool(BaseTool):
                     },
                     "start_time": {
                         "type": "string",
-                        "description": "Start date/time (ISO 8601 format) - required for Scheduled state"
+                        "description": "Start date/time (ISO 8601) - required for Scheduled state"
                     },
                     "end_time": {
                         "type": "string",
-                        "description": "End date/time (ISO 8601 format) - required for Scheduled state"
+                        "description": "End date/time (ISO 8601) - required for Scheduled state"
                     },
                     "external_audience": {
                         "type": "string",
-                        "description": "Who receives external reply",
                         "enum": ["None", "Known", "All"],
+                        "description": "Who receives external reply",
                         "default": "Known"
                     },
                     "target_mailbox": {
@@ -50,11 +58,81 @@ class SetOOFSettingsTool(BaseTool):
                         "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
-                "required": ["state"]
+                "required": ["action"]
             }
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
+        """Route to get or set OOF settings."""
+        action = kwargs.get("action")
+        if action == "get":
+            return await self._get_settings(**kwargs)
+        elif action == "set":
+            return await self._set_settings(**kwargs)
+        else:
+            raise ToolExecutionError("action must be 'get' or 'set'")
+
+    async def _get_settings(self, **kwargs) -> Dict[str, Any]:
+        """Get current OOF settings."""
+        target_mailbox = kwargs.get("target_mailbox")
+
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
+            oof = account.oof_settings
+
+            if not oof:
+                return format_success_response(
+                    "No OOF settings configured",
+                    settings={
+                        "state": "Disabled",
+                        "internal_reply": "",
+                        "external_reply": "",
+                        "external_audience": "None"
+                    },
+                    mailbox=mailbox
+                )
+
+            settings = {
+                "state": oof.state if hasattr(oof, 'state') else "Unknown",
+                "external_audience": oof.external_audience if hasattr(oof, 'external_audience') else "Unknown"
+            }
+
+            if hasattr(oof, 'internal_reply') and oof.internal_reply:
+                settings["internal_reply"] = oof.internal_reply.message if hasattr(oof.internal_reply, 'message') else str(oof.internal_reply)
+            else:
+                settings["internal_reply"] = ""
+
+            if hasattr(oof, 'external_reply') and oof.external_reply:
+                settings["external_reply"] = oof.external_reply.message if hasattr(oof.external_reply, 'message') else str(oof.external_reply)
+            else:
+                settings["external_reply"] = ""
+
+            if hasattr(oof, 'start') and oof.start:
+                settings["start_time"] = format_datetime(oof.start)
+            if hasattr(oof, 'end') and oof.end:
+                settings["end_time"] = format_datetime(oof.end)
+
+            if settings["state"] == "Scheduled" and "start_time" in settings and "end_time" in settings:
+                now = datetime.now(oof.start.tzinfo) if hasattr(oof, 'start') and oof.start else datetime.now()
+                settings["currently_active"] = oof.start <= now <= oof.end
+            elif settings["state"] == "Enabled":
+                settings["currently_active"] = True
+            else:
+                settings["currently_active"] = False
+
+            return format_success_response(
+                f"Current OOF state: {settings['state']}",
+                settings=settings,
+                mailbox=mailbox
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to get OOF settings: {e}")
+            raise ToolExecutionError(f"Failed to get OOF settings: {e}")
+
+    async def _set_settings(self, **kwargs) -> Dict[str, Any]:
         """Configure OOF settings."""
         state = kwargs.get("state")
         internal_reply = kwargs.get("internal_reply", "I am currently out of the office.")
@@ -65,60 +143,36 @@ class SetOOFSettingsTool(BaseTool):
         target_mailbox = kwargs.get("target_mailbox")
 
         if not state:
-            raise ToolExecutionError("state is required")
+            raise ToolExecutionError("state is required for set action")
 
-        # Validate scheduled parameters
-        if state == "Scheduled":
-            if not start_time_str or not end_time_str:
-                raise ToolExecutionError("start_time and end_time are required for Scheduled state")
+        if state == "Scheduled" and (not start_time_str or not end_time_str):
+            raise ToolExecutionError("start_time and end_time are required for Scheduled state")
 
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            from exchangelib import OofSettings, MailboxData
+            from exchangelib import OofSettings, OofReply
 
-            # Parse dates if provided
-            start_time = None
-            end_time = None
-            if start_time_str:
-                start_time = parse_datetime_tz_aware(start_time_str)
-                if not start_time:
-                    raise ToolExecutionError("Invalid start_time format. Use ISO 8601 format.")
+            start_time = parse_datetime_tz_aware(start_time_str) if start_time_str else None
+            end_time = parse_datetime_tz_aware(end_time_str) if end_time_str else None
 
-            if end_time_str:
-                end_time = parse_datetime_tz_aware(end_time_str)
-                if not end_time:
-                    raise ToolExecutionError("Invalid end_time format. Use ISO 8601 format.")
-
-            # Validate time range
             if start_time and end_time and end_time <= start_time:
                 raise ToolExecutionError("end_time must be after start_time")
 
-            # Create OOF settings
             oof = OofSettings()
             oof.state = state
             oof.external_audience = external_audience
 
-            # Set internal reply
             if internal_reply:
-                from exchangelib import OofReply
                 oof.internal_reply = OofReply(message=internal_reply, lang='en')
-
-            # Set external reply
             if external_reply:
-                from exchangelib import OofReply
                 oof.external_reply = OofReply(message=external_reply, lang='en')
-
-            # Set schedule if provided
             if start_time and end_time:
                 oof.start = start_time
                 oof.end = end_time
 
-            # Apply settings
             account.oof_settings = oof
-
-            self.logger.info(f"OOF settings updated: state={state}")
 
             response_data = {
                 "state": state,
@@ -126,7 +180,6 @@ class SetOOFSettingsTool(BaseTool):
                 "external_reply": external_reply,
                 "external_audience": external_audience
             }
-
             if start_time:
                 response_data["start_time"] = format_datetime(start_time)
             if end_time:
@@ -143,100 +196,3 @@ class SetOOFSettingsTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to set OOF settings: {e}")
             raise ToolExecutionError(f"Failed to set OOF settings: {e}")
-
-
-class GetOOFSettingsTool(BaseTool):
-    """Tool for retrieving current Out-of-Office settings."""
-
-    def get_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "get_oof_settings",
-            "description": "Get current Out-of-Office settings.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target_mailbox": {
-                        "type": "string",
-                        "description": "Email address to operate on (requires impersonation/delegate access)"
-                    }
-                },
-                "required": []
-            }
-        }
-
-    async def execute(self, **kwargs) -> Dict[str, Any]:
-        """Get current OOF settings."""
-        target_mailbox = kwargs.get("target_mailbox")
-
-        try:
-            account = self.get_account(target_mailbox)
-            mailbox = self.get_mailbox_info(target_mailbox)
-
-            # Get OOF settings
-            oof = account.oof_settings
-
-            if not oof:
-                return format_success_response(
-                    "No OOF settings configured",
-                    settings={
-                        "state": "Disabled",
-                        "internal_reply": "",
-                        "external_reply": "",
-                        "external_audience": "None"
-                    },
-                    mailbox=mailbox
-                )
-
-            # Extract settings
-            settings = {
-                "state": oof.state if hasattr(oof, 'state') else "Unknown",
-                "external_audience": oof.external_audience if hasattr(oof, 'external_audience') else "Unknown"
-            }
-
-            # Get internal reply
-            if hasattr(oof, 'internal_reply') and oof.internal_reply:
-                if hasattr(oof.internal_reply, 'message'):
-                    settings["internal_reply"] = oof.internal_reply.message
-                else:
-                    settings["internal_reply"] = str(oof.internal_reply)
-            else:
-                settings["internal_reply"] = ""
-
-            # Get external reply
-            if hasattr(oof, 'external_reply') and oof.external_reply:
-                if hasattr(oof.external_reply, 'message'):
-                    settings["external_reply"] = oof.external_reply.message
-                else:
-                    settings["external_reply"] = str(oof.external_reply)
-            else:
-                settings["external_reply"] = ""
-
-            # Get schedule if available
-            if hasattr(oof, 'start') and oof.start:
-                settings["start_time"] = format_datetime(oof.start)
-            if hasattr(oof, 'end') and oof.end:
-                settings["end_time"] = format_datetime(oof.end)
-
-            # Check if currently active
-            if settings["state"] == "Scheduled" and "start_time" in settings and "end_time" in settings:
-                now = datetime.now(oof.start.tzinfo) if hasattr(oof, 'start') and oof.start else datetime.now()
-                if oof.start <= now <= oof.end:
-                    settings["currently_active"] = True
-                else:
-                    settings["currently_active"] = False
-            elif settings["state"] == "Enabled":
-                settings["currently_active"] = True
-            else:
-                settings["currently_active"] = False
-
-            self.logger.info(f"Retrieved OOF settings: state={settings['state']}")
-
-            return format_success_response(
-                f"Current OOF state: {settings['state']}",
-                settings=settings,
-                mailbox=mailbox
-            )
-
-        except Exception as e:
-            self.logger.error(f"Failed to get OOF settings: {e}")
-            raise ToolExecutionError(f"Failed to get OOF settings: {e}")

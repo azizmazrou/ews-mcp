@@ -23,9 +23,9 @@ from .exceptions import EWSMCPException
 from .logging_system import get_logger
 from .openapi_adapter import OpenAPIAdapter
 
-# Import all tool classes (up to 49 tools total: 45 base + 4 AI)
+# Import all tool classes (up to 40 tools total: 36 base + 4 AI)
 from .tools import (
-    # Email tools (10)
+    # Email tools (10) — includes unified search_emails with quick/advanced/full_text modes
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
     DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool,
     ReplyEmailTool, ForwardEmailTool,
@@ -33,27 +33,25 @@ from .tools import (
     CreateAppointmentTool, GetCalendarTool, UpdateAppointmentTool,
     DeleteAppointmentTool, RespondToMeetingTool, CheckAvailabilityTool,
     FindMeetingTimesTool,
-    # Contact tools (6)
-    CreateContactTool, SearchContactsTool, GetContactsTool,
-    UpdateContactTool, DeleteContactTool, ResolveNamesTool,
+    # Contact tools (3) — search/get/resolve merged into FindPersonTool
+    CreateContactTool, UpdateContactTool, DeleteContactTool,
     # Task tools (5)
     CreateTaskTool, GetTasksTool, UpdateTaskTool,
     CompleteTaskTool, DeleteTaskTool,
     # Attachment tools (5)
     ListAttachmentsTool, DownloadAttachmentTool,
     AddAttachmentTool, DeleteAttachmentTool, ReadAttachmentTool,
-    # Search tools (3)
-    AdvancedSearchTool, SearchByConversationTool, FullTextSearchTool,
-    # Folder tools (5)
-    ListFoldersTool, CreateFolderTool, DeleteFolderTool,
-    RenameFolderTool, MoveFolderTool,
-    # Out-of-Office tools (2)
-    SetOOFSettingsTool, GetOOFSettingsTool,
+    # Search tools (1) — advanced_search/full_text_search merged into search_emails
+    SearchByConversationTool,
+    # Folder tools (2) — create/delete/rename/move merged into manage_folder
+    ListFoldersTool, ManageFolderTool,
+    # Out-of-Office tools (1) — get/set merged into oof_settings
+    OofSettingsTool,
     # AI tools (4 - conditionally enabled)
     SemanticSearchEmailsTool, ClassifyEmailTool,
     SummarizeEmailTool, SuggestRepliesTool,
-    # Contact Intelligence tools (3)
-    FindPersonTool, GetCommunicationHistoryTool, AnalyzeNetworkTool
+    # Contact Intelligence tools (2) — communication_history/analyze_network merged into analyze_contacts
+    FindPersonTool, AnalyzeContactsTool
 )
 
 
@@ -197,10 +195,10 @@ class EWSMCPServer:
                 )]
 
     def register_tools(self):
-        """Register all enabled tools (45 base tools, up to 49 with AI)."""
+        """Register all enabled tools (36 base tools, up to 40 with AI)."""
         tool_classes = []
 
-        # Email tools (10 tools)
+        # Email tools (10 tools — search_emails includes quick/advanced/full_text modes)
         if self.settings.enable_email:
             tool_classes.extend([
                 SendEmailTool,
@@ -216,7 +214,7 @@ class EWSMCPServer:
             ])
             self.logger.info("Email tools enabled (10 tools)")
 
-        # Attachment tools (5 tools - email-related)
+        # Attachment tools (5 tools)
         if self.settings.enable_email:
             tool_classes.extend([
                 ListAttachmentsTool,
@@ -240,26 +238,22 @@ class EWSMCPServer:
             ])
             self.logger.info("Calendar tools enabled (7 tools)")
 
-        # Contact tools (6 tools)
+        # Contact tools (3 tools — search/get/resolve merged into find_person)
         if self.settings.enable_contacts:
             tool_classes.extend([
                 CreateContactTool,
-                SearchContactsTool,
-                GetContactsTool,
                 UpdateContactTool,
-                DeleteContactTool,
-                ResolveNamesTool
+                DeleteContactTool
             ])
-            self.logger.info("Contact tools enabled (6 tools)")
+            self.logger.info("Contact tools enabled (3 tools)")
 
-        # Contact Intelligence tools (3 tools - always enabled when contacts are enabled)
+        # Contact Intelligence tools (2 tools — find_person + analyze_contacts)
         if self.settings.enable_contacts:
             tool_classes.extend([
                 FindPersonTool,
-                GetCommunicationHistoryTool,
-                AnalyzeNetworkTool
+                AnalyzeContactsTool
             ])
-            self.logger.info("Contact Intelligence tools enabled (3 tools)")
+            self.logger.info("Contact Intelligence tools enabled (2 tools)")
 
         # Task tools (5 tools)
         if self.settings.enable_tasks:
@@ -272,30 +266,24 @@ class EWSMCPServer:
             ])
             self.logger.info("Task tools enabled (5 tools)")
 
-        # Search tools (3 tools - always enabled)
+        # Search tools (1 tool — search_by_conversation)
         tool_classes.extend([
-            AdvancedSearchTool,
-            SearchByConversationTool,
-            FullTextSearchTool
+            SearchByConversationTool
         ])
-        self.logger.info("Search tools enabled (3 tools)")
+        self.logger.info("Search tools enabled (1 tool)")
 
-        # Folder tools (5 tools - always enabled)
+        # Folder tools (2 tools — list_folders + manage_folder)
         tool_classes.extend([
             ListFoldersTool,
-            CreateFolderTool,
-            DeleteFolderTool,
-            RenameFolderTool,
-            MoveFolderTool
+            ManageFolderTool
         ])
-        self.logger.info("Folder tools enabled (5 tools)")
+        self.logger.info("Folder tools enabled (2 tools)")
 
-        # Out-of-Office tools (2 tools - always enabled)
+        # Out-of-Office tools (1 tool — oof_settings with get/set)
         tool_classes.extend([
-            SetOOFSettingsTool,
-            GetOOFSettingsTool
+            OofSettingsTool
         ])
-        self.logger.info("Out-of-Office tools enabled (2 tools)")
+        self.logger.info("Out-of-Office tools enabled (1 tool)")
 
         # AI tools (4 tools - conditionally enabled)
         if self.settings.enable_ai:
