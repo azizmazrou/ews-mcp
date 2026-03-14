@@ -63,7 +63,7 @@ RUN find /app/src -type f -name "*.pyc" -delete && \
 
 # Verify v3.3 architecture deployed correctly
 RUN grep -q "VERSION: 3.3.0 - TOOL CONSOLIDATION" /app/src/tools/contact_intelligence_tools.py || \
-    (echo "ERROR: v3.2 not deployed" && exit 1) && \
+    (echo "ERROR: v3.3 not deployed" && exit 1) && \
     test -f /app/src/core/person.py || \
     (echo "ERROR: Person model missing" && exit 1) && \
     test -f /app/src/services/person_service.py || \
