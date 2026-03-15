@@ -56,6 +56,10 @@ class TestGALSearchTupleFormat:
         mock_contact_info.job_title = "Software Engineer"
         mock_contact_info.given_name = "John"
         mock_contact_info.surname = "Smith"
+        mock_contact_info.phone_numbers = []
+        mock_contact_info.business_phone = None
+        mock_contact_info.mobile_phone = None
+        mock_contact_info.office_location = None
 
         # Tuple format: (mailbox, contact_info)
         mock_result = (mock_mailbox, mock_contact_info)
@@ -130,6 +134,10 @@ class TestGALSearchTupleFormat:
         mock_contact_info.display_name = "أحمد محمد"
         mock_contact_info.given_name = "أحمد"
         mock_contact_info.surname = "محمد"
+        mock_contact_info.phone_numbers = []
+        mock_contact_info.business_phone = None
+        mock_contact_info.mobile_phone = None
+        mock_contact_info.office_location = None
 
         mock_result = (mock_mailbox, mock_contact_info)
         mock_ews_client.account.protocol.resolve_names.return_value = [mock_result]
@@ -179,6 +187,14 @@ class TestGALSearchTupleFormat:
             mock_contact_info = Mock()
             mock_contact_info.display_name = f"User {i}"
             mock_contact_info.department = f"Department {i}"
+            mock_contact_info.phone_numbers = []
+            mock_contact_info.business_phone = None
+            mock_contact_info.mobile_phone = None
+            mock_contact_info.office_location = None
+            mock_contact_info.given_name = None
+            mock_contact_info.surname = None
+            mock_contact_info.company_name = None
+            mock_contact_info.job_title = None
 
             results.append((mock_mailbox, mock_contact_info))
 
@@ -313,6 +329,14 @@ class TestOfficeLocationExtraction:
         mock_contact_info = Mock()
         mock_contact_info.display_name = "Office User"
         mock_contact_info.office_location = "Building A, Floor 3, Room 301"
+        mock_contact_info.phone_numbers = []
+        mock_contact_info.business_phone = None
+        mock_contact_info.mobile_phone = None
+        mock_contact_info.given_name = None
+        mock_contact_info.surname = None
+        mock_contact_info.company_name = None
+        mock_contact_info.department = None
+        mock_contact_info.job_title = None
 
         mock_result = (mock_mailbox, mock_contact_info)
         mock_ews_client.account.protocol.resolve_names.return_value = [mock_result]

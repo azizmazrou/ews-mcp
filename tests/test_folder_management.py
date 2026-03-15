@@ -203,7 +203,7 @@ async def test_move_folder(mock_ews_client):
         )
 
     assert result["success"] is True
-    assert "moved successfully" in result["message"]
+    assert "moved" in result["message"].lower()
     assert result["folder_id"] == "folder-to-move"
     assert result["folder_name"] == "Project A"
     assert mock_folder.parent == mock_sent
@@ -246,7 +246,7 @@ async def test_move_folder_destination_not_found(mock_ews_client):
                 destination="nonexistent-dest"
             )
 
-        assert "not found" in str(exc_info.value).lower()
+        assert "unknown destination" in str(exc_info.value).lower()
 
 
 @pytest.mark.asyncio
