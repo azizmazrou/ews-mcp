@@ -1,6 +1,6 @@
-# Architecture Overview - v3.3
+# Architecture Overview - v3.4
 
-Technical architecture and design decisions for EWS MCP Server v3.3 (Tool Consolidation).
+Technical architecture and design decisions for EWS MCP Server v3.4 (Reliability & Code Quality).
 
 ## System Architecture
 
@@ -10,7 +10,7 @@ Technical architecture and design decisions for EWS MCP Server v3.3 (Tool Consol
 └──────────────────────────┬──────────────────────────────────┘
                            │ MCP Protocol (stdio/SSE)
 ┌──────────────────────────▼──────────────────────────────────┐
-│                   EWS MCP Server v3.3                        │
+│                   EWS MCP Server v3.4                        │
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │              MCP Protocol Handler                       │ │
 │  │  - list_tools()                                        │ │
@@ -50,6 +50,7 @@ Technical architecture and design decisions for EWS MCP Server v3.3 (Tool Consol
 │               │                                              │
 │  ┌────────────▼───────────────────────────────────────────┐ │
 │  │              Middleware Layer                           │ │
+│  │  - Circuit Breaker (v3.4)                              │ │
 │  │  - Rate Limiter                                        │ │
 │  │  - Error Handler                                       │ │
 │  │  - Audit Logger                                        │ │
@@ -78,7 +79,7 @@ Technical architecture and design decisions for EWS MCP Server v3.3 (Tool Consol
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## v3.3 Directory Structure
+## v3.4 Directory Structure
 
 ```
 src/
@@ -417,6 +418,13 @@ class FindPersonTool(BaseTool):
 ```
 
 ### 5. Middleware Layer
+
+#### Circuit Breaker (v3.4)
+- **Pattern:** Circuit breaker for Exchange connectivity
+- **Failure threshold:** 3 consecutive failures
+- **Recovery timeout:** 60 seconds
+- **Probe:** Single test request after timeout
+- **Scope:** Only connectivity/timeout errors (not user errors)
 
 #### Rate Limiter
 - **Algorithm:** Token Bucket

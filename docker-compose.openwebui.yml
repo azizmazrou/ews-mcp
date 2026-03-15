@@ -31,7 +31,7 @@ services:
       - API_BASE_URL_INTERNAL=${API_BASE_URL_INTERNAL:-}
       # Customize API metadata
       - API_TITLE=${API_TITLE:-Exchange Web Services (EWS) MCP API}
-      - API_VERSION=${API_VERSION:-3.3.0}
+      - API_VERSION=${API_VERSION:-3.4.0}
 
       # Timezone Configuration
       - TIMEZONE=${TIMEZONE:-Asia/Riyadh}

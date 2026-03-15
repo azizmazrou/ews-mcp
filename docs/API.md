@@ -1,6 +1,6 @@
 # API Documentation
 
-Complete reference for all EWS MCP Server v3.3 tools (36 base tools + 4 AI tools).
+Complete reference for all EWS MCP Server v3.4 tools (36 base tools + 4 AI tools).
 
 ## Contact Intelligence Tools (v3.3 Consolidated)
 

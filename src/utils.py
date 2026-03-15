@@ -1,26 +1,11 @@
 """Utility functions for EWS MCP Server."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Callable, Union
+from typing import Any, Dict, List, Optional, Union
 import logging
 import os
-import functools
 import json
 from exchangelib import EWSTimeZone, EWSDateTime, EWSDate
-from exchangelib.errors import (
-    RateLimitError,
-    ErrorServerBusy,
-    ErrorTimeoutExpired,
-    TransportError,
-    ResponseMessageError
-)
-from requests.exceptions import HTTPError, ConnectionError, Timeout
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type
-)
 import pytz
 
 
@@ -258,33 +243,13 @@ class EWSJSONEncoder(json.JSONEncoder):
     """
 
     def default(self, obj: Any) -> Any:
-        """Convert non-serializable objects to serializable format."""
-        # Handle datetime objects
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-
-        # Handle EWSDateTime and EWSDate
-        if isinstance(obj, (EWSDateTime, EWSDate)):
-            return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
-
-        # Handle EWS ID-like objects
-        if hasattr(obj, 'id'):
-            result = ews_id_to_str(obj)
-            if result is not None:
-                return result
-
-        # Handle objects with __dict__
-        if hasattr(obj, '__dict__'):
-            try:
-                return make_json_serializable(vars(obj))
-            except Exception:
-                pass
-
-        # Try string conversion
-        try:
-            return str(obj)
-        except Exception:
-            return f"<non-serializable: {type(obj).__name__}>"
+        """Convert non-serializable objects."""
+        result = make_json_serializable(obj)
+        if isinstance(result, (dict, list)):
+            return result
+        if isinstance(result, str):
+            return result
+        return str(result)
 
 
 def safe_json_dumps(obj: Any, **kwargs) -> str:
@@ -301,15 +266,22 @@ def safe_json_dumps(obj: Any, **kwargs) -> str:
 
 
 def format_error_response(error: Exception, context: str = "") -> Dict[str, Any]:
-    """Format error as response dictionary."""
+    """Format error as a short, actionable response."""
     logger = logging.getLogger(__name__)
-    error_msg = f"{context}: {str(error)}" if context else str(error)
+    error_msg = str(error)
+
+    if context and context != "":
+        error_msg = f"{context}: {error_msg}"
+
+    # Truncate very long error messages
+    if len(error_msg) > 200:
+        error_msg = error_msg[:197] + "..."
+
     logger.error(error_msg)
 
     return {
         "success": False,
-        "message": error_msg,
-        "error_type": type(error).__name__
+        "error": error_msg
     }
 
 
@@ -321,121 +293,6 @@ def format_success_response(message: str, **kwargs) -> Dict[str, Any]:
     }
     response.update(kwargs)
     return response
-
-
-def handle_ews_errors(func: Callable) -> Callable:
-    """Decorator to handle EWS errors with retry logic.
-
-    This decorator:
-    1. Automatically retries on rate limit, server busy, timeout, and HTTP errors
-    2. Uses exponential backoff (2s, 4s, 8s, 16s)
-    3. Maximum 4 retry attempts
-    4. Returns structured error responses
-    5. Logs all errors for debugging
-
-    Usage:
-        @handle_ews_errors
-        async def my_tool_execute(self, **kwargs):
-            # Your EWS operations here
-            pass
-    """
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        # Custom retry condition for HTTP errors (502, 503, 504)
-        def should_retry_http_error(exception):
-            """Check if HTTP error should be retried (502, 503, 504)."""
-            if isinstance(exception, HTTPError):
-                if hasattr(exception, 'response') and exception.response is not None:
-                    status_code = exception.response.status_code
-                    # Retry on transient server errors
-                    return status_code in [502, 503, 504]
-            return False
-
-        # Custom retry condition combining exception types and HTTP errors
-        def should_retry(exception):
-            """Determine if exception should be retried."""
-            # Always retry these exception types
-            if isinstance(exception, (
-                RateLimitError,
-                ErrorServerBusy,
-                ErrorTimeoutExpired,
-                TransportError,
-                ConnectionError,
-                Timeout
-            )):
-                return True
-            # Retry specific HTTP errors
-            return should_retry_http_error(exception)
-
-        # Create a retry decorator for this specific call
-        retry_decorator = retry(
-            retry=should_retry,
-            stop=stop_after_attempt(4),
-            wait=wait_exponential(multiplier=2, min=2, max=16),
-            reraise=True
-        )
-
-        try:
-            # Apply retry logic to the function
-            retried_func = retry_decorator(func)
-            return await retried_func(*args, **kwargs)
-        except RateLimitError as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Rate limit exceeded: {e}")
-            return format_error_response(
-                e,
-                context="Rate limit exceeded. Please try again later."
-            )
-        except ErrorServerBusy as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Exchange server busy: {e}")
-            return format_error_response(
-                e,
-                context="Exchange server is currently busy. Please try again."
-            )
-        except ErrorTimeoutExpired as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Operation timeout: {e}")
-            return format_error_response(
-                e,
-                context="Operation timed out. Please try again."
-            )
-        except TransportError as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Network/transport error: {e}")
-            return format_error_response(
-                e,
-                context="Network error occurred. Please check connectivity."
-            )
-        except HTTPError as e:
-            logger = logging.getLogger(__name__)
-            status_code = e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'
-            logger.error(f"HTTP error {status_code}: {e}")
-            if status_code in [502, 503, 504]:
-                return format_error_response(
-                    e,
-                    context=f"Server temporarily unavailable (HTTP {status_code}). Retried but failed."
-                )
-            return format_error_response(
-                e,
-                context=f"HTTP error {status_code} occurred."
-            )
-        except (ConnectionError, Timeout) as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Connection error: {e}")
-            return format_error_response(
-                e,
-                context="Connection error. Please check network connectivity and try again."
-            )
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"Unexpected error in {func.__name__}: {e}", exc_info=True)
-            return format_error_response(
-                e,
-                context=f"Unexpected error in {func.__name__}"
-            )
-
-    return wrapper
 
 
 def find_message_for_account(account, message_id):
@@ -499,10 +356,7 @@ def find_message_for_account(account, message_id):
     except Exception:
         pass
 
-    raise ToolExecutionError(
-        f"Message not found: {message_id}. "
-        f"The message may have been deleted or the ID may be invalid."
-    )
+    raise ToolExecutionError(f"Message not found: {message_id}")
 
 
 def find_message_across_folders(ews_client, message_id):

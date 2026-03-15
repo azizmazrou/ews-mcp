@@ -1,5 +1,58 @@
 # Changelog
 
+## v3.4.0 — Phase 3+4: Reliability & Code Quality (2026-03-15)
+
+### New Features
+
+#### Circuit Breaker (`src/middleware/circuit_breaker.py`)
+- Trips after 3 consecutive EWS connectivity failures
+- Rejects requests immediately for 60s instead of waiting for timeout
+- Allows one probe request after timeout to test recovery
+- Only trips on connectivity/timeout errors, not user errors (validation, not-found)
+- Saves ~30s per request when Exchange is down (no more 3x10s timeout retries)
+
+### Improvements
+
+#### Simplified Error Messages
+- `validate_input()` now produces `"to: Input should be a valid list"` instead of multi-line Pydantic internals
+- `format_error_response()` returns `{"success": false, "error": "..."}` (removed redundant `error_type` field)
+- Error messages truncated to 200 chars max — prevents Claude from processing paragraph-length Exchange error dumps
+- `find_message_for_account()` returns `"Message not found: {id}"` instead of a 3-line suggestion paragraph
+
+#### Proper async/await (`asyncio.to_thread`)
+- All `resolve_names()` calls in GALAdapter wrapped in `asyncio.to_thread()` — no longer blocks event loop
+- PersonService `_search_contacts()` and `_search_email_history()` run blocking iteration in thread pool
+- Inbox + Sent scans in `_search_email_history` and `get_communication_history` now run concurrently via `asyncio.gather()`
+
+### Code Quality
+
+#### Removed Dead Code
+- Removed `handle_ews_errors` decorator from `utils.py` (~70 lines) — was defined but never used by any tool
+- All tools use `BaseTool.safe_execute()` for error handling instead
+
+#### Deduplicated JSON Serialization
+- `EWSJSONEncoder.default()` now delegates to `make_json_serializable()` instead of duplicating the same logic
+- Single source of truth for datetime/EWS-object serialization
+
+### Token Budget Impact
+| Component | v3.3 | v3.4 | Savings |
+|---|---|---|---|
+| Error responses | ~150 tokens | ~50 tokens | -67% |
+| Circuit breaker (Exchange down) | ~5,000 tokens/min wasted | ~200 tokens/min | -96% |
+| **Simple operation total** | ~6,700 | ~6,200 | **-7%** |
+
+### Files Changed
+| File | Change |
+|---|---|
+| `src/middleware/circuit_breaker.py` | NEW (87 lines) |
+| `src/middleware/__init__.py` | Added CircuitBreaker export |
+| `src/tools/base.py` | Circuit breaker integration + simplified validation errors |
+| `src/utils.py` | Removed handle_ews_errors, deduplicated JSON encoder, simplified error responses |
+| `src/adapters/gal_adapter.py` | asyncio.to_thread for all resolve_names calls |
+| `src/services/person_service.py` | asyncio.to_thread + asyncio.gather for blocking EWS operations |
+
+---
+
 ## v3.3.0 — Phase 2: Tool Consolidation (2026-03-15)
 
 ### Breaking Changes

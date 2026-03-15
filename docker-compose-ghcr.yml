@@ -1,8 +1,8 @@
 version: '3.8'
 
-# EWS MCP v3.3 - Person-Centric Exchange Server
+# EWS MCP v3.4 - Person-Centric Exchange Server
 # Production deployment using GHCR pre-built image
-# Image: ghcr.io/azizmazrou/ews-mcp:latest (v3.3.0)
+# Image: ghcr.io/azizmazrou/ews-mcp:latest (v3.4.0)
 
 services:
   ews-mcp-server:
@@ -70,7 +70,7 @@ services:
     # Labels for monitoring and management
     labels:
       - "app=ews-mcp"
-      - "version=3.3.0"
+      - "version=3.4.0"
       - "tier=backend"
       - "deployment=production"
       - "image-source=ghcr"
