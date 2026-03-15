@@ -625,9 +625,7 @@ Exception
 ```json
 {
   "success": false,
-  "error": "Human-readable message",
-  "error_type": "ValidationError",
-  "is_retryable": false
+  "error": "Human-readable message (max 200 chars)"
 }
 ```
 

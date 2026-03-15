@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-Common issues and solutions for EWS MCP Server v3.0.
+Common issues and solutions for EWS MCP Server v3.4.
 
 > **Note:** Many issues from v2.x have been resolved in v3.0, particularly the GAL 0-results bug which is now completely fixed with multi-strategy search.
 
