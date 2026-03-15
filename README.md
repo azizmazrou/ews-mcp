@@ -1,4 +1,4 @@
-# EWS MCP Server v3.3
+# EWS MCP Server v3.4
 
 <div align="center">
 
@@ -6,7 +6,7 @@
 
 *Transform how AI assistants interact with Microsoft Exchange*
 
-[![Version](https://img.shields.io/badge/version-3.3.0-blue.svg)](https://github.com/azizmazrou/ews-mcp)
+[![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](https://github.com/azizmazrou/ews-mcp)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/azizmazrou/ews-mcp)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
@@ -14,6 +14,17 @@
 [Quick Start](#-quick-start) | [Features](#-feature-highlights) | [Documentation](#-documentation) | [Examples](#-usage-examples)
 
 </div>
+
+---
+
+## What's New in v3.4
+
+### Reliability & Code Quality
+
+- **Circuit Breaker**: Trips after 3 consecutive EWS failures, rejects requests instantly for 60s instead of waiting for timeout (saves ~30s/request when Exchange is down)
+- **Proper async/await**: All blocking `resolve_names()` calls wrapped in `asyncio.to_thread()`, inbox+sent scans run concurrently via `asyncio.gather()`
+- **Simplified errors**: Error messages capped at 200 chars, Pydantic validation errors shortened to human-readable format
+- **Removed dead code**: `handle_ews_errors` decorator (-70 lines), deduplicated JSON serialization
 
 ---
 
@@ -455,6 +466,12 @@ EWS MCP Server v3.3
 ---
 
 ## Version History
+
+### v3.4 - Reliability & Code Quality
+- **Circuit breaker**: Auto-trips after 3 EWS failures, instant rejection for 60s
+- **Async/await**: `asyncio.to_thread()` for blocking EWS calls, `asyncio.gather()` for concurrent scans
+- **Simplified errors**: 200-char max, human-readable validation messages
+- **Code cleanup**: -70 lines dead code, deduplicated JSON encoder
 
 ### v3.3 - Tool Consolidation
 - **10 tools merged into 5**: 46 → 36 tools, ~55% token savings on `list_tools`
