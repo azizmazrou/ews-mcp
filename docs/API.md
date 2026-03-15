@@ -1072,9 +1072,7 @@ All tools return error responses in the following format:
 ```json
 {
   "success": false,
-  "error": "Error description",
-  "error_type": "ValidationError",
-  "is_retryable": false
+  "error": "Human-readable message (max 200 chars)"
 }
 ```
 

@@ -45,7 +45,7 @@ async def test_find_meeting_times_basic(mock_ews_client):
     assert result["success"] is True
     assert "suggestions" in result
     assert result["duration_minutes"] == 60
-    assert result["attendee_count"] == 2
+    assert len(result["attendees"]) == 2
 
 
 @pytest.mark.asyncio
@@ -291,7 +291,7 @@ async def test_find_meeting_times_multiple_attendees(mock_ews_client):
         )
 
     assert result["success"] is True
-    assert result["attendee_count"] == 5
+    assert len(result["attendees"]) == 5
 
 
 @pytest.mark.asyncio
@@ -328,4 +328,4 @@ async def test_find_meeting_times_no_available_slots(mock_ews_client):
 
     assert result["success"] is True
     # Should return empty or very few suggestions
-    assert len(result["suggestions"]) == 0 or result["suggestion_count"] == 0
+    assert len(result["suggestions"]) == 0

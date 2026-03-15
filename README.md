@@ -66,7 +66,7 @@ manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
 <tr>
 <td width="50%">
 
-### Email Operations (11 tools)
+### Email Operations (10 tools)
 - Send, read, search, delete emails
 - **Reply** with thread preservation
 - **Forward** with inline images intact
