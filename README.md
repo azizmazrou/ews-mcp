@@ -415,7 +415,7 @@ Add to your Claude Desktop config:
 ## Architecture
 
 ```
-EWS MCP Server v3.3
+EWS MCP Server v3.4
 ├── MCP Protocol Layer (stdio/SSE)
 ├── Tool Registry (36 tools)
 │   ├── Email Tools (11) ─────────── send, read, search (3 modes), reply, forward...

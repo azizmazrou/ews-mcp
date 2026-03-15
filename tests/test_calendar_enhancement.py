@@ -26,18 +26,19 @@ async def test_find_meeting_times_basic(mock_ews_client):
     from exchangelib import EWSTimeZone
     mock_tz = EWSTimeZone('UTC')
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with patch('src.tools.calendar_tools.get_timezone', return_value=mock_tz), \
-         patch('src.tools.calendar_tools.make_tz_aware') as mock_make_tz_aware:
+         patch('src.tools.calendar_tools.parse_datetime_tz_aware') as mock_parse:
 
-        # Mock make_tz_aware to return dates in the future
-        def mock_tz_aware(dt):
-            return dt
-
-        mock_make_tz_aware.side_effect = mock_tz_aware
+        mock_parse.side_effect = lambda x: datetime.fromisoformat(x.replace('Z', '+00:00')) if x else None
 
         result = await tool.execute(
             attendees=["alice@example.com", "bob@example.com"],
             duration_minutes=60,
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat(),
             max_suggestions=5
         )
 
@@ -63,17 +64,19 @@ async def test_find_meeting_times_with_preferences(mock_ews_client):
     from exchangelib import EWSTimeZone
     mock_tz = EWSTimeZone('UTC')
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with patch('src.tools.calendar_tools.get_timezone', return_value=mock_tz), \
-         patch('src.tools.calendar_tools.make_tz_aware') as mock_make_tz_aware:
+         patch('src.tools.calendar_tools.parse_datetime_tz_aware') as mock_parse:
 
-        def mock_tz_aware(dt):
-            return dt
-
-        mock_make_tz_aware.side_effect = mock_tz_aware
+        mock_parse.side_effect = lambda x: datetime.fromisoformat(x.replace('Z', '+00:00')) if x else None
 
         result = await tool.execute(
             attendees=["user@example.com"],
             duration_minutes=30,
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat(),
             max_suggestions=3,
             preferences={
                 "prefer_morning": True,
@@ -107,20 +110,15 @@ async def test_find_meeting_times_with_date_range(mock_ews_client):
     end_date = start_date + timedelta(days=1)
 
     with patch('src.tools.calendar_tools.get_timezone', return_value=mock_tz), \
-         patch('src.tools.calendar_tools.make_tz_aware') as mock_make_tz_aware, \
          patch('src.tools.calendar_tools.parse_datetime_tz_aware') as mock_parse:
 
-        def mock_tz_aware(dt):
-            return dt
-
-        mock_make_tz_aware.side_effect = mock_tz_aware
-        mock_parse.side_effect = lambda x: datetime.fromisoformat(x)
+        mock_parse.side_effect = lambda x: datetime.fromisoformat(x.replace('Z', '+00:00')) if x else None
 
         result = await tool.execute(
             attendees=["user@example.com"],
             duration_minutes=45,
-            start_date=start_date.isoformat(),
-            end_date=end_date.isoformat()
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat()
         )
 
     assert result["success"] is True
@@ -131,8 +129,15 @@ async def test_find_meeting_times_no_attendees(mock_ews_client):
     """Test finding meeting times without attendees."""
     tool = FindMeetingTimesTool(mock_ews_client)
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with pytest.raises(ToolExecutionError) as exc_info:
-        await tool.execute(duration_minutes=60)
+        await tool.execute(
+            duration_minutes=60,
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat()
+        )
 
     assert "attendees" in str(exc_info.value).lower()
 
@@ -142,10 +147,15 @@ async def test_find_meeting_times_invalid_duration(mock_ews_client):
     """Test finding meeting times with invalid duration."""
     tool = FindMeetingTimesTool(mock_ews_client)
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with pytest.raises(ToolExecutionError) as exc_info:
         await tool.execute(
             attendees=["user@example.com"],
-            duration_minutes=5  # Too short
+            duration_minutes=5,  # Too short
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat()
         )
 
     assert "duration_minutes must be between 15 and 480" in str(exc_info.value)
@@ -172,17 +182,19 @@ async def test_find_meeting_times_busy_attendees(mock_ews_client):
     from exchangelib import EWSTimeZone
     mock_tz = EWSTimeZone('UTC')
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with patch('src.tools.calendar_tools.get_timezone', return_value=mock_tz), \
-         patch('src.tools.calendar_tools.make_tz_aware') as mock_make_tz_aware:
+         patch('src.tools.calendar_tools.parse_datetime_tz_aware') as mock_parse:
 
-        def mock_tz_aware(dt):
-            return dt
-
-        mock_make_tz_aware.side_effect = mock_tz_aware
+        mock_parse.side_effect = lambda x: datetime.fromisoformat(x.replace('Z', '+00:00')) if x else None
 
         result = await tool.execute(
             attendees=["busy@example.com", "free@example.com"],
             duration_minutes=60,
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat(),
             max_suggestions=5
         )
 
@@ -206,17 +218,19 @@ async def test_find_meeting_times_working_hours(mock_ews_client):
     from exchangelib import EWSTimeZone
     mock_tz = EWSTimeZone('UTC')
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with patch('src.tools.calendar_tools.get_timezone', return_value=mock_tz), \
-         patch('src.tools.calendar_tools.make_tz_aware') as mock_make_tz_aware:
+         patch('src.tools.calendar_tools.parse_datetime_tz_aware') as mock_parse:
 
-        def mock_tz_aware(dt):
-            return dt
-
-        mock_make_tz_aware.side_effect = mock_tz_aware
+        mock_parse.side_effect = lambda x: datetime.fromisoformat(x.replace('Z', '+00:00')) if x else None
 
         result = await tool.execute(
             attendees=["user@example.com"],
             duration_minutes=60,
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat(),
             preferences={
                 "working_hours_start": 9,
                 "working_hours_end": 17
@@ -254,13 +268,13 @@ async def test_find_meeting_times_multiple_attendees(mock_ews_client):
     from exchangelib import EWSTimeZone
     mock_tz = EWSTimeZone('UTC')
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with patch('src.tools.calendar_tools.get_timezone', return_value=mock_tz), \
-         patch('src.tools.calendar_tools.make_tz_aware') as mock_make_tz_aware:
+         patch('src.tools.calendar_tools.parse_datetime_tz_aware') as mock_parse:
 
-        def mock_tz_aware(dt):
-            return dt
-
-        mock_make_tz_aware.side_effect = mock_tz_aware
+        mock_parse.side_effect = lambda x: datetime.fromisoformat(x.replace('Z', '+00:00')) if x else None
 
         result = await tool.execute(
             attendees=[
@@ -271,6 +285,8 @@ async def test_find_meeting_times_multiple_attendees(mock_ews_client):
                 "user5@example.com"
             ],
             duration_minutes=60,
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat(),
             max_suggestions=5
         )
 
@@ -294,17 +310,19 @@ async def test_find_meeting_times_no_available_slots(mock_ews_client):
     from exchangelib import EWSTimeZone
     mock_tz = EWSTimeZone('UTC')
 
+    start_date = datetime.now() + timedelta(days=1)
+    end_date = start_date + timedelta(days=1)
+
     with patch('src.tools.calendar_tools.get_timezone', return_value=mock_tz), \
-         patch('src.tools.calendar_tools.make_tz_aware') as mock_make_tz_aware:
+         patch('src.tools.calendar_tools.parse_datetime_tz_aware') as mock_parse:
 
-        def mock_tz_aware(dt):
-            return dt
-
-        mock_make_tz_aware.side_effect = mock_tz_aware
+        mock_parse.side_effect = lambda x: datetime.fromisoformat(x.replace('Z', '+00:00')) if x else None
 
         result = await tool.execute(
             attendees=["busy@example.com"],
             duration_minutes=60,
+            date_range_start=start_date.isoformat(),
+            date_range_end=end_date.isoformat(),
             max_suggestions=5
         )
 

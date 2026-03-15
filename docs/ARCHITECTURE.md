@@ -111,6 +111,7 @@ src/
 │   └── contact_intelligence_tools.py  # Uses PersonService!
 │
 ├── middleware/
+│   ├── circuit_breaker.py         # NEW v3.4 - Circuit breaker
 │   ├── rate_limiter.py
 │   ├── error_handler.py
 │   └── logging.py                 # Enterprise logging

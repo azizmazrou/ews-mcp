@@ -20,6 +20,7 @@ CHANGES:
 - Communication statistics integration
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
@@ -304,99 +305,131 @@ class AnalyzeContactsTool(BaseTool):
 
             start_date = datetime.now(account.default_timezone) - timedelta(days=days_back)
 
-            stats = {"total_emails": 0, "received": 0, "sent": 0, "first_contact": None, "last_contact": None}
-            timeline = defaultdict(int)
-            topics = defaultdict(int)
-            recent_emails = []
-
             MAX_ITEMS_TO_SCAN = 2000
 
-            # 1. Search Inbox — server-side filter by sender email
-            inbox = account.inbox
-            received_items = inbox.filter(
-                datetime_received__gte=start_date,
-                sender__email_address=email
-            ).order_by('-datetime_received').only('sender', 'subject', 'datetime_received', 'text_body')
+            def _scan_inbox():
+                """Scan inbox for received emails from contact (blocking)."""
+                stats = {"received": 0, "items": [], "timeline": defaultdict(int), "topics": defaultdict(int)}
+                received_items = account.inbox.filter(
+                    datetime_received__gte=start_date,
+                    sender__email_address=email
+                ).order_by('-datetime_received').only('sender', 'subject', 'datetime_received', 'text_body')
 
-            received_list = []
-            for item in received_items[:MAX_ITEMS_TO_SCAN]:
-                received_list.append(item)
+                first_contact = None
+                last_contact = None
 
-            stats["received"] = len(received_list)
+                for item in received_items[:MAX_ITEMS_TO_SCAN]:
+                    stats["received"] += 1
+                    received_time = safe_get(item, 'datetime_received')
+                    if received_time:
+                        if not first_contact or received_time < first_contact:
+                            first_contact = received_time
+                        if not last_contact or received_time > last_contact:
+                            last_contact = received_time
+                        stats["timeline"][received_time.strftime("%Y-%m")] += 1
+                        if include_topics:
+                            subject = safe_get(item, 'subject', '')
+                            self._extract_topics(subject, stats["topics"])
 
-            for item in received_list:
-                received_time = safe_get(item, 'datetime_received')
-                if received_time:
-                    if not stats["first_contact"] or received_time < stats["first_contact"]:
-                        stats["first_contact"] = received_time
-                    if not stats["last_contact"] or received_time > stats["last_contact"]:
-                        stats["last_contact"] = received_time
-                    timeline[received_time.strftime("%Y-%m")] += 1
-                    if include_topics:
-                        self._extract_topics(safe_get(item, 'subject', ''), topics)
+                    stats["items"].append({
+                        "direction": "received",
+                        "subject": safe_get(item, 'subject', ''),
+                        "date": received_time.isoformat() if received_time else None,
+                        "preview": (safe_get(item, 'text_body', '') or '')[:200]
+                    })
 
-            for item in received_list[:max_emails]:
-                recent_emails.append({
-                    "direction": "received",
-                    "subject": safe_get(item, 'subject', ''),
-                    "date": safe_get(item, 'datetime_received').isoformat() if safe_get(item, 'datetime_received') else None,
-                    "preview": (safe_get(item, 'text_body', '') or '')[:200]
-                })
+                stats["first_contact"] = first_contact
+                stats["last_contact"] = last_contact
+                return stats
 
-            # 2. Search Sent Items — client-side filter (no server-side recipient filter in EWS)
-            sent_items = account.sent
-            sent_query = sent_items.filter(
-                datetime_sent__gte=start_date
-            ).order_by('-datetime_sent').only('to_recipients', 'subject', 'datetime_sent', 'text_body')
+            def _scan_sent():
+                """Scan sent items for emails to contact (blocking)."""
+                stats = {"sent": 0, "items": [], "timeline": defaultdict(int), "topics": defaultdict(int)}
+                sent_query = account.sent.filter(
+                    datetime_sent__gte=start_date
+                ).order_by('-datetime_sent').only('to_recipients', 'subject', 'datetime_sent', 'text_body')
 
-            sent_list = []
-            items_scanned = 0
-            for item in sent_query:
-                items_scanned += 1
-                if items_scanned > MAX_ITEMS_TO_SCAN:
-                    break
-                recipients = safe_get(item, 'to_recipients', []) or []
-                for recipient in recipients:
-                    if safe_get(recipient, 'email_address', '').lower() == email:
-                        sent_list.append(item)
+                first_contact = None
+                last_contact = None
+                items_scanned = 0
+
+                for item in sent_query:
+                    items_scanned += 1
+                    if items_scanned > MAX_ITEMS_TO_SCAN:
                         break
+                    recipients = safe_get(item, 'to_recipients', []) or []
+                    for recipient in recipients:
+                        if safe_get(recipient, 'email_address', '').lower() == email:
+                            stats["sent"] += 1
+                            sent_time = safe_get(item, 'datetime_sent')
+                            if sent_time:
+                                if not first_contact or sent_time < first_contact:
+                                    first_contact = sent_time
+                                if not last_contact or sent_time > last_contact:
+                                    last_contact = sent_time
+                                stats["timeline"][sent_time.strftime("%Y-%m")] += 1
+                                if include_topics:
+                                    self._extract_topics(safe_get(item, 'subject', ''), stats["topics"])
 
-            stats["sent"] = len(sent_list)
+                            stats["items"].append({
+                                "direction": "sent",
+                                "subject": safe_get(item, 'subject', ''),
+                                "date": sent_time.isoformat() if sent_time else None,
+                                "preview": (safe_get(item, 'text_body', '') or '')[:200]
+                            })
+                            break
 
-            for item in sent_list:
-                sent_time = safe_get(item, 'datetime_sent')
-                if sent_time:
-                    if not stats["first_contact"] or sent_time < stats["first_contact"]:
-                        stats["first_contact"] = sent_time
-                    if not stats["last_contact"] or sent_time > stats["last_contact"]:
-                        stats["last_contact"] = sent_time
-                    timeline[sent_time.strftime("%Y-%m")] += 1
-                    if include_topics:
-                        self._extract_topics(safe_get(item, 'subject', ''), topics)
+                stats["first_contact"] = first_contact
+                stats["last_contact"] = last_contact
+                return stats
 
-            sent_list.sort(key=lambda x: safe_get(x, 'datetime_sent', datetime.min), reverse=True)
-            for item in sent_list[:max_emails // 2]:
-                recent_emails.append({
-                    "direction": "sent",
-                    "subject": safe_get(item, 'subject', ''),
-                    "date": safe_get(item, 'datetime_sent').isoformat() if safe_get(item, 'datetime_sent') else None,
-                    "preview": (safe_get(item, 'text_body', '') or '')[:200]
-                })
+            # Run inbox and sent scans concurrently
+            inbox_stats, sent_stats = await asyncio.gather(
+                asyncio.to_thread(_scan_inbox),
+                asyncio.to_thread(_scan_sent)
+            )
 
-            stats["total_emails"] = stats["received"] + stats["sent"]
-            if stats["first_contact"]:
-                stats["first_contact"] = stats["first_contact"].isoformat()
-            if stats["last_contact"]:
-                stats["last_contact"] = stats["last_contact"].isoformat()
+            # Merge results
+            total = inbox_stats["received"] + sent_stats["sent"]
+            first_contact = None
+            last_contact = None
+            for fc in [inbox_stats["first_contact"], sent_stats["first_contact"]]:
+                if fc and (not first_contact or fc < first_contact):
+                    first_contact = fc
+            for lc in [inbox_stats["last_contact"], sent_stats["last_contact"]]:
+                if lc and (not last_contact or lc > last_contact):
+                    last_contact = lc
+
+            stats = {
+                "total_emails": total,
+                "received": inbox_stats["received"],
+                "sent": sent_stats["sent"],
+                "first_contact": first_contact.isoformat() if first_contact else None,
+                "last_contact": last_contact.isoformat() if last_contact else None,
+            }
             if days_back > 0:
                 months = days_back / 30
-                stats["emails_per_month"] = round(stats["total_emails"] / months, 1) if months > 0 else 0
+                stats["emails_per_month"] = round(total / months, 1) if months > 0 else 0
 
+            # Merge timelines
+            timeline = defaultdict(int)
+            for t in [inbox_stats["timeline"], sent_stats["timeline"]]:
+                for k, v in t.items():
+                    timeline[k] += v
             timeline_list = [{"month": m, "count": c} for m, c in sorted(timeline.items())]
+
+            # Merge topics
+            topics = defaultdict(int)
+            for t in [inbox_stats["topics"], sent_stats["topics"]]:
+                for k, v in t.items():
+                    topics[k] += v
             top_topics = sorted(
                 [{"topic": t, "count": c} for t, c in topics.items()],
                 key=lambda x: x["count"], reverse=True
             )[:10]
+
+            # Merge recent emails
+            recent_emails = inbox_stats["items"][:max_emails] + sent_stats["items"][:max_emails // 2]
             recent_emails.sort(key=lambda x: x["date"] if x["date"] else "", reverse=True)
 
             return format_success_response(
@@ -478,44 +511,67 @@ class AnalyzeContactsTool(BaseTool):
     async def _gather_contacts(self, days_back: int, account) -> Dict[str, Dict[str, Any]]:
         """Gather all contacts from email history."""
         start_date = datetime.now(account.default_timezone) - timedelta(days=days_back)
+
+        def _scan_inbox_contacts():
+            contacts = {}
+            for item in account.inbox.filter(datetime_received__gte=start_date).only('sender', 'datetime_received')[:2000]:
+                sender = safe_get(item, 'sender')
+                if sender:
+                    email = safe_get(sender, 'email_address', '').lower()
+                    name = safe_get(sender, 'name', '')
+                    received_time = safe_get(item, 'datetime_received')
+                    if email and received_time:
+                        if email not in contacts:
+                            domain = email.split('@')[1] if '@' in email else 'unknown'
+                            contacts[email] = {"email": email, "name": name, "domain": domain, "received": 0, "sent": 0, "last_contact": None, "first_contact": None}
+                        contacts[email]["received"] += 1
+                        if not contacts[email]["last_contact"] or received_time > contacts[email]["last_contact"]:
+                            contacts[email]["last_contact"] = received_time
+                        if not contacts[email]["first_contact"] or received_time < contacts[email]["first_contact"]:
+                            contacts[email]["first_contact"] = received_time
+            return contacts
+
+        def _scan_sent_contacts():
+            contacts = {}
+            for item in account.sent.filter(datetime_sent__gte=start_date).only('to_recipients', 'datetime_sent')[:2000]:
+                recipients = safe_get(item, 'to_recipients', [])
+                sent_time = safe_get(item, 'datetime_sent')
+                for recipient in recipients:
+                    email = safe_get(recipient, 'email_address', '').lower()
+                    name = safe_get(recipient, 'name', '')
+                    if email and sent_time:
+                        if email not in contacts:
+                            domain = email.split('@')[1] if '@' in email else 'unknown'
+                            contacts[email] = {"email": email, "name": name, "domain": domain, "received": 0, "sent": 0, "last_contact": None, "first_contact": None}
+                        contacts[email]["sent"] += 1
+                        if not contacts[email]["last_contact"] or sent_time > contacts[email]["last_contact"]:
+                            contacts[email]["last_contact"] = sent_time
+                        if not contacts[email]["first_contact"] or sent_time < contacts[email]["first_contact"]:
+                            contacts[email]["first_contact"] = sent_time
+            return contacts
+
+        inbox_contacts, sent_contacts = await asyncio.gather(
+            asyncio.to_thread(_scan_inbox_contacts),
+            asyncio.to_thread(_scan_sent_contacts)
+        )
+
+        # Merge
         contacts = {}
-
-        inbox = account.inbox
-        for item in inbox.filter(datetime_received__gte=start_date).only('sender', 'datetime_received')[:2000]:
-            sender = safe_get(item, 'sender')
-            if sender:
-                email = safe_get(sender, 'email_address', '').lower()
-                name = safe_get(sender, 'name', '')
-                received_time = safe_get(item, 'datetime_received')
-                if email and received_time:
-                    if email not in contacts:
-                        domain = email.split('@')[1] if '@' in email else 'unknown'
-                        contacts[email] = {"email": email, "name": name, "domain": domain, "received": 0, "sent": 0, "last_contact": None, "first_contact": None}
-                    contacts[email]["received"] += 1
-                    if not contacts[email]["last_contact"] or received_time > contacts[email]["last_contact"]:
-                        contacts[email]["last_contact"] = received_time
-                    if not contacts[email]["first_contact"] or received_time < contacts[email]["first_contact"]:
-                        contacts[email]["first_contact"] = received_time
-
-        sent_items = account.sent
-        for item in sent_items.filter(datetime_sent__gte=start_date).only('to_recipients', 'datetime_sent')[:2000]:
-            recipients = safe_get(item, 'to_recipients', [])
-            sent_time = safe_get(item, 'datetime_sent')
-            for recipient in recipients:
-                email = safe_get(recipient, 'email_address', '').lower()
-                name = safe_get(recipient, 'name', '')
-                if email and sent_time:
-                    if email not in contacts:
-                        domain = email.split('@')[1] if '@' in email else 'unknown'
-                        contacts[email] = {"email": email, "name": name, "domain": domain, "received": 0, "sent": 0, "last_contact": None, "first_contact": None}
-                    contacts[email]["sent"] += 1
-                    if not contacts[email]["last_contact"] or sent_time > contacts[email]["last_contact"]:
-                        contacts[email]["last_contact"] = sent_time
-                    if not contacts[email]["first_contact"] or sent_time < contacts[email]["first_contact"]:
-                        contacts[email]["first_contact"] = sent_time
+        for source in [inbox_contacts, sent_contacts]:
+            for email, data in source.items():
+                if email not in contacts:
+                    contacts[email] = data
+                else:
+                    contacts[email]["received"] += data["received"]
+                    contacts[email]["sent"] += data["sent"]
+                    if data["last_contact"] and (not contacts[email]["last_contact"] or data["last_contact"] > contacts[email]["last_contact"]):
+                        contacts[email]["last_contact"] = data["last_contact"]
+                    if data["first_contact"] and (not contacts[email]["first_contact"] or data["first_contact"] < contacts[email]["first_contact"]):
+                        contacts[email]["first_contact"] = data["first_contact"]
 
         for contact in contacts.values():
             contact["total_emails"] = contact["received"] + contact["sent"]
+
         return contacts
 
     def _analyze_top_contacts(self, contacts: Dict, top_n: int) -> Dict[str, Any]:
