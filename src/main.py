@@ -107,7 +107,7 @@ class EWSMCPServer:
             module="main",
             action="SERVER_INIT",
             data={
-                "version": "3.3.0",
+                "version": "3.4.0",
                 "user": self.settings.ews_email,
                 "auth_type": self.settings.ews_auth_type,
                 "server_url": self.settings.ews_server_url or "autodiscover"

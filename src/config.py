@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     api_base_url_internal: Optional[str] = None  # Internal Docker URL (e.g., http://ews-mcp:8000)
     api_title: str = "Exchange Web Services (EWS) MCP API"
     api_description: str = "REST API for Exchange operations via Model Context Protocol"
-    api_version: str = "3.3.0"
+    api_version: str = "3.4.0"
 
     # Performance
     enable_cache: bool = True

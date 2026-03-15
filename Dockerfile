@@ -61,9 +61,9 @@ COPY --chown=mcp:mcp src/ ./src/
 RUN find /app/src -type f -name "*.pyc" -delete && \
     find /app/src -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-# Verify v3.3 architecture deployed correctly
-RUN grep -q "VERSION: 3.3.0 - TOOL CONSOLIDATION" /app/src/tools/contact_intelligence_tools.py || \
-    (echo "ERROR: v3.3 not deployed" && exit 1) && \
+# Verify v3.4 architecture deployed correctly
+RUN grep -q "VERSION: 3.4.0 - RELIABILITY & ASYNC" /app/src/tools/contact_intelligence_tools.py || \
+    (echo "ERROR: v3.4 not deployed" && exit 1) && \
     test -f /app/src/core/person.py || \
     (echo "ERROR: Person model missing" && exit 1) && \
     test -f /app/src/services/person_service.py || \

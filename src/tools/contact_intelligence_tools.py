@@ -5,7 +5,7 @@ Provides advanced contact search and analysis capabilities:
 - GetCommunicationHistoryTool: Analyze communication patterns with contacts
 - AnalyzeNetworkTool: Professional network intelligence
 
-VERSION: 3.3.0 - TOOL CONSOLIDATION
+VERSION: 3.4.0 - RELIABILITY & ASYNC
 CHANGES:
 - NOW USES PersonService with multi-strategy GAL search (FIXES 0-RESULTS BUG!)
 - Person-centric architecture with proper Person objects
