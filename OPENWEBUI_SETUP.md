@@ -26,7 +26,7 @@ EWS MCP Server now includes **built-in OpenAPI/REST support**, eliminating the n
 │         │   36 Exchange       │                        │
 │         │   Tools              │                        │
 │         │                      │                        │
-│         │  • Email (11)        │                        │
+│         │  • Email (10)        │                        │
 │         │  • Calendar (7)      │                        │
 │         │  • Contacts (3)      │                        │
 │         │  • Intelligence (2)  │                        │
@@ -132,7 +132,7 @@ curl -X POST http://localhost:8000/api/tools/find_person \
 
 4. **Auto-Discovery**:
    - Open WebUI will automatically fetch `/openapi.json`
-   - All 36+ tools will be discovered and made available
+   - All 36 tools will be discovered and made available
    - Tools will appear in the function picker during chats
 
 5. **Start Using**:
