@@ -23,7 +23,7 @@ EWS MCP Server now includes **built-in OpenAPI/REST support**, eliminating the n
 │          └─────────┬───────────────┘                   │
 │                    │                                   │
 │         ┌──────────▼──────────┐                        │
-│         │   36+ Exchange       │                        │
+│         │   36 Exchange       │                        │
 │         │   Tools              │                        │
 │         │                      │                        │
 │         │  • Email (11)        │                        │

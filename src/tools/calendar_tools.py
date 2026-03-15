@@ -685,6 +685,9 @@ class FindMeetingTimesTool(BaseTool):
         max_suggestions = kwargs.get("max_suggestions", 5)
         preferences = kwargs.get("preferences", {})
 
+        if duration_minutes < 15 or duration_minutes > 480:
+            raise ToolExecutionError("duration_minutes must be between 15 and 480")
+
         if not attendees:
             raise ToolExecutionError("attendees list is required")
 

@@ -1,6 +1,6 @@
 # Setup Guide
 
-Step-by-step guide to set up EWS MCP Server v3.0.
+Step-by-step guide to set up EWS MCP Server v3.4.
 
 > **v3.0 Features:** Person-centric architecture, multi-strategy GAL search (fixes 0-results bug), enterprise logging, intelligent caching, and comprehensive attachment support.
 
