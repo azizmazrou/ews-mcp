@@ -1,8 +1,8 @@
 # Deployment Guide
 
-Complete guide for deploying EWS MCP Server v3.0 in various environments.
+Complete guide for deploying EWS MCP Server v3.4 in various environments.
 
-> **v3.0 Features:** Person-centric architecture, multi-strategy GAL search, enterprise logging (console for monitoring, files for troubleshooting), and intelligent caching.
+> **v3.4 Features:** Person-centric architecture, multi-strategy GAL search, enterprise logging (console for monitoring, files for troubleshooting), and intelligent caching.
 
 ## Pre-built Docker Image (Easiest)
 

@@ -10,7 +10,7 @@ chown -R mcp:mcp /app/logs 2>/dev/null || true
 chmod -R 755 /app/logs 2>/dev/null || true
 
 # Single startup message for monitoring
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] EWS-MCP v3.3 starting"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] EWS-MCP v3.4 starting"
 
 # Switch to non-root user and start application
 # All runtime logs go to /app/logs via Python logging

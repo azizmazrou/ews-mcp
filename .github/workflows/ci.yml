@@ -43,6 +43,10 @@ jobs:
           python -m py_compile src/*.py
           python -m py_compile src/tools/*.py
           python -m py_compile src/middleware/*.py
+          python -m py_compile src/core/*.py
+          python -m py_compile src/services/*.py
+          python -m py_compile src/adapters/*.py
+          python -m py_compile src/ai/*.py
           echo "✓ All Python files have valid syntax"
 
       - name: Summary

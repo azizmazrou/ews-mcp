@@ -44,9 +44,19 @@ async def test_get_calendar_tool(mock_ews_client):
     mock_event.end = datetime(2025, 1, 15, 11, 0)
     mock_event.location = "Room A"
     mock_event.is_all_day = False
+    mock_event.organizer = MagicMock(email_address="organizer@example.com")
+    mock_event.required_attendees = []
+
+    mock_order = MagicMock()
+    mock_order.__iter__ = lambda self: iter([mock_event])
+    mock_order.__getitem__ = lambda self, key: [mock_event]
+
+    mock_only = MagicMock()
+    mock_only.order_by.return_value = mock_order
 
     mock_view = MagicMock()
-    mock_view.order_by.return_value = [mock_event]
+    mock_view.only.return_value = mock_only
+
     mock_ews_client.account.calendar.view.return_value = mock_view
 
     result = await tool.execute()
