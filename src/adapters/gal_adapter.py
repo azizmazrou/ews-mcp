@@ -4,10 +4,11 @@ GAL (Global Address List) Adapter with Multi-Strategy Search.
 This adapter implements the comprehensive GAL search strategy that fixes
 the 0-results bug by using multiple fallback methods.
 
-VERSION: 3.0.0
+VERSION: 3.4.0
 PRIORITY: #1 - Solves GAL 0-results bug
 """
 
+import asyncio
 import logging
 from typing import List, Optional, Any, Dict
 from difflib import SequenceMatcher
@@ -122,7 +123,8 @@ class GALAdapter:
         This is the original v2.x method, fast but limited.
         """
         try:
-            results = self.ews_client.account.protocol.resolve_names(
+            results = await asyncio.to_thread(
+                self.ews_client.account.protocol.resolve_names,
                 names=[query],
                 return_full_contact_data=return_full_data
             )
@@ -166,7 +168,8 @@ class GALAdapter:
             # METHOD A: Try resolve_names with wildcard
             # Some Exchange servers support wildcards
             wildcard_query = f"{query}*"
-            results = self.ews_client.account.protocol.resolve_names(
+            results = await asyncio.to_thread(
+                self.ews_client.account.protocol.resolve_names,
                 names=[wildcard_query],
                 return_full_contact_data=return_full_data
             )
@@ -216,7 +219,8 @@ class GALAdapter:
             # Try searching with domain query
             domain_query = f"*@{domain}"
 
-            results = self.ews_client.account.protocol.resolve_names(
+            results = await asyncio.to_thread(
+                self.ews_client.account.protocol.resolve_names,
                 names=[domain_query],
                 return_full_contact_data=return_full_data
             )
@@ -262,7 +266,8 @@ class GALAdapter:
 
             all_persons = []
             try:
-                results = self.ews_client.account.protocol.resolve_names(
+                results = await asyncio.to_thread(
+                    self.ews_client.account.protocol.resolve_names,
                     names=[prefix],
                     return_full_contact_data=False
                 )
@@ -318,40 +323,42 @@ class GALAdapter:
 
         Fallback method when GAL doesn't return results.
         """
-        try:
-            contacts = self.ews_client.account.contacts.all()
-
+        def _blocking():
             persons = []
             query_lower = query.lower()
+            try:
+                contacts = self.ews_client.account.contacts.all()
+                for contact in list(contacts)[:100]:  # Limit for performance
+                    try:
+                        # Check if query matches
+                        given_name = getattr(contact, "given_name", "") or ""
+                        surname = getattr(contact, "surname", "") or ""
+                        display_name = getattr(contact, "display_name", "") or ""
+                        email_addrs = getattr(contact, "email_addresses", []) or []
 
-            for contact in contacts[:100]:  # Limit for performance
-                try:
-                    # Check if query matches
-                    given_name = getattr(contact, "given_name", "") or ""
-                    surname = getattr(contact, "surname", "") or ""
-                    display_name = getattr(contact, "display_name", "") or ""
-                    email_addrs = getattr(contact, "email_addresses", []) or []
+                        # Get email
+                        email = ""
+                        if email_addrs:
+                            email = email_addrs[0].email if hasattr(email_addrs[0], 'email') else ""
 
-                    # Get email
-                    email = ""
-                    if email_addrs:
-                        email = email_addrs[0].email if hasattr(email_addrs[0], 'email') else ""
+                        # Match
+                        if (query_lower in given_name.lower() or
+                            query_lower in surname.lower() or
+                            query_lower in display_name.lower() or
+                            query_lower in email.lower()):
 
-                    # Match
-                    if (query_lower in given_name.lower() or
-                        query_lower in surname.lower() or
-                        query_lower in display_name.lower() or
-                        query_lower in email.lower()):
+                            # Convert to Person
+                            person = Person.from_contact(contact)
+                            persons.append(person)
 
-                        # Convert to Person
-                        person = Person.from_contact(contact)
-                        persons.append(person)
-
-                except Exception as e:
-                    continue
-
+                    except Exception:
+                        continue
+            except Exception as e:
+                self.logger.warning(f"    Contacts folder search failed: {e}")
             return persons
 
+        try:
+            return await asyncio.to_thread(_blocking)
         except Exception as e:
             self.logger.warning(f"    Contacts folder search failed: {e}")
             return []

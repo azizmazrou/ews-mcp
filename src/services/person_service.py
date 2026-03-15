@@ -1,5 +1,5 @@
 """
-PersonService - Unified person operations for EWS MCP v3.0.
+PersonService - Unified person operations for EWS MCP v3.4.
 
 This service orchestrates person discovery across multiple sources:
 - Global Address List (GAL) - via GALAdapter with multi-strategy search
@@ -7,14 +7,16 @@ This service orchestrates person discovery across multiple sources:
 - Email History (sent/received)
 
 KEY FEATURE: Fixes GAL 0-results bug with intelligent fallback strategies.
+v3.4: asyncio.to_thread for blocking EWS calls, asyncio.gather for concurrent scans.
 """
 
+import asyncio
 import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
-from ..core.person import Person, PersonSource, CommunicationStats
+from ..core.person import Person, PersonSource, CommunicationStats, EmailAddress
 from ..adapters.gal_adapter import GALAdapter
 from ..adapters.cache_adapter import get_cache
 from ..utils import safe_get
@@ -201,63 +203,86 @@ class PersonService:
 
         try:
             start_date = datetime.now(self.ews_client.account.default_timezone) - timedelta(days=days_back)
+            target_email = email.lower()
 
-            stats = CommunicationStats(
-                total_emails=0,
-                emails_sent=0,
-                emails_received=0,
+            def _scan_inbox():
+                """Scan inbox for received emails (blocking)."""
+                received_count = 0
+                first_contact = None
+                last_contact = None
+
+                inbox = self.ews_client.account.inbox
+                received_items = inbox.filter(
+                    datetime_received__gte=start_date
+                ).order_by('-datetime_received').only('sender', 'datetime_received')
+
+                for item in list(received_items)[:max_emails]:
+                    sender = safe_get(item, 'sender')
+                    if sender:
+                        sender_email = safe_get(sender, 'email_address', '').lower()
+                        if sender_email == target_email:
+                            received_count += 1
+                            received_time = safe_get(item, 'datetime_received')
+                            if received_time:
+                                if not first_contact or received_time < first_contact:
+                                    first_contact = received_time
+                                if not last_contact or received_time > last_contact:
+                                    last_contact = received_time
+
+                return received_count, first_contact, last_contact
+
+            def _scan_sent():
+                """Scan sent items for sent emails (blocking)."""
+                sent_count = 0
+                first_contact = None
+                last_contact = None
+
+                sent_items = self.ews_client.account.sent
+                sent_query = sent_items.filter(
+                    datetime_sent__gte=start_date
+                ).order_by('-datetime_sent').only('to_recipients', 'datetime_sent')
+
+                for item in list(sent_query)[:max_emails]:
+                    recipients = safe_get(item, 'to_recipients', []) or []
+                    for recipient in recipients:
+                        recipient_email = safe_get(recipient, 'email_address', '').lower()
+                        if recipient_email == target_email:
+                            sent_count += 1
+                            sent_time = safe_get(item, 'datetime_sent')
+                            if sent_time:
+                                if not first_contact or sent_time < first_contact:
+                                    first_contact = sent_time
+                                if not last_contact or sent_time > last_contact:
+                                    last_contact = sent_time
+                            break  # Only count email once
+
+                return sent_count, first_contact, last_contact
+
+            # Run inbox and sent scans concurrently
+            (received_count, recv_first, recv_last), (sent_count, sent_first, sent_last) = await asyncio.gather(
+                asyncio.to_thread(_scan_inbox),
+                asyncio.to_thread(_scan_sent)
             )
 
-            # Scan inbox for received emails
-            inbox = self.ews_client.account.inbox
-            received_items = inbox.filter(
-                datetime_received__gte=start_date
-            ).order_by('-datetime_received').only('sender', 'datetime_received')
+            # Merge timestamps
+            first_contact = None
+            last_contact = None
+            for fc in [recv_first, sent_first]:
+                if fc:
+                    if not first_contact or fc < first_contact:
+                        first_contact = fc
+            for lc in [recv_last, sent_last]:
+                if lc:
+                    if not last_contact or lc > last_contact:
+                        last_contact = lc
 
-            received_count = 0
-            for item in received_items[:max_emails]:
-                sender = safe_get(item, 'sender')
-                if sender:
-                    sender_email = safe_get(sender, 'email_address', '').lower()
-                    if sender_email == email.lower():
-                        received_count += 1
-
-                        # Update timestamps
-                        received_time = safe_get(item, 'datetime_received')
-                        if received_time:
-                            if not stats.first_contact or received_time < stats.first_contact:
-                                stats.first_contact = received_time
-                            if not stats.last_contact or received_time > stats.last_contact:
-                                stats.last_contact = received_time
-
-            stats.emails_received = received_count
-
-            # Scan sent items for sent emails
-            sent_items = self.ews_client.account.sent
-            sent_query = sent_items.filter(
-                datetime_sent__gte=start_date
-            ).order_by('-datetime_sent').only('to_recipients', 'datetime_sent')
-
-            sent_count = 0
-            for item in sent_query[:max_emails]:
-                recipients = safe_get(item, 'to_recipients', []) or []
-                for recipient in recipients:
-                    recipient_email = safe_get(recipient, 'email_address', '').lower()
-                    if recipient_email == email.lower():
-                        sent_count += 1
-
-                        # Update timestamps
-                        sent_time = safe_get(item, 'datetime_sent')
-                        if sent_time:
-                            if not stats.first_contact or sent_time < stats.first_contact:
-                                stats.first_contact = sent_time
-                            if not stats.last_contact or sent_time > stats.last_contact:
-                                stats.last_contact = sent_time
-
-                        break  # Only count email once
-
-            stats.emails_sent = sent_count
-            stats.total_emails = stats.emails_received + stats.emails_sent
+            stats = CommunicationStats(
+                total_emails=received_count + sent_count,
+                emails_sent=sent_count,
+                emails_received=received_count,
+                first_contact=first_contact,
+                last_contact=last_contact,
+            )
 
             # Calculate emails per month
             if days_back > 0:
@@ -280,41 +305,43 @@ class PersonService:
         Returns:
             List of Person objects from contacts
         """
-        try:
-            contacts = self.ews_client.account.contacts.all()
-
+        def _blocking():
             persons = []
             query_lower = query.lower()
+            try:
+                contacts = self.ews_client.account.contacts.all()
+                for contact in list(contacts)[:100]:  # Limit for performance
+                    try:
+                        # Check if query matches
+                        given_name = safe_get(contact, "given_name", "") or ""
+                        surname = safe_get(contact, "surname", "") or ""
+                        display_name = safe_get(contact, "display_name", "") or ""
+                        email_addrs = safe_get(contact, "email_addresses", []) or []
 
-            for contact in contacts[:100]:  # Limit for performance
-                try:
-                    # Check if query matches
-                    given_name = safe_get(contact, "given_name", "") or ""
-                    surname = safe_get(contact, "surname", "") or ""
-                    display_name = safe_get(contact, "display_name", "") or ""
-                    email_addrs = safe_get(contact, "email_addresses", []) or []
+                        # Get email
+                        email = ""
+                        if email_addrs:
+                            email = email_addrs[0].email if hasattr(email_addrs[0], 'email') else ""
 
-                    # Get email
-                    email = ""
-                    if email_addrs:
-                        email = email_addrs[0].email if hasattr(email_addrs[0], 'email') else ""
+                        # Match query
+                        if (query_lower in given_name.lower() or
+                            query_lower in surname.lower() or
+                            query_lower in display_name.lower() or
+                            query_lower in email.lower()):
 
-                    # Match query
-                    if (query_lower in given_name.lower() or
-                        query_lower in surname.lower() or
-                        query_lower in display_name.lower() or
-                        query_lower in email.lower()):
+                            # Convert to Person
+                            person = Person.from_contact(contact)
+                            persons.append(person)
 
-                        # Convert to Person
-                        person = Person.from_contact(contact)
-                        persons.append(person)
-
-                except Exception as e:
-                    self.logger.debug(f"Failed to process contact: {e}")
-                    continue
-
+                    except Exception as e:
+                        self.logger.debug(f"Failed to process contact: {e}")
+                        continue
+            except Exception as e:
+                self.logger.warning(f"Contacts search failed: {e}")
             return persons
 
+        try:
+            return await asyncio.to_thread(_blocking)
         except Exception as e:
             self.logger.warning(f"Contacts search failed: {e}")
             return []
@@ -344,38 +371,85 @@ class PersonService:
             domain_query = query[1:].lower() if is_domain_search else None
             is_email_query = not is_domain_search and '@' in query
 
-            # Track contacts: email -> info
-            contacts: Dict[str, Dict[str, Any]] = {}
-
             MAX_ITEMS = 2000  # Limit to prevent timeouts
 
-            # Search Inbox - use server-side filter when query is an email address
-            inbox = self.ews_client.account.inbox
-            if is_email_query:
-                # Server-side filter by sender email - much faster than client-side
-                inbox_items = inbox.filter(
-                    datetime_received__gte=start_date,
-                    sender__email_address=query
-                ).order_by('-datetime_received').only('sender', 'datetime_received')
-            else:
-                inbox_items = inbox.filter(
-                    datetime_received__gte=start_date
-                ).order_by('-datetime_received').only('sender', 'datetime_received')
+            def _scan_inbox() -> Dict[str, Dict[str, Any]]:
+                """Scan inbox for contacts (blocking)."""
+                contacts: Dict[str, Dict[str, Any]] = {}
+                inbox = self.ews_client.account.inbox
+                if is_email_query:
+                    inbox_items = inbox.filter(
+                        datetime_received__gte=start_date,
+                        sender__email_address=query
+                    ).order_by('-datetime_received').only('sender', 'datetime_received')
+                else:
+                    inbox_items = inbox.filter(
+                        datetime_received__gte=start_date
+                    ).order_by('-datetime_received').only('sender', 'datetime_received')
 
-            items_scanned = 0
-            for item in inbox_items:
-                items_scanned += 1
-                if items_scanned > MAX_ITEMS:
-                    break
+                items_scanned = 0
+                for item in inbox_items:
+                    items_scanned += 1
+                    if items_scanned > MAX_ITEMS:
+                        break
 
-                sender = safe_get(item, 'sender')
-                if sender:
-                    email = safe_get(sender, 'email_address', '').lower()
-                    name = safe_get(sender, 'name', '')
+                    sender = safe_get(item, 'sender')
+                    if sender:
+                        email = safe_get(sender, 'email_address', '').lower()
+                        name = safe_get(sender, 'name', '')
 
-                    # Apply client-side filters only when not already filtered server-side
-                    if not is_email_query:
-                        if domain_query:
+                        if not is_email_query:
+                            if domain_query:
+                                if not email.endswith(f"@{domain_query}"):
+                                    continue
+                            elif query:
+                                query_lower = query.lower()
+                                if query_lower not in name.lower() and query_lower not in email:
+                                    continue
+
+                        if email:
+                            if email not in contacts:
+                                contacts[email] = {
+                                    "email": email,
+                                    "name": name,
+                                    "email_count": 0,
+                                    "last_contact": None,
+                                    "first_contact": None
+                                }
+
+                            contacts[email]["email_count"] += 1
+
+                            received_time = safe_get(item, 'datetime_received')
+                            if received_time:
+                                if not contacts[email]["last_contact"] or received_time > contacts[email]["last_contact"]:
+                                    contacts[email]["last_contact"] = received_time
+                                if not contacts[email]["first_contact"] or received_time < contacts[email]["first_contact"]:
+                                    contacts[email]["first_contact"] = received_time
+                return contacts
+
+            def _scan_sent() -> Dict[str, Dict[str, Any]]:
+                """Scan sent items for contacts (blocking)."""
+                contacts: Dict[str, Dict[str, Any]] = {}
+                sent_items = self.ews_client.account.sent
+                sent_query_result = sent_items.filter(
+                    datetime_sent__gte=start_date
+                ).order_by('-datetime_sent').only('to_recipients', 'datetime_sent')
+
+                items_scanned = 0
+                for item in sent_query_result:
+                    items_scanned += 1
+                    if items_scanned > MAX_ITEMS:
+                        break
+
+                    recipients = safe_get(item, 'to_recipients', []) or []
+                    for recipient in recipients:
+                        email = safe_get(recipient, 'email_address', '').lower()
+                        name = safe_get(recipient, 'name', '')
+
+                        if is_email_query:
+                            if email != query.lower():
+                                continue
+                        elif domain_query:
                             if not email.endswith(f"@{domain_query}"):
                                 continue
                         elif query:
@@ -383,92 +457,60 @@ class PersonService:
                             if query_lower not in name.lower() and query_lower not in email:
                                 continue
 
-                    # Track contact
-                    if email:
-                        if email not in contacts:
-                            contacts[email] = {
-                                "email": email,
-                                "name": name,
-                                "email_count": 0,
-                                "last_contact": None,
-                                "first_contact": None
-                            }
+                        if email:
+                            if email not in contacts:
+                                contacts[email] = {
+                                    "email": email,
+                                    "name": name,
+                                    "email_count": 0,
+                                    "last_contact": None,
+                                    "first_contact": None
+                                }
 
-                        contacts[email]["email_count"] += 1
+                            contacts[email]["email_count"] += 1
 
-                        received_time = safe_get(item, 'datetime_received')
-                        if received_time:
-                            if not contacts[email]["last_contact"] or received_time > contacts[email]["last_contact"]:
-                                contacts[email]["last_contact"] = received_time
-                            if not contacts[email]["first_contact"] or received_time < contacts[email]["first_contact"]:
-                                contacts[email]["first_contact"] = received_time
+                            sent_time = safe_get(item, 'datetime_sent')
+                            if sent_time:
+                                if not contacts[email]["last_contact"] or sent_time > contacts[email]["last_contact"]:
+                                    contacts[email]["last_contact"] = sent_time
+                                if not contacts[email]["first_contact"] or sent_time < contacts[email]["first_contact"]:
+                                    contacts[email]["first_contact"] = sent_time
+                return contacts
 
-            # Search Sent Items
-            sent_items = self.ews_client.account.sent
-            sent_query = sent_items.filter(
-                datetime_sent__gte=start_date
-            ).order_by('-datetime_sent').only('to_recipients', 'datetime_sent')
+            # Run inbox and sent scans concurrently
+            inbox_contacts, sent_contacts = await asyncio.gather(
+                asyncio.to_thread(_scan_inbox),
+                asyncio.to_thread(_scan_sent)
+            )
 
-            items_scanned = 0
-            for item in sent_query:
-                items_scanned += 1
-                if items_scanned > MAX_ITEMS:
-                    break
-
-                recipients = safe_get(item, 'to_recipients', []) or []
-                for recipient in recipients:
-                    email = safe_get(recipient, 'email_address', '').lower()
-                    name = safe_get(recipient, 'name', '')
-
-                    # Apply filters
-                    if is_email_query:
-                        # Exact email match
-                        if email != query.lower():
-                            continue
-                    elif domain_query:
-                        if not email.endswith(f"@{domain_query}"):
-                            continue
-                    elif query:
-                        query_lower = query.lower()
-                        if query_lower not in name.lower() and query_lower not in email:
-                            continue
-
-                    # Track contact
-                    if email:
-                        if email not in contacts:
-                            contacts[email] = {
-                                "email": email,
-                                "name": name,
-                                "email_count": 0,
-                                "last_contact": None,
-                                "first_contact": None
-                            }
-
-                        contacts[email]["email_count"] += 1
-
-                        sent_time = safe_get(item, 'datetime_sent')
-                        if sent_time:
-                            if not contacts[email]["last_contact"] or sent_time > contacts[email]["last_contact"]:
-                                contacts[email]["last_contact"] = sent_time
-                            if not contacts[email]["first_contact"] or sent_time < contacts[email]["first_contact"]:
-                                contacts[email]["first_contact"] = sent_time
+            # Merge results
+            contacts: Dict[str, Dict[str, Any]] = {}
+            for c in [inbox_contacts, sent_contacts]:
+                for email, data in c.items():
+                    if email not in contacts:
+                        contacts[email] = data
+                    else:
+                        contacts[email]["email_count"] += data["email_count"]
+                        if data["last_contact"]:
+                            if not contacts[email]["last_contact"] or data["last_contact"] > contacts[email]["last_contact"]:
+                                contacts[email]["last_contact"] = data["last_contact"]
+                        if data["first_contact"]:
+                            if not contacts[email]["first_contact"] or data["first_contact"] < contacts[email]["first_contact"]:
+                                contacts[email]["first_contact"] = data["first_contact"]
 
             # Convert to Person objects
             persons = []
             for contact_data in contacts.values():
-                # Create communication stats if requested
                 stats = None
                 if include_stats:
                     stats = CommunicationStats(
                         total_emails=contact_data["email_count"],
-                        emails_sent=0,  # Not tracked separately here
-                        emails_received=0,  # Not tracked separately here
+                        emails_sent=0,
+                        emails_received=0,
                         first_contact=contact_data["first_contact"],
                         last_contact=contact_data["last_contact"],
                     )
 
-                # Create minimal Person from email history
-                from ..core.person import EmailAddress
                 person = Person(
                     id=contact_data["email"],
                     name=contact_data["name"] or contact_data["email"],
