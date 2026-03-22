@@ -25,6 +25,7 @@ from .openapi_adapter import OpenAPIAdapter
 
 # Import all tool classes (up to 40 tools total: 36 base + 4 AI)
 from .tools import (
+    CreateDraftTool,
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
     DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool,
     ReplyEmailTool, ForwardEmailTool,
@@ -53,7 +54,6 @@ from .tools import (
     FindPersonTool, AnalyzeContactsTool
 )
 
-from .tools.email_tools_draft import CreateDraftTool
 class EWSMCPServer:
     """MCP Server for Exchange Web Services with comprehensive logging."""
 
