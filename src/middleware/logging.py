@@ -15,7 +15,7 @@ def setup_logging(log_level: str = "INFO") -> None:
     - File (rotating): Complete troubleshooting logs
     - MCP requires stdout clean for JSON-RPC protocol
     """
-    log_dir = Path("/app/logs")
+    log_dir = Path("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Console handler: INFO level for monitoring
@@ -72,7 +72,7 @@ class AuditLogger:
         self.logger = logging.getLogger("audit")
 
         # Add dedicated audit log file
-        log_dir = Path("/app/logs")
+        log_dir = Path("logs")
         log_dir.mkdir(parents=True, exist_ok=True)
 
         audit_handler = RotatingFileHandler(
