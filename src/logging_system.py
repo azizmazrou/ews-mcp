@@ -16,11 +16,11 @@ from .utils import EWSJSONEncoder, make_json_serializable
 class LogManager:
     """Central logging management for EWS MCP Server."""
 
-    def __init__(self, log_dir: Path = Path("/app/logs")):
+    def __init__(self, log_dir: Path = Path("logs")):
         """Initialize the logging system.
 
         Args:
-            log_dir: Directory for log files (default: /app/logs)
+            log_dir: Directory for log files (default: logs)
         """
         self.log_dir = log_dir
         self.session_id = f"sess_{uuid.uuid4().hex[:8]}"
@@ -30,9 +30,9 @@ class LogManager:
         """Initialize all log files and handlers."""
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError as e:
+        except OSError as e:
             logging.warning(f"Cannot create log directory {self.log_dir}: {e}")
-            # Fall back to /tmp if /app/logs is not writable
+            # Fall back to /tmp if logs is not writable or otherwise unavailable
             self.log_dir = Path("/tmp/ews_mcp_logs")
             self.log_dir.mkdir(parents=True, exist_ok=True)
             logging.info(f"Using fallback log directory: {self.log_dir}")
@@ -48,7 +48,7 @@ class LogManager:
         self.context_file = self.log_dir / "analysis" / "conversation_context.json"
         try:
             self.context_file.parent.mkdir(parents=True, exist_ok=True)
-        except PermissionError as e:
+        except OSError as e:
             logging.warning(f"Cannot create analysis directory {self.context_file.parent}: {e}")
             # Disable context file if we can't create the directory
             self.context_file = None

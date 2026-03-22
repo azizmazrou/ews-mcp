@@ -13,7 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def rotate_logs(log_dir: Path = Path("/app/logs"), keep_days: int = 30):
+def rotate_logs(log_dir: Path = Path("logs"), keep_days: int = 30):
     """Rotate old logs to daily archives.
 
     Args:
@@ -79,7 +79,7 @@ def rotate_logs(log_dir: Path = Path("/app/logs"), keep_days: int = 30):
     }
 
 
-def get_disk_usage(log_dir: Path = Path("/app/logs")) -> Dict[str, Any]:
+def get_disk_usage(log_dir: Path = Path("logs")) -> Dict[str, Any]:
     """Get disk usage statistics for log directory.
 
     Args:

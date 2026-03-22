@@ -25,7 +25,7 @@ from .openapi_adapter import OpenAPIAdapter
 
 # Import all tool classes (up to 40 tools total: 36 base + 4 AI)
 from .tools import (
-    # Email tools (10) — includes unified search_emails with quick/advanced/full_text modes
+    CreateDraftTool,
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
     DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool,
     ReplyEmailTool, ForwardEmailTool,
@@ -53,7 +53,6 @@ from .tools import (
     # Contact Intelligence tools (2) — communication_history/analyze_network merged into analyze_contacts
     FindPersonTool, AnalyzeContactsTool
 )
-
 
 class EWSMCPServer:
     """MCP Server for Exchange Web Services with comprehensive logging."""
@@ -198,9 +197,10 @@ class EWSMCPServer:
         """Register all enabled tools (36 base tools, up to 40 with AI)."""
         tool_classes = []
 
-        # Email tools (10 tools — search_emails includes quick/advanced/full_text modes)
+        # Email tools (11 tools — search_emails includes quick/advanced/full_text modes)
         if self.settings.enable_email:
             tool_classes.extend([
+                CreateDraftTool,
                 SendEmailTool,
                 ReadEmailsTool,
                 SearchEmailsTool,
@@ -212,7 +212,7 @@ class EWSMCPServer:
                 ReplyEmailTool,
                 ForwardEmailTool
             ])
-            self.logger.info("Email tools enabled (10 tools)")
+            self.logger.info("Email tools enabled (11 tools)")
 
         # Attachment tools (5 tools)
         if self.settings.enable_email:

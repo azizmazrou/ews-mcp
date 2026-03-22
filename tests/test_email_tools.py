@@ -13,6 +13,7 @@ from src.tools.email_tools import (
     UpdateEmailTool,
     CopyEmailTool
 )
+from src.tools.email_tools_draft import CreateDraftTool
 
 
 @pytest.mark.asyncio
@@ -44,6 +45,28 @@ async def test_send_email_validation_error(mock_ews_client):
             subject="",
             body=""
         )
+
+
+@pytest.mark.asyncio
+async def test_create_draft_tool_saves_draft(mock_ews_client, sample_email):
+    """Test creating a draft saves to Drafts instead of sending."""
+    tool = CreateDraftTool(mock_ews_client)
+    mock_ews_client.get_account = Mock(return_value=mock_ews_client.account)
+    mock_ews_client.account.drafts = MagicMock()
+
+    with patch('src.tools.email_tools_draft.Message') as mock_message:
+        mock_msg = MagicMock()
+        mock_msg.id = "draft-message-id"
+        mock_message.return_value = mock_msg
+
+        result = await tool.execute(**sample_email)
+
+        assert result["success"] is True
+        assert "draft created successfully" in result["message"].lower()
+        assert result["subject"] == sample_email["subject"]
+        assert result["recipients"] == sample_email["to"]
+        mock_msg.save.assert_called_once()
+        mock_msg.send.assert_not_called()
 
 
 @pytest.mark.asyncio
