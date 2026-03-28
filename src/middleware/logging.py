@@ -2,10 +2,26 @@
 
 import logging
 import sys
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict
+
+
+DEFAULT_LOG_DIR = Path("logs")
+FALLBACK_LOG_DIR = Path("/tmp/ews_mcp_logs")
+
+
+def resolve_log_dir(preferred: Path = DEFAULT_LOG_DIR) -> Path:
+    """Return a writable log directory, falling back to /tmp when needed."""
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        return preferred
+    except OSError as e:
+        fallback = FALLBACK_LOG_DIR
+        logging.warning(f"Cannot create log directory {preferred}: {e}")
+        fallback.mkdir(parents=True, exist_ok=True)
+        logging.info(f"Using fallback log directory: {fallback}")
+        return fallback
 
 
 def setup_logging(log_level: str = "INFO") -> None:
@@ -15,8 +31,7 @@ def setup_logging(log_level: str = "INFO") -> None:
     - File (rotating): Complete troubleshooting logs
     - MCP requires stdout clean for JSON-RPC protocol
     """
-    log_dir = Path("/app/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = resolve_log_dir()
 
     # Console handler: INFO level for monitoring
     console_handler = logging.StreamHandler(sys.stderr)
@@ -72,8 +87,7 @@ class AuditLogger:
         self.logger = logging.getLogger("audit")
 
         # Add dedicated audit log file
-        log_dir = Path("/app/logs")
-        log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = resolve_log_dir()
 
         audit_handler = RotatingFileHandler(
             log_dir / "audit.log",
