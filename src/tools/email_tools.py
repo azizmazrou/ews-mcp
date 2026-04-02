@@ -1767,21 +1767,16 @@ class ReplyEmailTool(BaseTool):
             headers_html += f'''<b>Subject:</b> {header['subject']}
 </p>'''
 
-            # 5. Construct complete body with WordSection1 for Exclaimer signature placement
+            # 5. Construct complete body matching Outlook's exact structure
             # Exclaimer inserts signature after the closing </div> of WordSection1
-            # Wrap replied content in blockquote so Exclaimer recognizes it as quoted content
-            # Structure: [user message in WordSection1] → [signature inserted here] → [quoted replied content]
+            # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
             complete_body = f'''<div class="WordSection1">
-{user_message}
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
 </div>
-
-<blockquote style="margin:0 0 0 0;border:none;padding:0in">
 <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
 {headers_html}
 </div>
-<br/>
-{original_body_html}
-</blockquote>'''
+{original_body_html}'''
 
             self.logger.info(f"Constructed complete reply body: {len(complete_body)} characters")
 
@@ -1964,21 +1959,16 @@ class ForwardEmailTool(BaseTool):
                 headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
             headers_html += '''</p>'''
 
-            # 5. Construct complete body with WordSection1 for Exclaimer signature placement
+            # 5. Construct complete body matching Outlook's exact structure
             # Exclaimer inserts signature after the closing </div> of WordSection1
-            # Wrap forwarded content in blockquote so Exclaimer recognizes it as quoted content
-            # Structure: [user message in WordSection1] → [signature inserted here] → [quoted forwarded content]
+            # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
             complete_body = f'''<div class="WordSection1">
-{user_message}
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
 </div>
-
-<blockquote style="margin:0 0 0 0;border:none;padding:0in">
 <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
 {headers_html}
 </div>
-<br/>
-{original_body_html}
-</blockquote>'''
+{original_body_html}'''
 
             self.logger.info(f"Constructed complete forward body: {len(complete_body)} characters")
 
