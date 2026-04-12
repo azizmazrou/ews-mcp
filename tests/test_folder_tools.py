@@ -175,6 +175,7 @@ async def test_list_folders_unknown_parent(mock_ews_client):
 async def test_list_folders_with_parent_folder_id(mock_ews_client):
     """Test listing folders using parent folder ID."""
     tool = ListFoldersTool(mock_ews_client)
+    mock_ews_client.get_account.return_value = mock_ews_client.account
 
     folder_id = "AAMk" + ("y" * 60)
 
@@ -220,6 +221,7 @@ async def test_list_folders_with_parent_folder_id(mock_ews_client):
 async def test_list_folders_unknown_parent_folder_id(mock_ews_client):
     """Test listing folders with unknown parent folder ID."""
     tool = ListFoldersTool(mock_ews_client)
+    mock_ews_client.get_account.return_value = mock_ews_client.account
 
     mock_root = MagicMock()
     mock_root.id = "root-id"

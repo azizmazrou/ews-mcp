@@ -85,6 +85,7 @@ async def test_create_folder_invalid_parent(mock_ews_client):
 async def test_create_folder_with_parent_folder_id(mock_ews_client):
     """Test creating folder using parent folder ID."""
     tool = ManageFolderTool(mock_ews_client)
+    mock_ews_client.get_account.return_value = mock_ews_client.account
 
     folder_id = "AAMk" + ("p" * 60)
     mock_parent = MagicMock()

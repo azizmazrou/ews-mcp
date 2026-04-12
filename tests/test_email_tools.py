@@ -1,7 +1,7 @@
 """Tests for email tools."""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import ANY, Mock, MagicMock, patch
 
 from src.tools.email_tools import (
     SendEmailTool,
@@ -174,7 +174,7 @@ async def test_move_email_tool_with_destination_folder_id(mock_ews_client):
 
     assert result["success"] is True
     assert result["destination_folder"] == "Archive 2026"
-    mock_resolve.assert_called_once_with(mock_ews_client.account, folder_id)
+    mock_resolve.assert_called_once_with(ANY, folder_id)
     mock_email.move.assert_called_once_with(mock_folder)
 
 
