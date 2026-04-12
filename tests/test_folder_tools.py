@@ -169,3 +169,67 @@ async def test_list_folders_unknown_parent(mock_ews_client):
         )
 
     assert "unknown parent folder" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_list_folders_with_parent_folder_id(mock_ews_client):
+    """Test listing folders using parent folder ID."""
+    tool = ListFoldersTool(mock_ews_client)
+
+    folder_id = "AAMk" + ("y" * 60)
+
+    mock_child = MagicMock()
+    mock_child.id = "child-1"
+    mock_child.name = "Sub"
+    mock_child.parent_folder_id = folder_id
+    mock_child.folder_class = "IPF.Note"
+    mock_child.child_folder_count = 0
+    mock_child.children = []
+
+    mock_parent = MagicMock()
+    mock_parent.id = folder_id
+    mock_parent.name = "Applications"
+    mock_parent.parent_folder_id = "root-id"
+    mock_parent.folder_class = "IPF.Note"
+    mock_parent.child_folder_count = 1
+    mock_parent.children = [mock_child]
+
+    mock_root = MagicMock()
+    mock_root.id = "root-id"
+    mock_root.name = "Root"
+    mock_root.parent_folder_id = ""
+    mock_root.folder_class = "IPF.Root"
+    mock_root.child_folder_count = 1
+    mock_root.children = [mock_parent]
+
+    mock_ews_client.account.root = mock_root
+
+    result = await tool.execute(
+        parent_folder_id=folder_id,
+        depth=2,
+        include_hidden=False,
+        include_counts=False
+    )
+
+    assert result["success"] is True
+    assert result["folder_tree"]["name"] == "Applications"
+    assert result["parent_folder"] == "Applications"
+
+
+@pytest.mark.asyncio
+async def test_list_folders_unknown_parent_folder_id(mock_ews_client):
+    """Test listing folders with unknown parent folder ID."""
+    tool = ListFoldersTool(mock_ews_client)
+
+    mock_root = MagicMock()
+    mock_root.id = "root-id"
+    mock_root.children = []
+    mock_ews_client.account.root = mock_root
+
+    with pytest.raises(Exception) as exc_info:
+        await tool.execute(
+            parent_folder_id="AAMk" + ("z" * 60),
+            depth=1
+        )
+
+    assert "parent folder not found" in str(exc_info.value).lower()

@@ -82,6 +82,40 @@ async def test_create_folder_invalid_parent(mock_ews_client):
 
 
 @pytest.mark.asyncio
+async def test_create_folder_with_parent_folder_id(mock_ews_client):
+    """Test creating folder using parent folder ID."""
+    tool = ManageFolderTool(mock_ews_client)
+
+    folder_id = "AAMk" + ("p" * 60)
+    mock_parent = MagicMock()
+    mock_parent.id = folder_id
+    mock_parent.name = "Applications"
+    mock_parent.children = []
+
+    mock_root = MagicMock()
+    mock_root.id = "root-id"
+    mock_root.children = [mock_parent]
+    mock_ews_client.account.root = mock_root
+
+    with patch('src.tools.folder_tools.Folder') as mock_folder_class:
+        mock_folder = MagicMock()
+        mock_folder.id = "new-folder-id"
+        mock_folder.name = "ISA"
+        mock_folder_class.return_value = mock_folder
+
+        result = await tool.execute(
+            action="create",
+            folder_name="ISA",
+            parent_folder_id=folder_id
+        )
+
+    assert result["success"] is True
+    assert result["folder_name"] == "ISA"
+    assert result["parent_folder"] == "Applications"
+    mock_folder.save.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_delete_folder_soft(mock_ews_client):
     """Test soft deleting a folder."""
     tool = ManageFolderTool(mock_ews_client)

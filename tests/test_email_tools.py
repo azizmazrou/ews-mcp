@@ -139,17 +139,54 @@ async def test_move_email_tool(mock_ews_client):
     """Test moving email."""
     tool = MoveEmailTool(mock_ews_client)
 
-    # Mock email
     mock_email = MagicMock()
-    mock_ews_client.account.inbox.get.return_value = mock_email
+    mock_folder = MagicMock()
+    mock_folder.name = "Sent"
 
-    result = await tool.execute(
-        message_id="test-id",
-        destination_folder="sent"
-    )
+    with patch("src.tools.email_tools.find_message_for_account", return_value=mock_email):
+        with patch("src.tools.email_tools.resolve_folder_for_account", return_value=mock_folder):
+            result = await tool.execute(
+                message_id="test-id",
+                destination_folder="sent"
+            )
 
     assert result["success"] is True
-    mock_email.move.assert_called_once()
+    assert result["destination_folder"] == "Sent"
+    mock_email.move.assert_called_once_with(mock_folder)
+
+
+@pytest.mark.asyncio
+async def test_move_email_tool_with_destination_folder_id(mock_ews_client):
+    """Test moving email using destination folder ID."""
+    tool = MoveEmailTool(mock_ews_client)
+
+    mock_email = MagicMock()
+    mock_folder = MagicMock()
+    mock_folder.name = "Archive 2026"
+    folder_id = "AAMk" + ("x" * 60)
+
+    with patch("src.tools.email_tools.find_message_for_account", return_value=mock_email):
+        with patch("src.tools.email_tools.resolve_folder_for_account", return_value=mock_folder) as mock_resolve:
+            result = await tool.execute(
+                message_id="test-id",
+                destination_folder_id=folder_id
+            )
+
+    assert result["success"] is True
+    assert result["destination_folder"] == "Archive 2026"
+    mock_resolve.assert_called_once_with(mock_ews_client.account, folder_id)
+    mock_email.move.assert_called_once_with(mock_folder)
+
+
+@pytest.mark.asyncio
+async def test_move_email_tool_requires_destination(mock_ews_client):
+    """Test move_email requires folder name or folder ID."""
+    tool = MoveEmailTool(mock_ews_client)
+
+    with pytest.raises(Exception) as exc_info:
+        await tool.execute(message_id="test-id")
+
+    assert "either destination_folder or destination_folder_id is required" in str(exc_info.value).lower()
 
 
 @pytest.mark.asyncio
