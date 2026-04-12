@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock
 
-from src.tools.folder_tools import ListFoldersTool
+from src.tools.folder_tools import ListFoldersTool, FindFolderTool
 
 
 @pytest.mark.asyncio
@@ -235,3 +235,128 @@ async def test_list_folders_unknown_parent_folder_id(mock_ews_client):
         )
 
     assert "parent folder not found" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_find_folder_exact_and_path_matches(mock_ews_client):
+    """Test folder discovery with exact and path matching."""
+    tool = FindFolderTool(mock_ews_client)
+    mock_ews_client.get_account.return_value = mock_ews_client.account
+
+    isa = MagicMock()
+    isa.id = "isa-id"
+    isa.name = "ISA"
+    isa.parent_folder_id = "apps-id"
+    isa.folder_class = "IPF.Note"
+    isa.child_folder_count = 0
+    isa.children = []
+
+    apps = MagicMock()
+    apps.id = "apps-id"
+    apps.name = "Applications"
+    apps.parent_folder_id = "root-id"
+    apps.folder_class = "IPF.Note"
+    apps.child_folder_count = 1
+    apps.children = [isa]
+
+    root = MagicMock()
+    root.id = "root-id"
+    root.name = "Root"
+    root.parent_folder_id = ""
+    root.folder_class = "IPF.Root"
+    root.child_folder_count = 1
+    root.children = [apps]
+    mock_ews_client.account.root = root
+
+    result = await tool.execute(
+        query="Root/Applications/ISA",
+        depth=4,
+        match_mode="auto"
+    )
+
+    assert result["success"] is True
+    assert result["total_matches"] >= 1
+    assert result["matches"][0]["id"] == "isa-id"
+    assert result["matches"][0]["match_type"] in {"exact", "prefix", "contains"}
+
+
+@pytest.mark.asyncio
+async def test_find_folder_fuzzy_match(mock_ews_client):
+    """Test fuzzy folder matching."""
+    tool = FindFolderTool(mock_ews_client)
+    mock_ews_client.get_account.return_value = mock_ews_client.account
+
+    reports = MagicMock()
+    reports.id = "reports-id"
+    reports.name = "Quarterly Reports"
+    reports.parent_folder_id = "root-id"
+    reports.folder_class = "IPF.Note"
+    reports.child_folder_count = 0
+    reports.children = []
+
+    root = MagicMock()
+    root.id = "root-id"
+    root.name = "Root"
+    root.parent_folder_id = ""
+    root.folder_class = "IPF.Root"
+    root.child_folder_count = 1
+    root.children = [reports]
+    mock_ews_client.account.root = root
+
+    result = await tool.execute(
+        query="Quarter report",
+        match_mode="fuzzy",
+        depth=3
+    )
+
+    assert result["success"] is True
+    assert result["total_matches"] >= 1
+    assert result["matches"][0]["id"] == "reports-id"
+    assert result["matches"][0]["match_type"] == "fuzzy"
+
+
+@pytest.mark.asyncio
+async def test_find_folder_without_query_returns_scoped_list(mock_ews_client):
+    """Test folder discovery without query (list mode)."""
+    tool = FindFolderTool(mock_ews_client)
+    mock_ews_client.get_account.return_value = mock_ews_client.account
+
+    sub = MagicMock()
+    sub.id = "sub-id"
+    sub.name = "Sub"
+    sub.parent_folder_id = "inbox-id"
+    sub.folder_class = "IPF.Note"
+    sub.child_folder_count = 0
+    sub.children = []
+
+    inbox = MagicMock()
+    inbox.id = "inbox-id"
+    inbox.name = "Inbox"
+    inbox.parent_folder_id = "root-id"
+    inbox.folder_class = "IPF.Note"
+    inbox.child_folder_count = 1
+    inbox.children = [sub]
+
+    root = MagicMock()
+    root.id = "root-id"
+    root.name = "Root"
+    root.parent_folder_id = ""
+    root.folder_class = "IPF.Root"
+    root.child_folder_count = 1
+    root.children = [inbox]
+
+    mock_ews_client.account.root = root
+    mock_ews_client.account.inbox = inbox
+
+    result = await tool.execute(
+        parent_folder="inbox",
+        depth=2,
+        max_results=10
+    )
+
+    assert result["success"] is True
+    assert result["query"] == ""
+    assert result["total_matches"] >= 2
+    paths = [entry["path"] for entry in result["matches"]]
+    assert "Inbox" in paths
+    assert "Inbox/Sub" in paths
