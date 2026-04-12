@@ -1,7 +1,7 @@
 """MCP Tools for EWS operations."""
 
 from .email_tools import SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool, DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool, ReplyEmailTool, ForwardEmailTool
-from .email_tools_draft import CreateDraftTool
+from .email_tools_draft import CreateDraftTool, CreateReplyDraftTool
 from .calendar_tools import CreateAppointmentTool, GetCalendarTool, UpdateAppointmentTool, DeleteAppointmentTool, RespondToMeetingTool, CheckAvailabilityTool, FindMeetingTimesTool
 from .contact_tools import CreateContactTool, UpdateContactTool, DeleteContactTool
 from .task_tools import CreateTaskTool, GetTasksTool, UpdateTaskTool, CompleteTaskTool, DeleteTaskTool
@@ -15,6 +15,7 @@ from .contact_intelligence_tools import FindPersonTool, AnalyzeContactsTool
 __all__ = [
     # Email tools (11)
     "CreateDraftTool",
+    "CreateReplyDraftTool",
     "SendEmailTool",
     "ReadEmailsTool",
     "SearchEmailsTool",

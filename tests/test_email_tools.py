@@ -1,6 +1,7 @@
 """Tests for email tools."""
 
 import pytest
+from datetime import datetime
 from unittest.mock import ANY, Mock, MagicMock, patch
 
 from src.tools.email_tools import (
@@ -13,7 +14,7 @@ from src.tools.email_tools import (
     UpdateEmailTool,
     CopyEmailTool
 )
-from src.tools.email_tools_draft import CreateDraftTool
+from src.tools.email_tools_draft import CreateDraftTool, CreateReplyDraftTool
 
 
 @pytest.mark.asyncio
@@ -67,6 +68,93 @@ async def test_create_draft_tool_saves_draft(mock_ews_client, sample_email):
         assert result["recipients"] == sample_email["to"]
         mock_msg.save.assert_called_once()
         mock_msg.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_reply_draft_tool_saves_html_draft(mock_ews_client):
+    """Test creating a reply draft saves a Message to Drafts instead of sending."""
+    tool = CreateReplyDraftTool(mock_ews_client)
+    mock_ews_client.get_account = Mock(return_value=mock_ews_client.account)
+    mock_ews_client.account.drafts = MagicMock()
+    mock_ews_client.account.primary_smtp_address = "test@example.com"
+
+    original_message = MagicMock()
+    original_message.subject = "Original Subject"
+    original_message.sender.email_address = "sender@example.com"
+    original_message.sender.name = "Sender Name"
+    original_message.to_recipients = [MagicMock(email_address="test@example.com", name="Test User")]
+    original_message.cc_recipients = []
+    original_message.datetime_sent = datetime(2025, 1, 1, 10, 0, 0)
+    original_message.body = MagicMock()
+    original_message.body.body = "<html><body><p>Original HTML</p></body></html>"
+    original_message.attachments = []
+
+    with patch("src.tools.email_tools_draft.find_message_for_account", return_value=original_message):
+        with patch("src.tools.email_tools_draft.Message") as mock_message:
+            mock_msg = MagicMock()
+            mock_msg.id = "reply-draft-id"
+            mock_message.return_value = mock_msg
+
+            result = await tool.execute(
+                message_id="orig-id",
+                body="Reply body"
+            )
+
+    assert result["success"] is True
+    assert "reply draft created successfully" in result["message"].lower()
+    assert result["original_subject"] == "Original Subject"
+    assert result["reply_subject"] == "RE: Original Subject"
+    assert result["message_id"] == "reply-draft-id"
+    mock_msg.save.assert_called_once()
+    mock_msg.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_reply_draft_tool_reply_all_uses_all_recipients(mock_ews_client):
+    """Test reply-all draft includes sender and original recipients except self."""
+    tool = CreateReplyDraftTool(mock_ews_client)
+    mock_ews_client.get_account = Mock(return_value=mock_ews_client.account)
+    mock_ews_client.account.drafts = MagicMock()
+    mock_ews_client.account.primary_smtp_address = "me@example.com"
+
+    def mailbox(name, email):
+        recipient = MagicMock()
+        recipient.name = name
+        recipient.email_address = email
+        return recipient
+
+    original_message = MagicMock()
+    original_message.subject = "Original Subject"
+    original_message.sender.email_address = "sender@example.com"
+    original_message.sender.name = "Sender Name"
+    original_message.to_recipients = [
+        mailbox("Me", "me@example.com"),
+        mailbox("Teammate", "team@example.com"),
+    ]
+    original_message.cc_recipients = [
+        mailbox("Other", "other@example.com"),
+        mailbox("Teammate", "team@example.com"),
+    ]
+    original_message.datetime_sent = datetime(2025, 1, 1, 10, 0, 0)
+    original_message.body = MagicMock()
+    original_message.body.body = "<p>Original HTML</p>"
+    original_message.attachments = []
+
+    with patch("src.tools.email_tools_draft.find_message_for_account", return_value=original_message):
+        with patch("src.tools.email_tools_draft.Message") as mock_message:
+            mock_msg = MagicMock()
+            mock_msg.id = "reply-all-draft-id"
+            mock_message.return_value = mock_msg
+
+            await tool.execute(
+                message_id="orig-id",
+                body="Reply all body",
+                reply_all=True
+            )
+
+    called_kwargs = mock_message.call_args.kwargs
+    recipients = [recipient.email_address for recipient in called_kwargs["to_recipients"]]
+    assert recipients == ["sender@example.com", "team@example.com", "other@example.com"]
 
 
 @pytest.mark.asyncio
