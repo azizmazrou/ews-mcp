@@ -322,3 +322,158 @@ class CreateReplyDraftTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to create reply draft: {e}")
             raise ToolExecutionError(f"Failed to create reply draft: {e}")
+
+
+class CreateForwardDraftTool(BaseTool):
+    """Tool for creating forward drafts in the Drafts folder."""
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "create_forward_draft",
+            "description": "Create a forward draft in the Drafts folder for review before sending.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "The Exchange message ID of the email to forward"
+                    },
+                    "to": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of recipient email addresses"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional message to add before the forwarded content"
+                    },
+                    "cc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "CC recipients (optional)"
+                    },
+                    "bcc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "BCC recipients (optional)"
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Additional file paths to attach to the draft (optional)"
+                    },
+                    **INLINE_ATTACHMENTS_SCHEMA,
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to create the draft on behalf of (requires impersonation/delegate access)"
+                    }
+                },
+                "required": ["message_id", "to"]
+            }
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        """Create a forward draft via EWS and save it to Drafts."""
+        message_id = kwargs.get("message_id")
+        to_recipients = kwargs.get("to", [])
+        body = (kwargs.get("body") or "").strip()
+        cc_recipients = kwargs.get("cc", [])
+        bcc_recipients = kwargs.get("bcc", [])
+        attachments = kwargs.get("attachments", [])
+        target_mailbox = kwargs.get("target_mailbox")
+
+        if not message_id:
+            raise ToolExecutionError("message_id is required")
+        if not to_recipients:
+            raise ToolExecutionError("to recipients are required")
+
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
+            original_message = find_message_for_account(account, message_id)
+            original_subject = safe_get(original_message, "subject", "") or ""
+            forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
+
+            header = format_forward_header(original_message)
+            original_body_html = extract_body_html(original_message)
+            original_body_html = clean_original_body_for_signature(original_body_html)
+
+            headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
+<b>From:</b> {header['from']}<br/>
+<b>Date:</b> {header['sent']}<br/>
+<b>Subject:</b> {header['subject']}<br/>'''
+            if header["to"]:
+                headers_html += f'''<b>To:</b> {header['to']}<br/>'''
+            if header["cc"]:
+                headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+            headers_html += "</p>"
+
+            complete_body = f'''<div class="WordSection1">
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{body}</p>
+</div>
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+{headers_html}
+</div>
+{original_body_html}'''
+
+            message = Message(
+                account=account,
+                subject=forward_subject,
+                body=HTMLBody(complete_body),
+                to_recipients=[Mailbox(email_address=email) for email in to_recipients],
+                folder=account.drafts,
+            )
+
+            if cc_recipients:
+                message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
+            if bcc_recipients:
+                message.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
+
+            inline_count, regular_count = copy_attachments_to_message(original_message, message)
+            original_attachment_count = inline_count + regular_count
+            additional_attachment_count = 0
+
+            for file_path in attachments:
+                try:
+                    file_name = os.path.basename(file_path)
+                    with open(file_path, "rb") as f:
+                        content = f.read()
+                    message.attach(FileAttachment(name=file_name, content=content))
+                    additional_attachment_count += 1
+                except FileNotFoundError:
+                    raise ToolExecutionError(f"Attachment file not found: {file_path}")
+                except PermissionError:
+                    raise ToolExecutionError(f"Permission denied reading attachment: {file_path}")
+                except Exception as e:
+                    raise ToolExecutionError(f"Failed to attach file {file_path}: {e}")
+
+            inline_b64_count = attach_inline_files(message, kwargs.get("inline_attachments", []))
+            additional_attachment_count += inline_b64_count
+
+            message.save()
+            draft_message_id = ews_id_to_str(message.id)
+
+            self.logger.info(f"Forward draft saved for message {message_id} in mailbox: {mailbox}")
+
+            return format_success_response(
+                "Forward draft created successfully - check your Drafts folder in OWA/Outlook",
+                message_id=draft_message_id,
+                original_message_id=message_id,
+                original_subject=original_subject,
+                forward_subject=forward_subject,
+                forwarded_to=to_recipients,
+                cc=cc_recipients if cc_recipients else None,
+                bcc=bcc_recipients if bcc_recipients else None,
+                attachments_included=original_attachment_count,
+                inline_attachments_preserved=inline_count,
+                additional_attachments=additional_attachment_count,
+                created_time=datetime.now().isoformat(),
+                mailbox=mailbox
+            )
+
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to create forward draft: {e}")
+            raise ToolExecutionError(f"Failed to create forward draft: {e}")
