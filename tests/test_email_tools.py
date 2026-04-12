@@ -14,7 +14,7 @@ from src.tools.email_tools import (
     UpdateEmailTool,
     CopyEmailTool
 )
-from src.tools.email_tools_draft import CreateDraftTool, CreateReplyDraftTool
+from src.tools.email_tools_draft import CreateDraftTool, CreateReplyDraftTool, CreateForwardDraftTool
 
 
 @pytest.mark.asyncio
@@ -155,6 +155,84 @@ async def test_create_reply_draft_tool_reply_all_uses_all_recipients(mock_ews_cl
     called_kwargs = mock_message.call_args.kwargs
     recipients = [recipient.email_address for recipient in called_kwargs["to_recipients"]]
     assert recipients == ["sender@example.com", "team@example.com", "other@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_create_forward_draft_tool_saves_html_draft(mock_ews_client):
+    """Test creating a forward draft saves a Message to Drafts instead of sending."""
+    tool = CreateForwardDraftTool(mock_ews_client)
+    mock_ews_client.get_account = Mock(return_value=mock_ews_client.account)
+    mock_ews_client.account.drafts = MagicMock()
+
+    original_message = MagicMock()
+    original_message.subject = "Original Subject"
+    original_message.sender.email_address = "sender@example.com"
+    original_message.sender.name = "Sender Name"
+    original_message.to_recipients = [MagicMock(email_address="me@example.com", name="Me")]
+    original_message.cc_recipients = []
+    original_message.datetime_sent = datetime(2025, 1, 1, 10, 0, 0)
+    original_message.body = MagicMock()
+    original_message.body.body = "<html><body><p>Original HTML</p></body></html>"
+    original_message.attachments = []
+
+    with patch("src.tools.email_tools_draft.find_message_for_account", return_value=original_message):
+        with patch("src.tools.email_tools_draft.Message") as mock_message:
+            mock_msg = MagicMock()
+            mock_msg.id = "forward-draft-id"
+            mock_message.return_value = mock_msg
+
+            result = await tool.execute(
+                message_id="orig-id",
+                to=["target@example.com"],
+                body="Forward body"
+            )
+
+    assert result["success"] is True
+    assert "forward draft created successfully" in result["message"].lower()
+    assert result["original_subject"] == "Original Subject"
+    assert result["forward_subject"] == "FW: Original Subject"
+    assert result["message_id"] == "forward-draft-id"
+    assert result["forwarded_to"] == ["target@example.com"]
+    mock_msg.save.assert_called_once()
+    mock_msg.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_forward_draft_tool_sets_cc_and_bcc(mock_ews_client):
+    """Test forward draft includes CC and BCC recipients."""
+    tool = CreateForwardDraftTool(mock_ews_client)
+    mock_ews_client.get_account = Mock(return_value=mock_ews_client.account)
+    mock_ews_client.account.drafts = MagicMock()
+
+    original_message = MagicMock()
+    original_message.subject = "Original Subject"
+    original_message.sender.email_address = "sender@example.com"
+    original_message.sender.name = "Sender Name"
+    original_message.to_recipients = []
+    original_message.cc_recipients = []
+    original_message.datetime_sent = datetime(2025, 1, 1, 10, 0, 0)
+    original_message.body = MagicMock()
+    original_message.body.body = "<p>Original HTML</p>"
+    original_message.attachments = []
+
+    with patch("src.tools.email_tools_draft.find_message_for_account", return_value=original_message):
+        with patch("src.tools.email_tools_draft.Message") as mock_message:
+            mock_msg = MagicMock()
+            mock_msg.id = "forward-draft-id"
+            mock_message.return_value = mock_msg
+
+            await tool.execute(
+                message_id="orig-id",
+                to=["target@example.com"],
+                cc=["cc@example.com"],
+                bcc=["bcc@example.com"],
+                body="Forward body"
+            )
+
+    called_kwargs = mock_message.call_args.kwargs
+    assert [recipient.email_address for recipient in called_kwargs["to_recipients"]] == ["target@example.com"]
+    assert [recipient.email_address for recipient in mock_msg.cc_recipients] == ["cc@example.com"]
+    assert [recipient.email_address for recipient in mock_msg.bcc_recipients] == ["bcc@example.com"]
 
 
 @pytest.mark.asyncio
