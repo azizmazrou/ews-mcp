@@ -55,8 +55,13 @@ def extract_body_html(message) -> str:
     else:
         html = str(body) if body else ""
 
+    # Strip CDATA wrappers that may appear in Exchange HTML bodies
+    # These cause visible "]]>" text at the bottom of forwarded/replied emails
+    if html and '<![CDATA[' in html:
+        html = html.replace('<![CDATA[', '').replace(']]>', '')
+
     # Strip document-level HTML tags to prevent nested <html><body> issues
-    # when embedding in blockquote. Nested document tags break HTML structure.
+    # when embedding in quoted content. Nested document tags break HTML structure.
     return strip_html_document_tags(html)
 
 
@@ -1773,12 +1778,16 @@ class ReplyEmailTool(BaseTool):
 </p>'''
 
             # 5. Construct complete body matching Outlook's exact structure
-            # Exclaimer inserts signature after the closing </div> of WordSection1
-            # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
+            # - WordSection1: user's new content
+            # - appendonsend: marker where Exchange/Exclaimer inserts signature
+            # - hr + divRplyFwdMsg: separator and headers (Outlook convention)
+            # - original body
             complete_body = f'''<div class="WordSection1">
 <p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
 </div>
-<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<div id="appendonsend"></div>
+<hr style="display:inline-block;width:98%">
+<div id="divRplyFwdMsg" dir="ltr">
 {headers_html}
 </div>
 {original_body_html}'''
@@ -1792,6 +1801,17 @@ class ReplyEmailTool(BaseTool):
                 body=HTMLBody(complete_body),
                 to_recipients=reply_to_recipients
             )
+
+            # Set threading headers so reply stays in the same conversation
+            original_internet_msg_id = safe_get(original_message, "message_id", None)
+            original_references = safe_get(original_message, "references", None)
+            if original_internet_msg_id:
+                message.in_reply_to = original_internet_msg_id
+                if original_references:
+                    message.references = f"{original_references} {original_internet_msg_id}"
+                else:
+                    message.references = original_internet_msg_id
+                self.logger.info(f"Set threading headers: in_reply_to={original_internet_msg_id}")
 
             # Copy original inline attachments (signatures, embedded images)
             inline_count, _ = copy_attachments_to_message(original_message, message)
@@ -1965,12 +1985,16 @@ class ForwardEmailTool(BaseTool):
             headers_html += '''</p>'''
 
             # 5. Construct complete body matching Outlook's exact structure
-            # Exclaimer inserts signature after the closing </div> of WordSection1
-            # Structure: [user message in WordSection1] → [signature inserted here] → [separator] → [headers] → [original]
+            # - WordSection1: user's new content
+            # - appendonsend: marker where Exchange/Exclaimer inserts signature
+            # - hr + divRplyFwdMsg: separator and headers (Outlook convention)
+            # - original body
             complete_body = f'''<div class="WordSection1">
 <p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
 </div>
-<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<div id="appendonsend"></div>
+<hr style="display:inline-block;width:98%">
+<div id="divRplyFwdMsg" dir="ltr">
 {headers_html}
 </div>
 {original_body_html}'''
@@ -1984,6 +2008,17 @@ class ForwardEmailTool(BaseTool):
                 body=HTMLBody(complete_body),
                 to_recipients=[Mailbox(email_address=email) for email in to_recipients]
             )
+
+            # Set threading headers so forward stays in the same conversation
+            original_internet_msg_id = safe_get(original_message, "message_id", None)
+            original_references = safe_get(original_message, "references", None)
+            if original_internet_msg_id:
+                message.in_reply_to = original_internet_msg_id
+                if original_references:
+                    message.references = f"{original_references} {original_internet_msg_id}"
+                else:
+                    message.references = original_internet_msg_id
+                self.logger.info(f"Set threading headers: in_reply_to={original_internet_msg_id}")
 
             if cc_recipients:
                 message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
