@@ -67,21 +67,28 @@ def extract_body_html(message) -> str:
 
 def strip_html_document_tags(html: str) -> str:
     """
-    Strip document-level HTML tags from content.
+    Strip document-level HTML tags from content while preserving styles.
 
     When forwarding/replying, the original email body may contain full HTML
-    document structure (<html>, <head>, <body>). If we embed this inside
-    our blockquote, we get invalid nested HTML that browsers/Exclaimer
-    restructure incorrectly, causing content to appear in wrong order.
+    document structure (<html>, <head>, <body>). We need to:
+    - Remove structural tags (<html>, <body>) to prevent nesting issues
+    - Preserve <style> blocks and MSO conditional comments for proper rendering
+    - Keep @font-face declarations for Arabic fonts (Sakkal Majalla) and RTL layout
 
     Args:
         html: HTML content that may contain document-level tags
 
     Returns:
-        Inner content with document tags stripped
+        Inner content with document structure stripped but styles preserved
     """
     if not html:
         return html
+
+    # Extract <style> blocks to preserve them
+    style_blocks = re.findall(r'<style[^>]*>.*?</style>', html, flags=re.IGNORECASE | re.DOTALL)
+
+    # Extract MSO conditional comments (<!--[if gte mso 9]>...<![endif]-->)
+    mso_comments = re.findall(r'<!--\[if[^\]]*\]>.*?<!\[endif\]-->', html, flags=re.IGNORECASE | re.DOTALL)
 
     # Remove DOCTYPE declaration
     html = re.sub(r'<!DOCTYPE[^>]*>', '', html, flags=re.IGNORECASE)
@@ -89,13 +96,56 @@ def strip_html_document_tags(html: str) -> str:
     # Remove <html> open/close tags (with any attributes)
     html = re.sub(r'</?html[^>]*>', '', html, flags=re.IGNORECASE)
 
-    # Remove entire <head>...</head> section (includes style, meta, etc.)
+    # Remove <head> tags but extract content we want to preserve
     html = re.sub(r'<head[^>]*>.*?</head>', '', html, flags=re.IGNORECASE | re.DOTALL)
 
     # Remove <body> open/close tags but keep the content inside
     html = re.sub(r'</?body[^>]*>', '', html, flags=re.IGNORECASE)
 
+    # Prepend preserved styles and MSO comments
+    preserved_content = '\n'.join(style_blocks + mso_comments)
+    if preserved_content:
+        html = preserved_content + '\n' + html
+
     return html.strip()
+
+
+def has_forward_prefix(subject: str) -> bool:
+    """Check if subject already has a forward prefix (FW:, Fwd:, etc.)."""
+    if not subject:
+        return False
+    # Match common forward prefixes in various languages
+    # English: FW:, Fwd:, Forward:
+    # Also handle with/without space after colon
+    return bool(re.match(r'^(fw|fwd|forward)\s*:', subject, re.IGNORECASE))
+
+
+def has_reply_prefix(subject: str) -> bool:
+    """Check if subject already has a reply prefix (RE:, Re:, Reply:, etc.)."""
+    if not subject:
+        return False
+    # Match common reply prefixes
+    # English: RE:, Re:, Reply:
+    # Also handle with/without space after colon
+    return bool(re.match(r'^(re|reply)\s*:', subject, re.IGNORECASE))
+
+
+def add_forward_prefix(subject: str) -> str:
+    """Add FW: prefix if not already present."""
+    if not subject:
+        return "FW:"
+    if has_forward_prefix(subject):
+        return subject
+    return f"FW: {subject}"
+
+
+def add_reply_prefix(subject: str) -> str:
+    """Add RE: prefix if not already present."""
+    if not subject:
+        return "RE:"
+    if has_reply_prefix(subject):
+        return subject
+    return f"RE: {subject}"
 
 
 def clean_original_body_for_signature(original_body_html: str) -> str:
@@ -1735,8 +1785,8 @@ class ReplyEmailTool(BaseTool):
             # Instead, always create a fresh Message with manually constructed body.
             self.logger.info("Creating fresh Message for reply (not using create_reply)")
 
-            # Get the reply subject
-            reply_subject = f"RE: {original_subject}" if original_subject else "RE:"
+            # Get the reply subject (avoid duplicate RE: prefix)
+            reply_subject = add_reply_prefix(original_subject)
 
             # Determine recipients for the reply
             if reply_all:
@@ -1758,7 +1808,7 @@ class ReplyEmailTool(BaseTool):
             # 2. Format the reply headers from original email metadata
             header = format_forward_header(original_message)
 
-            # 3. Get the original email body HTML
+            # 3. Get the original email body HTML (preserves styles but strips document structure)
             original_body_html = extract_body_html(original_message)
             self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
@@ -1766,29 +1816,21 @@ class ReplyEmailTool(BaseTool):
             # This prevents Exclaimer from placing signature after the original content
             original_body_html = clean_original_body_for_signature(original_body_html)
 
-            # 4. Build headers block
-            headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
-<b>From:</b> {header['from']}<br/>
-<b>Sent:</b> {header['sent']}<br/>'''
-            if header['to']:
-                headers_html += f'''<b>To:</b> {header['to']}<br/>'''
-            if header['cc']:
-                headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
-            headers_html += f'''<b>Subject:</b> {header['subject']}
-</p>'''
-
-            # 5. Construct complete body matching Outlook's exact structure
-            # - WordSection1: user's new content
-            # - appendonsend: marker where Exchange/Exclaimer inserts signature
-            # - hr + divRplyFwdMsg: separator and headers (Outlook convention)
-            # - original body
+            # 4. Construct complete body matching Outlook's exact structure
+            # - WordSection1: user's new content (Exclaimer injects signature at end of this div)
+            # - border-top div: Outlook-style separator (NOT <hr>)
+            # - Headers inline in separator div
+            # - original body (with OriginalSection class to avoid Exclaimer confusion)
             complete_body = f'''<div class="WordSection1">
 <p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
 </div>
-<div id="appendonsend"></div>
-<hr style="display:inline-block;width:98%">
-<div id="divRplyFwdMsg" dir="ltr">
-{headers_html}
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;"><b>From:</b> {header['from']}<br/>
+<b>Sent:</b> {header['sent']}<br/>
+<b>To:</b> {header['to']}<br/>'''
+            if header['cc']:
+                complete_body += f'''<b>Cc:</b> {header['cc']}<br/>'''
+            complete_body += f'''<b>Subject:</b> {header['subject']}</p>
 </div>
 {original_body_html}'''
 
@@ -1955,8 +1997,8 @@ class ForwardEmailTool(BaseTool):
             # Instead, always create a fresh Message with manually constructed body.
             self.logger.info("Creating fresh Message for forward (not using create_forward)")
 
-            # Get the forward subject
-            forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
+            # Get the forward subject (avoid duplicate FW: prefix)
+            forward_subject = add_forward_prefix(original_subject)
 
             # Build the complete forward body manually
             # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
@@ -1965,7 +2007,7 @@ class ForwardEmailTool(BaseTool):
             # 2. Format the forward headers from original email metadata
             header = format_forward_header(original_message)
 
-            # 3. Get the original email body HTML
+            # 3. Get the original email body HTML (preserves styles but strips document structure)
             original_body_html = extract_body_html(original_message)
             self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
@@ -1973,7 +2015,7 @@ class ForwardEmailTool(BaseTool):
             # This prevents Exclaimer from placing signature after the original content
             original_body_html = clean_original_body_for_signature(original_body_html)
 
-            # 4. Build headers block
+            # 4. Build headers block (Outlook format)
             headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
 <b>From:</b> {header['from']}<br/>
 <b>Date:</b> {header['sent']}<br/>
@@ -1985,17 +2027,20 @@ class ForwardEmailTool(BaseTool):
             headers_html += '''</p>'''
 
             # 5. Construct complete body matching Outlook's exact structure
-            # - WordSection1: user's new content
-            # - appendonsend: marker where Exchange/Exclaimer inserts signature
-            # - hr + divRplyFwdMsg: separator and headers (Outlook convention)
-            # - original body
+            # - WordSection1: user's new content (Exclaimer injects signature at end of this div)
+            # - border-top div: Outlook-style separator (NOT <hr>)
+            # - divRplyFwdMsg: headers block
+            # - original body (with OriginalSection class to avoid Exclaimer confusion)
             complete_body = f'''<div class="WordSection1">
 <p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
 </div>
-<div id="appendonsend"></div>
-<hr style="display:inline-block;width:98%">
-<div id="divRplyFwdMsg" dir="ltr">
-{headers_html}
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;"><b>From:</b> {header['from']}<br/>
+<b>Sent:</b> {header['sent']}<br/>
+<b>To:</b> {header['to']}<br/>'''
+            if header['cc']:
+                complete_body += f'''<b>Cc:</b> {header['cc']}<br/>'''
+            complete_body += f'''<b>Subject:</b> {header['subject']}</p>
 </div>
 {original_body_html}'''
 
