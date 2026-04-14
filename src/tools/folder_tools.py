@@ -1,6 +1,7 @@
 """Folder management tools for EWS MCP Server."""
 
-from typing import Any, Dict, List
+from difflib import SequenceMatcher
+from typing import Any, Dict
 from exchangelib import Folder
 
 from .base import BaseTool
@@ -49,6 +50,36 @@ def resolve_parent_folder(account, parent_folder=None, parent_folder_id=None, de
     if not folder:
         raise ToolExecutionError(f"Unknown parent folder: {parent_folder_name}")
     return folder, parent_folder_name
+
+
+def is_user_visible_folder(folder) -> bool:
+    """Check whether a folder should be visible in user-facing listings."""
+    folder_name = safe_get(folder, "name", "")
+    folder_class = safe_get(folder, "folder_class", "")
+
+    system_folder_names = {
+        "recoverable items", "recoverable items deletions",
+        "recoverable items purges", "recoverable items versions",
+        "calendar logging", "conversation action settings",
+        "quick step settings", "suggested contacts",
+        "sync issues", "conflicts", "local failures",
+        "server failures", "deletions", "purges", "versions",
+        "audits", "administrativeaudits", "conversationhistory",
+        "mycontacts", "peopleconnect", "quickcontacts",
+        "recipientcache", "skypetelemetry", "teamchat",
+        "workingset", "companies", "organizational contacts"
+    }
+
+    if folder_name.lower() in system_folder_names:
+        return False
+    if folder_name.startswith("~") or folder_name.startswith("_"):
+        return False
+    if folder_class:
+        user_facing_classes = ["IPF.Note", "IPF.Appointment", "IPF.Contact", "IPF.Task"]
+        if not any(cls in folder_class for cls in user_facing_classes):
+            return False
+
+    return True
 
 
 class ListFoldersTool(BaseTool):
@@ -143,30 +174,8 @@ class ListFoldersTool(BaseTool):
                     if hasattr(folder, 'children') and folder.children:
                         for child in folder.children:
                             if not include_hidden:
-                                child_name = safe_get(child, 'name', '')
-                                child_class = safe_get(child, 'folder_class', '')
-
-                                system_folder_names = {
-                                    'recoverable items', 'recoverable items deletions',
-                                    'recoverable items purges', 'recoverable items versions',
-                                    'calendar logging', 'conversation action settings',
-                                    'quick step settings', 'suggested contacts',
-                                    'sync issues', 'conflicts', 'local failures',
-                                    'server failures', 'deletions', 'purges', 'versions',
-                                    'audits', 'administrativeaudits', 'conversationhistory',
-                                    'mycontacts', 'peopleconnect', 'quickcontacts',
-                                    'recipientcache', 'skypetelemetry', 'teamchat',
-                                    'workingset', 'companies', 'organizational contacts'
-                                }
-
-                                if child_name.lower() in system_folder_names:
+                                if not is_user_visible_folder(child):
                                     continue
-                                if child_name.startswith('~') or child_name.startswith('_'):
-                                    continue
-                                if child_class:
-                                    user_facing_classes = ['IPF.Note', 'IPF.Appointment', 'IPF.Contact', 'IPF.Task']
-                                    if not any(cls in child_class for cls in user_facing_classes):
-                                        continue
 
                             child_info = list_folder_tree(child, current_depth + 1, max_depth)
                             if child_info:
@@ -204,6 +213,188 @@ class ListFoldersTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to list folders: {e}")
             raise ToolExecutionError(f"Failed to list folders: {e}")
+
+
+class FindFolderTool(BaseTool):
+    """Tool for discovering and searching mailbox folders."""
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "find_folder",
+            "description": "Find folder candidates by name/path with exact, prefix, contains, or fuzzy matching.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Folder name or path query. If omitted, returns folders in scope."
+                    },
+                    "parent_folder": {
+                        "type": "string",
+                        "description": "Parent folder scope (default: root)",
+                        "default": "root",
+                        "enum": ["root", "inbox", "sent", "drafts", "deleted", "junk", "calendar", "contacts", "tasks"]
+                    },
+                    "parent_folder_id": {
+                        "type": "string",
+                        "description": "Parent folder ID scope (alternative to parent_folder)"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Maximum depth to traverse (1-10)",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 10
+                    },
+                    "match_mode": {
+                        "type": "string",
+                        "description": "Matching strategy for query",
+                        "default": "auto",
+                        "enum": ["auto", "exact", "prefix", "contains", "fuzzy"]
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of candidates to return (1-100)",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "Include hidden/system folders in search",
+                        "default": False
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
+                    }
+                }
+            }
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        """Find folder candidates in a folder tree scope."""
+        query = (kwargs.get("query") or "").strip()
+        parent_folder_name = kwargs.get("parent_folder")
+        parent_folder_id = kwargs.get("parent_folder_id")
+        depth = kwargs.get("depth", 5)
+        match_mode = kwargs.get("match_mode", "auto")
+        max_results = kwargs.get("max_results", 20)
+        include_hidden = kwargs.get("include_hidden", False)
+        target_mailbox = kwargs.get("target_mailbox")
+
+        if depth < 1 or depth > 10:
+            raise ToolExecutionError("depth must be between 1 and 10")
+        if max_results < 1 or max_results > 100:
+            raise ToolExecutionError("max_results must be between 1 and 100")
+        if match_mode not in {"auto", "exact", "prefix", "contains", "fuzzy"}:
+            raise ToolExecutionError("match_mode must be one of: auto, exact, prefix, contains, fuzzy")
+
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+            parent_folder, resolved_parent = resolve_parent_folder(
+                account,
+                parent_folder=parent_folder_name,
+                parent_folder_id=parent_folder_id,
+                default_name="root"
+            )
+
+            all_entries = []
+
+            def walk_folders(folder, current_depth, current_path):
+                if current_depth > depth:
+                    return
+
+                folder_name = safe_get(folder, "name", "")
+                folder_path = f"{current_path}/{folder_name}" if current_path else folder_name
+                all_entries.append({
+                    "id": ews_id_to_str(safe_get(folder, "id", None)) or "",
+                    "name": folder_name,
+                    "path": folder_path,
+                    "parent_folder_id": ews_id_to_str(safe_get(folder, "parent_folder_id", None)) or "",
+                    "folder_class": safe_get(folder, "folder_class", ""),
+                    "child_folder_count": safe_get(folder, "child_folder_count", 0)
+                })
+
+                if not hasattr(folder, "children") or not folder.children:
+                    return
+
+                for child in folder.children:
+                    if not include_hidden and not is_user_visible_folder(child):
+                        continue
+                    walk_folders(child, current_depth + 1, folder_path)
+
+            walk_folders(parent_folder, 1, "")
+
+            query_lower = query.lower()
+
+            def match_entry(entry):
+                if not query:
+                    return "all", 1.0
+
+                name_value = entry["name"].lower()
+                path_value = entry["path"].lower()
+
+                if match_mode in {"auto", "exact"}:
+                    if name_value == query_lower or path_value == query_lower:
+                        return "exact", 1.0
+
+                if match_mode in {"auto", "prefix"}:
+                    if name_value.startswith(query_lower) or path_value.startswith(query_lower):
+                        return "prefix", 0.9
+
+                if match_mode in {"auto", "contains"}:
+                    if query_lower in name_value or query_lower in path_value:
+                        return "contains", 0.8
+
+                if match_mode in {"auto", "fuzzy"}:
+                    name_ratio = SequenceMatcher(None, query_lower, name_value).ratio()
+                    path_ratio = SequenceMatcher(None, query_lower, path_value).ratio()
+                    best_ratio = max(name_ratio, path_ratio)
+                    threshold = 0.6 if match_mode == "fuzzy" else 0.72
+                    if best_ratio >= threshold:
+                        return "fuzzy", round(best_ratio, 3)
+
+                return None, 0.0
+
+            matches = []
+            for entry in all_entries:
+                match_type, score = match_entry(entry)
+                if match_type:
+                    matches.append({
+                        **entry,
+                        "match_type": match_type,
+                        "score": score
+                    })
+
+            match_rank = {"exact": 4, "prefix": 3, "contains": 2, "fuzzy": 1, "all": 0}
+            matches.sort(
+                key=lambda item: (
+                    match_rank.get(item["match_type"], 0),
+                    item["score"],
+                    -len(item["path"])
+                ),
+                reverse=True
+            )
+            matches = matches[:max_results]
+
+            return format_success_response(
+                f"Found {len(matches)} folder candidate(s)",
+                query=query,
+                match_mode=match_mode,
+                parent_folder=resolved_parent,
+                depth=depth,
+                total_scanned=len(all_entries),
+                total_matches=len(matches),
+                matches=matches,
+                mailbox=mailbox
+            )
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to find folders: {e}")
+            raise ToolExecutionError(f"Failed to find folders: {e}")
 
 
 class ManageFolderTool(BaseTool):

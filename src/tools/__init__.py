@@ -7,7 +7,7 @@ from .contact_tools import CreateContactTool, UpdateContactTool, DeleteContactTo
 from .task_tools import CreateTaskTool, GetTasksTool, UpdateTaskTool, CompleteTaskTool, DeleteTaskTool
 from .attachment_tools import ListAttachmentsTool, DownloadAttachmentTool, AddAttachmentTool, DeleteAttachmentTool, ReadAttachmentTool
 from .search_tools import SearchByConversationTool
-from .folder_tools import ListFoldersTool, ManageFolderTool
+from .folder_tools import ListFoldersTool, FindFolderTool, ManageFolderTool
 from .oof_tools import OofSettingsTool
 from .ai_tools import SemanticSearchEmailsTool, ClassifyEmailTool, SummarizeEmailTool, SuggestRepliesTool
 from .contact_intelligence_tools import FindPersonTool, AnalyzeContactsTool
@@ -51,8 +51,9 @@ __all__ = [
     "ReadAttachmentTool",
     # Search tools (1)
     "SearchByConversationTool",
-    # Folder tools (2)
+    # Folder tools (3)
     "ListFoldersTool",
+    "FindFolderTool",
     "ManageFolderTool",
     # Out-of-Office tools (1)
     "OofSettingsTool",

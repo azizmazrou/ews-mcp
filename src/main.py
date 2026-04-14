@@ -43,8 +43,8 @@ from .tools import (
     AddAttachmentTool, DeleteAttachmentTool, ReadAttachmentTool,
     # Search tools (1) — advanced_search/full_text_search merged into search_emails
     SearchByConversationTool,
-    # Folder tools (2) — create/delete/rename/move merged into manage_folder
-    ListFoldersTool, ManageFolderTool,
+    # Folder tools (3) — create/delete/rename/move merged into manage_folder
+    ListFoldersTool, FindFolderTool, ManageFolderTool,
     # Out-of-Office tools (1) — get/set merged into oof_settings
     OofSettingsTool,
     # AI tools (4 - conditionally enabled)
@@ -272,12 +272,13 @@ class EWSMCPServer:
         ])
         self.logger.info("Search tools enabled (1 tool)")
 
-        # Folder tools (2 tools — list_folders + manage_folder)
+        # Folder tools (3 tools — list_folders + find_folder + manage_folder)
         tool_classes.extend([
             ListFoldersTool,
+            FindFolderTool,
             ManageFolderTool
         ])
-        self.logger.info("Folder tools enabled (2 tools)")
+        self.logger.info("Folder tools enabled (3 tools)")
 
         # Out-of-Office tools (1 tool — oof_settings with get/set)
         tool_classes.extend([
