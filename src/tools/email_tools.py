@@ -55,6 +55,11 @@ def extract_body_html(message) -> str:
     else:
         html = str(body) if body else ""
 
+    # Strip CDATA wrapper if present (CDATA is XML syntax, not needed for HTML)
+    # This prevents ]]> from appearing in forwarded/replied emails
+    if html and '<![CDATA[' in html:
+        html = html.replace('<![CDATA[', '').replace(']]>', '')
+
     # Strip document-level HTML tags to prevent nested <html><body> issues
     # when embedding in blockquote. Nested document tags break HTML structure.
     return strip_html_document_tags(html)
@@ -1767,31 +1772,73 @@ class ReplyEmailTool(BaseTool):
             headers_html += f'''<b>Subject:</b> {header['subject']}
 </p>'''
 
-            # 5. Construct complete body with WordSection1 for Exclaimer signature placement
-            # Exclaimer inserts signature after the closing </div> of WordSection1
-            # Wrap replied content in blockquote so Exclaimer recognizes it as quoted content
-            # Structure: [user message in WordSection1] → [signature inserted here] → [quoted replied content]
-            complete_body = f'''<div class="WordSection1">
-{user_message}
-</div>
+            # 5. Construct complete body mimicking Outlook's HTML structure
+            # Exchange transport rules (org signatures) look for specific patterns:
+            # - User content in WordSection1 div
+            # - Clear separation before quoted content
+            # - Quoted original in a recognized quote structure
+            #
+            # Structure: [user message] → [SIGNATURE INSERTED HERE] → [divider] → [original quoted]
+            #
+            # NOTE: If user_message is empty, add a non-breaking space to ensure
+            # the WordSection1 div is not collapsed (Outlook does this too)
+            user_content = user_message if user_message else "&nbsp;"
 
-<blockquote style="margin:0 0 0 0;border:none;padding:0in">
-<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
-{headers_html}
+            complete_body = f'''<html>
+<head>
+<style>
+.MsoNormal {{ margin:0; }}
+</style>
+</head>
+<body>
+<div class="WordSection1">
+<p class="MsoNormal">{user_content}</p>
+<p class="MsoNormal">&nbsp;</p>
 </div>
-<br/>
+<div id="appendonsend"></div>
+<hr style="display:inline-block;width:98%" tabindex="-1">
+<div id="divRplyFwdMsg" dir="ltr">
+<font face="Calibri, sans-serif" style="font-size:11pt" color="#000000">
+{headers_html}
+</font>
+<div class="BodyFragment">
 {original_body_html}
-</blockquote>'''
+</div>
+</div>
+</body>
+</html>'''
 
             self.logger.info(f"Constructed complete reply body: {len(complete_body)} characters")
 
-            # Create a new Message with the complete body
+            # THREADING FIX: Get original message's Internet Message-ID and References
+            # for proper conversation threading (RFC 2822 headers)
+            original_internet_message_id = safe_get(original_message, "message_id", None)
+            original_references = safe_get(original_message, "references", None) or ""
+
+            # Build new References header: original References + original Message-ID
+            # This maintains the full thread chain per RFC 2822
+            new_references = original_references
+            if original_internet_message_id:
+                if new_references:
+                    new_references = f"{new_references} {original_internet_message_id}"
+                else:
+                    new_references = original_internet_message_id
+
+            self.logger.info(f"Threading: in_reply_to={original_internet_message_id}, references={new_references[:100] if new_references else 'None'}...")
+
+            # Create a new Message with the complete body AND threading headers
             message = Message(
                 account=account,
                 subject=reply_subject,
                 body=HTMLBody(complete_body),
                 to_recipients=reply_to_recipients
             )
+
+            # Set threading headers to maintain conversation grouping
+            if original_internet_message_id:
+                message.in_reply_to = original_internet_message_id
+            if new_references:
+                message.references = new_references
 
             # Copy original inline attachments (signatures, embedded images)
             inline_count, _ = copy_attachments_to_message(original_message, message)
@@ -1964,23 +2011,58 @@ class ForwardEmailTool(BaseTool):
                 headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
             headers_html += '''</p>'''
 
-            # 5. Construct complete body with WordSection1 for Exclaimer signature placement
-            # Exclaimer inserts signature after the closing </div> of WordSection1
-            # Wrap forwarded content in blockquote so Exclaimer recognizes it as quoted content
-            # Structure: [user message in WordSection1] → [signature inserted here] → [quoted forwarded content]
-            complete_body = f'''<div class="WordSection1">
-{user_message}
-</div>
+            # 5. Construct complete body mimicking Outlook's HTML structure for forwards
+            # Exchange transport rules (org signatures) look for specific patterns:
+            # - User content in WordSection1 div
+            # - Clear separation before forwarded content
+            # - Forwarded original in a recognized forward structure
+            #
+            # Structure: [user message] → [SIGNATURE INSERTED HERE] → [divider] → [forwarded original]
+            #
+            # NOTE: If user_message is empty, add a non-breaking space to ensure
+            # the WordSection1 div is not collapsed (Outlook does this too)
+            user_content = user_message if user_message else "&nbsp;"
 
-<blockquote style="margin:0 0 0 0;border:none;padding:0in">
-<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
-{headers_html}
+            complete_body = f'''<html>
+<head>
+<style>
+.MsoNormal {{ margin:0; }}
+</style>
+</head>
+<body>
+<div class="WordSection1">
+<p class="MsoNormal">{user_content}</p>
+<p class="MsoNormal">&nbsp;</p>
 </div>
-<br/>
+<div id="appendonsend"></div>
+<hr style="display:inline-block;width:98%" tabindex="-1">
+<div id="divRplyFwdMsg" dir="ltr">
+<font face="Calibri, sans-serif" style="font-size:11pt" color="#000000">
+{headers_html}
+</font>
+<div class="BodyFragment">
 {original_body_html}
-</blockquote>'''
+</div>
+</div>
+</body>
+</html>'''
 
             self.logger.info(f"Constructed complete forward body: {len(complete_body)} characters")
+
+            # THREADING: For forwards, we optionally preserve the chain for recipients
+            # who may have been part of the original conversation
+            original_internet_message_id = safe_get(original_message, "message_id", None)
+            original_references = safe_get(original_message, "references", None) or ""
+
+            # Build references to maintain thread chain (less critical for forwards)
+            new_references = original_references
+            if original_internet_message_id:
+                if new_references:
+                    new_references = f"{new_references} {original_internet_message_id}"
+                else:
+                    new_references = original_internet_message_id
+
+            self.logger.info(f"Forward threading: references={new_references[:100] if new_references else 'None'}...")
 
             # Create a new Message with the complete body
             message = Message(
@@ -1989,6 +2071,10 @@ class ForwardEmailTool(BaseTool):
                 body=HTMLBody(complete_body),
                 to_recipients=[Mailbox(email_address=email) for email in to_recipients]
             )
+
+            # Set references to maintain thread context (helps with some email clients)
+            if new_references:
+                message.references = new_references
 
             if cc_recipients:
                 message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
