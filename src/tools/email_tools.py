@@ -1354,53 +1354,58 @@ class MoveEmailTool(BaseTool):
                     },
                     "destination_folder": {
                         "type": "string",
-                        "description": "Destination folder (inbox, sent, drafts, deleted, junk)"
+                        "description": "Destination folder name or path (e.g. inbox, Inbox/Projects)"
+                    },
+                    "destination_folder_id": {
+                        "type": "string",
+                        "description": "Destination folder ID (alternative to destination_folder)"
                     },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
-                "required": ["message_id", "destination_folder"]
+                "required": ["message_id"]
             }
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Move email to folder."""
         message_id = kwargs.get("message_id")
-        dest_folder_name = kwargs.get("destination_folder", "").lower()
+        destination_folder = kwargs.get("destination_folder")
+        destination_folder_id = kwargs.get("destination_folder_id")
         target_mailbox = kwargs.get("target_mailbox")
+
+        if not message_id:
+            raise ToolExecutionError("message_id is required")
+        if not destination_folder and not destination_folder_id:
+            raise ToolExecutionError("Either destination_folder or destination_folder_id is required")
 
         try:
             # Get account (primary or impersonated)
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            # Get destination folder
-            folder_map = {
-                "inbox": account.inbox,
-                "sent": account.sent,
-                "drafts": account.drafts,
-                "deleted": account.trash,
-                "junk": account.junk
-            }
-
-            dest_folder = folder_map.get(dest_folder_name)
-            if not dest_folder:
-                raise ToolExecutionError(f"Unknown folder: {dest_folder_name}")
+            # Folder ID takes precedence over folder name/path when both are provided.
+            destination_identifier = destination_folder_id or destination_folder
+            dest_folder = await resolve_folder_for_account(account, destination_identifier)
+            dest_name = safe_get(dest_folder, "name", destination_identifier)
 
             # Find message across all folders (including custom subfolders)
             item = find_message_for_account(account, message_id)
             item.move(dest_folder)
 
-            self.logger.info(f"Email {message_id} moved to {dest_folder_name} in mailbox: {mailbox}")
+            self.logger.info(f"Email {message_id} moved to {dest_name} in mailbox: {mailbox}")
 
             return format_success_response(
-                f"Email moved to {dest_folder_name}",
+                f"Email moved to {dest_name}",
                 message_id=message_id,
+                destination_folder=dest_name,
                 mailbox=mailbox
             )
 
+        except ToolExecutionError:
+            raise
         except Exception as e:
             self.logger.error(f"Failed to move email: {e}")
             raise ToolExecutionError(f"Failed to move email: {e}")

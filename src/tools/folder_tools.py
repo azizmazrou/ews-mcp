@@ -8,6 +8,49 @@ from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get, ews_id_to_str
 
 
+def get_standard_folder_map(account):
+    """Get standard folder name to object mapping."""
+    return {
+        "root": account.root,
+        "inbox": account.inbox,
+        "sent": account.sent,
+        "drafts": account.drafts,
+        "deleted": account.trash,
+        "junk": account.junk,
+        "calendar": account.calendar,
+        "contacts": account.contacts,
+        "tasks": account.tasks
+    }
+
+
+def find_folder_by_id(parent, target_id):
+    """Recursively search for folder by ID."""
+    parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
+    if parent_id == target_id:
+        return parent
+    if hasattr(parent, 'children') and parent.children:
+        for child in parent.children:
+            result = find_folder_by_id(child, target_id)
+            if result:
+                return result
+    return None
+
+
+def resolve_parent_folder(account, parent_folder=None, parent_folder_id=None, default_name="root"):
+    """Resolve parent folder from ID or standard folder name."""
+    if parent_folder_id:
+        folder = find_folder_by_id(account.root, parent_folder_id)
+        if not folder:
+            raise ToolExecutionError(f"Parent folder not found: {parent_folder_id}")
+        return folder, safe_get(folder, "name", parent_folder_id)
+
+    parent_folder_name = (parent_folder or default_name).lower()
+    folder = get_standard_folder_map(account).get(parent_folder_name)
+    if not folder:
+        raise ToolExecutionError(f"Unknown parent folder: {parent_folder_name}")
+    return folder, parent_folder_name
+
+
 class ListFoldersTool(BaseTool):
     """Tool for listing mailbox folder hierarchy."""
 
@@ -23,6 +66,10 @@ class ListFoldersTool(BaseTool):
                         "description": "Parent folder to start from (default: root)",
                         "default": "root",
                         "enum": ["root", "inbox", "sent", "drafts", "deleted", "junk", "calendar", "contacts", "tasks"]
+                    },
+                    "parent_folder_id": {
+                        "type": "string",
+                        "description": "Parent folder ID (alternative to parent_folder)"
                     },
                     "depth": {
                         "type": "integer",
@@ -51,7 +98,8 @@ class ListFoldersTool(BaseTool):
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """List folders recursively."""
-        parent_folder_name = kwargs.get("parent_folder", "root").lower()
+        parent_folder_name = kwargs.get("parent_folder")
+        parent_folder_id = kwargs.get("parent_folder_id")
         depth = kwargs.get("depth", 2)
         include_hidden = kwargs.get("include_hidden", False)
         include_counts = kwargs.get("include_counts", True)
@@ -63,22 +111,12 @@ class ListFoldersTool(BaseTool):
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
-
-            folder_map = {
-                "root": account.root,
-                "inbox": account.inbox,
-                "sent": account.sent,
-                "drafts": account.drafts,
-                "deleted": account.trash,
-                "junk": account.junk,
-                "calendar": account.calendar,
-                "contacts": account.contacts,
-                "tasks": account.tasks
-            }
-
-            parent_folder = folder_map.get(parent_folder_name)
-            if not parent_folder:
-                raise ToolExecutionError(f"Unknown parent folder: {parent_folder_name}")
+            parent_folder, resolved_parent = resolve_parent_folder(
+                account,
+                parent_folder=parent_folder_name,
+                parent_folder_id=parent_folder_id,
+                default_name="root"
+            )
 
             def list_folder_tree(folder, current_depth, max_depth):
                 if current_depth > max_depth:
@@ -156,7 +194,7 @@ class ListFoldersTool(BaseTool):
                 f"Listed {total_folders} folder(s)",
                 folder_tree=folder_tree,
                 total_folders=total_folders,
-                parent_folder=parent_folder_name,
+                parent_folder=resolved_parent,
                 depth=depth,
                 mailbox=mailbox
             )
@@ -200,6 +238,10 @@ class ManageFolderTool(BaseTool):
                         "default": "inbox",
                         "enum": ["root", "inbox", "sent", "drafts", "deleted", "junk", "calendar", "contacts", "tasks"]
                     },
+                    "parent_folder_id": {
+                        "type": "string",
+                        "description": "Parent folder ID for create action (alternative to parent_folder)"
+                    },
                     "folder_class": {
                         "type": "string",
                         "description": "Folder class for create (type of items)",
@@ -231,29 +273,11 @@ class ManageFolderTool(BaseTool):
 
     def _get_folder_map(self, account):
         """Get standard folder name to object mapping."""
-        return {
-            "root": account.root,
-            "inbox": account.inbox,
-            "sent": account.sent,
-            "drafts": account.drafts,
-            "deleted": account.trash,
-            "junk": account.junk,
-            "calendar": account.calendar,
-            "contacts": account.contacts,
-            "tasks": account.tasks
-        }
+        return get_standard_folder_map(account)
 
     def _find_folder_by_id(self, parent, target_id):
         """Recursively search for folder by ID."""
-        parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
-        if parent_id == target_id:
-            return parent
-        if hasattr(parent, 'children') and parent.children:
-            for child in parent.children:
-                result = self._find_folder_by_id(child, target_id)
-                if result:
-                    return result
-        return None
+        return find_folder_by_id(parent, target_id)
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Route to appropriate folder action."""
@@ -275,7 +299,8 @@ class ManageFolderTool(BaseTool):
     async def _create(self, **kwargs) -> Dict[str, Any]:
         """Create a new folder."""
         folder_name = kwargs.get("folder_name")
-        parent_folder_name = kwargs.get("parent_folder", "inbox").lower()
+        parent_folder_name = kwargs.get("parent_folder")
+        parent_folder_id = kwargs.get("parent_folder_id")
         folder_class = kwargs.get("folder_class", "IPF.Note")
         target_mailbox = kwargs.get("target_mailbox")
 
@@ -285,11 +310,12 @@ class ManageFolderTool(BaseTool):
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
-
-            folder_map = self._get_folder_map(account)
-            parent_folder = folder_map.get(parent_folder_name)
-            if not parent_folder:
-                raise ToolExecutionError(f"Unknown parent folder: {parent_folder_name}")
+            parent_folder, resolved_parent = resolve_parent_folder(
+                account,
+                parent_folder=parent_folder_name,
+                parent_folder_id=parent_folder_id,
+                default_name="inbox"
+            )
 
             new_folder = Folder(parent=parent_folder, name=folder_name, folder_class=folder_class)
             new_folder.save()
@@ -298,7 +324,7 @@ class ManageFolderTool(BaseTool):
                 f"Folder '{folder_name}' created successfully",
                 folder_id=ews_id_to_str(new_folder.id),
                 folder_name=folder_name,
-                parent_folder=parent_folder_name,
+                parent_folder=resolved_parent,
                 folder_class=folder_class,
                 mailbox=mailbox
             )
