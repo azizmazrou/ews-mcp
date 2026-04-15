@@ -127,9 +127,9 @@ async def test_check_availability_tool(mock_ews_client):
 
     # Mock availability data
     mock_availability = MagicMock()
-    mock_availability.free_busy_view_type = "Detailed"
-    mock_availability.merged_free_busy = "00002222000"
-    mock_availability.calendar_event_array = []
+    mock_availability.view_type = "DetailedMerged"
+    mock_availability.merged = "00002222000"
+    mock_availability.calendar_events = []
 
     mock_ews_client.account.protocol.get_free_busy_info.return_value = [mock_availability]
 

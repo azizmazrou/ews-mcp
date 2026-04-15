@@ -2,12 +2,12 @@
 
 from typing import Any, Dict
 from datetime import datetime, timedelta
-from exchangelib import CalendarItem, Mailbox, Attendee
+from exchangelib import CalendarItem, Mailbox, Attendee, EWSTimeZone
 
 from .base import BaseTool
 from ..models import CreateAppointmentRequest, MeetingResponse
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA
+from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA, get_timezone
 
 
 def build_free_busy_accounts(email_addresses):
@@ -18,6 +18,19 @@ def build_free_busy_accounts(email_addresses):
 def get_timezone():
     """Compatibility shim retained for older tests."""
     return None
+
+
+def format_free_busy_datetime(dt):
+    """Format free/busy datetimes in the configured local timezone.
+
+    Exchange free/busy responses may contain naive UTC datetimes. Convert those
+    explicitly so user-facing output matches the requested mailbox timezone.
+    """
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        dt = dt.replace(tzinfo=EWSTimeZone("UTC"))
+    return dt.astimezone(get_timezone()).isoformat()
 
 
 class CreateAppointmentTool(BaseTool):
@@ -567,32 +580,34 @@ class CheckAvailabilityTool(BaseTool):
                 merged_free_busy_interval=interval_minutes
             ))
 
-            # Format response
+            # exchangelib FreeBusyView exposes view_type / merged / calendar_events.
+            # Older attribute names such as free_busy_view_type or merged_free_busy
+            # are not populated, which would incorrectly make busy users appear free.
             availability_results = []
             for email_address, busy_info in zip(email_addresses, availability_data):
-                # Parse the free/busy time slots
-                # exchangelib returns FreeBusyView with working_hours_timezone, free_busy_view_type, etc.
                 result = {
                     "email": email_address,
-                    "view_type": str(busy_info.free_busy_view_type) if hasattr(busy_info, 'free_busy_view_type') else "Detailed",
+                    "view_type": str(safe_get(busy_info, "view_type", None) or "DetailedMerged"),
                     "calendar_events": []
                 }
 
                 # Add calendar event information if available
-                if hasattr(busy_info, 'calendar_event_array') and busy_info.calendar_event_array:
-                    for event in busy_info.calendar_event_array:
+                calendar_events = safe_get(busy_info, "calendar_events", None) or []
+                if calendar_events:
+                    for event in calendar_events:
                         result["calendar_events"].append({
-                            "start": format_datetime(event.start) if hasattr(event, 'start') else None,
-                            "end": format_datetime(event.end) if hasattr(event, 'end') else None,
+                            "start": format_free_busy_datetime(event.start) if hasattr(event, 'start') else None,
+                            "end": format_free_busy_datetime(event.end) if hasattr(event, 'end') else None,
                             "busy_type": str(event.busy_type) if hasattr(event, 'busy_type') else "Busy",
                             "details": safe_get(event, 'details')
                         })
 
                 # Add merged free/busy string if available
-                if hasattr(busy_info, 'merged_free_busy'):
+                merged_free_busy = safe_get(busy_info, "merged", None)
+                if merged_free_busy is not None:
                     # The merged_free_busy is a string like "00002222000..." where:
                     # 0=Free, 1=Tentative, 2=Busy, 3=OOF (Out of Office), 4=NoData
-                    result["merged_free_busy"] = busy_info.merged_free_busy
+                    result["merged_free_busy"] = merged_free_busy
                     result["free_busy_legend"] = {
                         "0": "Free",
                         "1": "Tentative",
