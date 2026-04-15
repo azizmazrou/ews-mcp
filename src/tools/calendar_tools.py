@@ -7,7 +7,7 @@ from exchangelib import CalendarItem, Mailbox, Attendee, EWSTimeZone
 from .base import BaseTool
 from ..models import CreateAppointmentRequest, MeetingResponse
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA, get_timezone
+from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA, get_timezone as get_configured_timezone
 
 
 def build_free_busy_accounts(email_addresses):
@@ -30,7 +30,68 @@ def format_free_busy_datetime(dt):
         return None
     if getattr(dt, "tzinfo", None) is None:
         dt = dt.replace(tzinfo=EWSTimeZone("UTC"))
-    return dt.astimezone(get_timezone()).isoformat()
+    return dt.astimezone(get_configured_timezone()).isoformat()
+
+
+FREE_BUSY_LABELS = {
+    "0": "Free",
+    "1": "Tentative",
+    "2": "Busy",
+    "3": "OutOfOffice",
+    "4": "NoData",
+}
+
+
+def build_slot_summaries(start_time, interval_minutes, merged_free_busy):
+    """Expand merged free/busy codes into explicit local-time slots."""
+    slots = []
+    current = start_time
+    for code in merged_free_busy or "":
+        slot_end = current + timedelta(minutes=interval_minutes)
+        label = FREE_BUSY_LABELS.get(code, "Unknown")
+        slots.append({
+            "start": current.isoformat(),
+            "end": slot_end.isoformat(),
+            "code": code,
+            "label": label,
+            "is_blocking": code in {"2", "3", "4"},
+        })
+        current = slot_end
+    return slots
+
+
+def parse_display_datetime(dt_str):
+    """Parse the raw user-supplied datetime while preserving its explicit offset."""
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+
+
+def summarize_availability(merged_free_busy, calendar_events):
+    """Return a compact summary that is easier for LLMs and clients to interpret."""
+    codes = set(merged_free_busy or "")
+    busy_types = {str(safe_get(event, "busy_type", "")) for event in calendar_events or []}
+
+    if "3" in codes:
+        primary = "out_of_office"
+    elif "2" in codes:
+        primary = "busy"
+    elif "4" in codes:
+        primary = "no_data"
+    elif "WorkingElsewhere" in busy_types:
+        primary = "working_elsewhere"
+    elif "1" in codes:
+        primary = "tentative"
+    else:
+        primary = "free"
+
+    return {
+        "primary_status": primary,
+        "is_fully_free": codes <= {"0"} if merged_free_busy is not None else False,
+        "has_busy": "2" in codes,
+        "has_tentative": "1" in codes,
+        "has_out_of_office": "3" in codes,
+        "has_no_data": "4" in codes,
+        "has_working_elsewhere": "WorkingElsewhere" in busy_types,
+    }
 
 
 class CreateAppointmentTool(BaseTool):
@@ -565,6 +626,7 @@ class CheckAvailabilityTool(BaseTool):
             # Parse datetimes
             start_time = parse_datetime_tz_aware(start_time_str)
             end_time = parse_datetime_tz_aware(end_time_str)
+            display_start_time = parse_display_datetime(start_time_str)
 
             if not start_time or not end_time:
                 raise ToolExecutionError("Invalid datetime format. Use ISO 8601 format.")
@@ -605,16 +667,24 @@ class CheckAvailabilityTool(BaseTool):
                 # Add merged free/busy string if available
                 merged_free_busy = safe_get(busy_info, "merged", None)
                 if merged_free_busy is not None:
-                    # The merged_free_busy is a string like "00002222000..." where:
-                    # 0=Free, 1=Tentative, 2=Busy, 3=OOF (Out of Office), 4=NoData
                     result["merged_free_busy"] = merged_free_busy
-                    result["free_busy_legend"] = {
-                        "0": "Free",
-                        "1": "Tentative",
-                        "2": "Busy",
-                        "3": "OutOfOffice",
-                        "4": "NoData"
-                    }
+                    result["free_busy_legend"] = FREE_BUSY_LABELS
+                    result["slot_summaries"] = build_slot_summaries(
+                        start_time=display_start_time,
+                        interval_minutes=interval_minutes,
+                        merged_free_busy=merged_free_busy,
+                    )
+                    result["blocking_slots"] = [
+                        slot for slot in result["slot_summaries"] if slot["is_blocking"]
+                    ]
+                    result["non_free_slots"] = [
+                        slot for slot in result["slot_summaries"] if slot["code"] != "0"
+                    ]
+
+                result["availability_summary"] = summarize_availability(
+                    merged_free_busy=merged_free_busy,
+                    calendar_events=result["calendar_events"],
+                )
 
                 availability_results.append(result)
 
@@ -623,6 +693,7 @@ class CheckAvailabilityTool(BaseTool):
             return format_success_response(
                 f"Availability retrieved for {len(email_addresses)} user(s)",
                 availability=availability_results,
+                response_timezone=display_start_time.isoformat()[-6:],
                 time_range={
                     "start": start_time_str,
                     "end": end_time_str,
