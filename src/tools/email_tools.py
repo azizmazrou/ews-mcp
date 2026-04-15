@@ -28,6 +28,7 @@ from .base import BaseTool
 from ..models import SendEmailRequest, EmailSearchRequest, EmailDetails
 from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA
+from .folder_tools import find_folder_by_id, get_standard_folder_map
 
 
 def extract_body_html(message) -> str:
@@ -386,18 +387,32 @@ async def resolve_folder_for_account(account, folder_identifier: str):
     """
     folder_identifier = folder_identifier.strip()
 
-    # Standard folders map (lowercase for matching)
-    folder_map = {
-        "inbox": account.inbox,
-        "sent": account.sent,
-        "drafts": account.drafts,
-        "deleted": account.trash,
-        "junk": account.junk,
-        "trash": account.trash,
-        "calendar": account.calendar,
-        "contacts": account.contacts,
-        "tasks": account.tasks
-    }
+    folder_map = get_standard_folder_map(account)
+    folder_map["trash"] = account.trash
+
+    def traverse_folder_path(start_folder, path_parts):
+        """Walk a folder path from an explicit starting folder."""
+        current_folder = start_folder
+        for subfolder_name in path_parts:
+            found = None
+            try:
+                for child in list(getattr(current_folder, "children", []) or []):
+                    if safe_get(child, "name", "").lower() == subfolder_name.lower():
+                        found = child
+                        break
+            except Exception as e:
+                current_name = safe_get(current_folder, "name", "root")
+                raise ToolExecutionError(
+                    f"Error accessing subfolders of '{current_name}': {e}"
+                ) from e
+
+            if not found:
+                current_name = safe_get(current_folder, "name", "root")
+                raise ToolExecutionError(
+                    f"Subfolder '{subfolder_name}' not found under '{current_name}'"
+                )
+            current_folder = found
+        return current_folder
 
     # Try 1: Standard folder name (case-insensitive)
     folder_lower = folder_identifier.lower()
@@ -407,23 +422,6 @@ async def resolve_folder_for_account(account, folder_identifier: str):
     # Try 2: Folder ID (starts with AAMk or similar Exchange ID pattern)
     # IMPORTANT: Check this BEFORE path parsing, as base64 IDs can contain '/'
     if is_exchange_folder_id(folder_identifier):
-        # Folder ID detection - try to find in tree
-        def find_folder_by_id(parent, target_id):
-            """Recursively search for folder by ID."""
-            try:
-                parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
-                if parent_id == target_id:
-                    return parent
-                if hasattr(parent, 'children') and parent.children:
-                    for child in parent.children:
-                        result = find_folder_by_id(child, target_id)
-                        if result:
-                            return result
-            except Exception:
-                pass
-            return None
-
-        # Search root tree for folder ID
         found_folder = find_folder_by_id(account.root, folder_identifier)
         if found_folder:
             return found_folder
@@ -433,41 +431,30 @@ async def resolve_folder_for_account(account, folder_identifier: str):
             f"The ID appears to be an Exchange folder ID but could not be located in your mailbox."
         )
 
-    # Try 3: Folder path (e.g., "Inbox/CC" or "Inbox/Projects/2024")
-    # Only parse as path if NOT an Exchange ID (which may contain '/')
+    # Try 3: Folder path (e.g., "Inbox/CC", "/Archive/2024", "Archive/2024")
     if '/' in folder_identifier:
-        parts = folder_identifier.split('/')
-        parent_name = parts[0].strip().lower()
+        parts = [part.strip() for part in folder_identifier.split('/') if part.strip()]
+        if not parts:
+            raise ToolExecutionError("Folder path is empty")
 
-        # Start from a known parent folder
+        if folder_identifier.startswith('/'):
+            return traverse_folder_path(account.root, parts)
+
+        parent_name = parts[0].lower()
         if parent_name in folder_map:
-            current_folder = folder_map[parent_name]
-        else:
-            # Default to inbox if parent not recognized
-            current_folder = account.inbox
+            return traverse_folder_path(folder_map[parent_name], parts[1:])
 
-        # Navigate through subfolders
-        for subfolder_name in parts[1:]:
-            subfolder_name = subfolder_name.strip()
-            found = False
-
+        path_errors = []
+        for start_folder in (account.root, account.inbox):
             try:
-                for child in current_folder.children:
-                    if safe_get(child, 'name', '').lower() == subfolder_name.lower():
-                        current_folder = child
-                        found = True
-                        break
-            except Exception as e:
-                raise ToolExecutionError(
-                    f"Error accessing subfolders of '{current_folder.name}': {e}"
-                )
+                return traverse_folder_path(start_folder, parts)
+            except ToolExecutionError as e:
+                path_errors.append(str(e))
 
-            if not found:
-                raise ToolExecutionError(
-                    f"Subfolder '{subfolder_name}' not found under '{current_folder.name}'"
-                )
-
-        return current_folder
+        raise ToolExecutionError(
+            f"Folder path '{folder_identifier}' not found from mailbox root or inbox. "
+            f"Resolution attempts: {' | '.join(path_errors)}"
+        )
 
     # Try 4: Search for custom folder by name (recursively under inbox)
     def search_folder_tree(parent, target_name, max_depth=3, current_depth=0):
@@ -489,13 +476,13 @@ async def resolve_folder_for_account(account, folder_identifier: str):
 
         return None
 
-    # Search under inbox first (most common location for custom folders)
-    custom_folder = search_folder_tree(account.inbox, folder_identifier)
+    # Search under root first so top-level custom folders win over inbox children.
+    custom_folder = search_folder_tree(account.root, folder_identifier)
     if custom_folder:
         return custom_folder
 
-    # Search under root as fallback
-    custom_folder = search_folder_tree(account.root, folder_identifier)
+    # Search under inbox as fallback for mailbox layouts that hide folder tree roots.
+    custom_folder = search_folder_tree(account.inbox, folder_identifier)
     if custom_folder:
         return custom_folder
 
@@ -1622,67 +1609,12 @@ class CopyEmailTool(BaseTool):
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            # Find the message in various folders
-            message = None
-            source_folder_name = None
+            message = find_message_for_account(account, message_id)
+            source_folder_name = safe_get(safe_get(message, "folder", None), "name", "unknown")
 
-            folders_to_search = [
-                ("inbox", account.inbox),
-                ("sent", account.sent),
-                ("drafts", account.drafts),
-                ("deleted", account.trash),
-                ("junk", account.junk)
-            ]
-
-            for folder_name, folder in folders_to_search:
-                try:
-                    message = folder.get(id=message_id)
-                    if message:
-                        source_folder_name = folder_name
-                        break
-                except Exception:
-                    continue
-
-            if not message:
-                raise ToolExecutionError(f"Message not found: {message_id}")
-
-            # Get destination folder
-            if destination_folder_name:
-                folder_map = {
-                    "inbox": account.inbox,
-                    "sent": account.sent,
-                    "drafts": account.drafts,
-                    "deleted": account.trash,
-                    "junk": account.junk
-                }
-
-                destination_folder = folder_map.get(destination_folder_name.lower())
-                if not destination_folder:
-                    available_folders = list(folder_map.keys())
-                    raise ToolExecutionError(
-                        f"Unknown destination folder: {destination_folder_name}. "
-                        f"Available folders: {', '.join(available_folders)}"
-                    )
-                dest_name = destination_folder_name
-            else:
-                # Find folder by ID
-                def find_folder_by_id(parent, target_id):
-                    """Recursively search for folder by ID."""
-                    parent_id = ews_id_to_str(safe_get(parent, 'id', None)) or ''
-                    if parent_id == target_id:
-                        return parent
-
-                    if hasattr(parent, 'children') and parent.children:
-                        for child in parent.children:
-                            result = find_folder_by_id(child, target_id)
-                            if result:
-                                return result
-                    return None
-
-                destination_folder = find_folder_by_id(account.root, destination_folder_id)
-                if not destination_folder:
-                    raise ToolExecutionError(f"Destination folder not found: {destination_folder_id}")
-                dest_name = safe_get(destination_folder, 'name', 'Unknown')
+            destination_identifier = destination_folder_id or destination_folder_name
+            destination_folder = await resolve_folder_for_account(account, destination_identifier)
+            dest_name = safe_get(destination_folder, 'name', destination_identifier)
 
             # Copy the message (exchangelib uses .copy() method)
             copied_message = message.copy(to_folder=destination_folder)

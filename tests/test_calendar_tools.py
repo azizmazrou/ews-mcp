@@ -145,6 +145,9 @@ async def test_check_availability_tool(mock_ews_client):
     assert result["availability"][0]["email"] == "user1@example.com"
     assert "merged_free_busy" in result["availability"][0]
     mock_ews_client.account.protocol.get_free_busy_info.assert_called_once()
+    assert mock_ews_client.account.protocol.get_free_busy_info.call_args.kwargs["accounts"] == [
+        ("user1@example.com", "Required", False)
+    ]
 
 
 @pytest.mark.asyncio

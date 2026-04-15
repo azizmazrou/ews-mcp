@@ -5,9 +5,51 @@ import base64
 import io
 from pathlib import Path
 
+from exchangelib import Body, HTMLBody, ItemAttachment, Message
+
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get, find_message_across_folders, find_message_for_account
+
+
+def extract_attachment_id(attachment) -> str:
+    """Extract a plain attachment ID from exchangelib attachment variants."""
+    att_id = safe_get(attachment, 'attachment_id', '')
+    if hasattr(att_id, 'id'):
+        return att_id.id
+    if isinstance(att_id, dict):
+        return att_id.get('id', '')
+    return str(att_id) if att_id else ''
+
+
+def build_embedded_message(account, source_message):
+    """Create a detached message payload suitable for ItemAttachment."""
+    body_value = safe_get(source_message, "body", None)
+    if hasattr(body_value, "body") and body_value.body:
+        body = HTMLBody(body_value.body)
+    elif isinstance(body_value, str) and "<" in body_value and ">" in body_value:
+        body = HTMLBody(body_value)
+    else:
+        body = Body(str(body_value or safe_get(source_message, "text_body", "") or ""))
+
+    kwargs = {
+        "account": account,
+        "subject": safe_get(source_message, "subject", "") or "Attached email",
+        "body": body,
+        "to_recipients": list(safe_get(source_message, "to_recipients", []) or []),
+        "cc_recipients": list(safe_get(source_message, "cc_recipients", []) or []),
+        "bcc_recipients": list(safe_get(source_message, "bcc_recipients", []) or []),
+    }
+
+    mime_content = safe_get(source_message, "mime_content", None)
+    if mime_content:
+        kwargs["mime_content"] = mime_content
+    if safe_get(source_message, "sender", None):
+        kwargs["sender"] = source_message.sender
+    if safe_get(source_message, "author", None):
+        kwargs["author"] = source_message.author
+
+    return Message(**kwargs)
 
 
 class ListAttachmentsTool(BaseTool):
@@ -64,25 +106,14 @@ class ListAttachmentsTool(BaseTool):
                     if not include_inline and is_inline:
                         continue
 
-                    # Extract attachment ID properly
-                    att_id = safe_get(attachment, 'attachment_id', '')
-                    if hasattr(att_id, 'id'):
-                        # AttachmentId object
-                        att_id = att_id.id
-                    elif isinstance(att_id, dict):
-                        # Dictionary
-                        att_id = att_id.get('id', '')
-                    else:
-                        # String or other
-                        att_id = str(att_id) if att_id else ''
-
                     attachment_info = {
-                        "id": att_id,
+                        "id": extract_attachment_id(attachment),
                         "name": safe_get(attachment, 'name', 'unnamed'),
                         "size": safe_get(attachment, 'size', 0),
                         "content_type": safe_get(attachment, 'content_type', 'application/octet-stream'),
                         "is_inline": is_inline,
-                        "content_id": safe_get(attachment, 'content_id')
+                        "content_id": safe_get(attachment, 'content_id'),
+                        "attachment_type": attachment.__class__.__name__
                     }
                     attachments.append(attachment_info)
 
@@ -168,19 +199,7 @@ class DownloadAttachmentTool(BaseTool):
             attachment = None
             if hasattr(message, 'attachments') and message.attachments:
                 for att in message.attachments:
-                    # Extract attachment ID properly (same logic as list_attachments)
-                    att_id = safe_get(att, 'attachment_id', '')
-                    if hasattr(att_id, 'id'):
-                        # AttachmentId object
-                        att_id = att_id.id
-                    elif isinstance(att_id, dict):
-                        # Dictionary
-                        att_id = att_id.get('id', '')
-                    else:
-                        # String or other
-                        att_id = str(att_id) if att_id else ''
-
-                    if str(att_id) == str(attachment_id):
+                    if str(extract_attachment_id(att)) == str(attachment_id):
                         attachment = att
                         break
 
@@ -460,19 +479,7 @@ class DeleteAttachmentTool(BaseTool):
             for att in message.attachments:
                 # Check by ID
                 if attachment_id:
-                    # Extract attachment ID properly (same logic as list_attachments)
-                    att_id = safe_get(att, 'attachment_id', '')
-                    if hasattr(att_id, 'id'):
-                        # AttachmentId object
-                        att_id = att_id.id
-                    elif isinstance(att_id, dict):
-                        # Dictionary
-                        att_id = att_id.get('id', '')
-                    else:
-                        # String or other
-                        att_id = str(att_id) if att_id else ''
-
-                    if str(att_id) == str(attachment_id):
+                    if str(extract_attachment_id(att)) == str(attachment_id):
                         attachment_to_delete = att
                         deleted_name = safe_get(att, 'name', 'Unknown')
                         break
@@ -623,6 +630,131 @@ class ReadAttachmentTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to read attachment: {e}")
             raise ToolExecutionError(f"Failed to read attachment: {e}")
+
+
+class GetEmailMimeTool(BaseTool):
+    """Tool for retrieving raw MIME content for an email."""
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "get_email_mime",
+            "description": "Return the raw RFC822 MIME content for an email as base64.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "Email message ID to export as MIME"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
+                    }
+                },
+                "required": ["message_id"]
+            }
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        message_id = kwargs.get("message_id")
+        target_mailbox = kwargs.get("target_mailbox")
+
+        if not message_id:
+            raise ToolExecutionError("message_id is required")
+
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+            message = find_message_for_account(account, message_id)
+            mime_content = safe_get(message, "mime_content", None)
+            if not mime_content:
+                raise ToolExecutionError("MIME content is not available for this message")
+
+            if isinstance(mime_content, str):
+                mime_bytes = mime_content.encode("utf-8")
+            else:
+                mime_bytes = bytes(mime_content)
+
+            return format_success_response(
+                "Email MIME retrieved successfully",
+                message_id=message_id,
+                subject=safe_get(message, "subject", ""),
+                mime_content_base64=base64.b64encode(mime_bytes).decode("utf-8"),
+                mailbox=mailbox
+            )
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to get email MIME: {e}")
+            raise ToolExecutionError(f"Failed to get email MIME: {e}")
+
+
+class AttachEmailToDraftTool(BaseTool):
+    """Tool for attaching an existing email as an embedded message to a draft."""
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "attach_email_to_draft",
+            "description": "Attach an existing email as an embedded message to a draft in the Drafts folder.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "draft_id": {
+                        "type": "string",
+                        "description": "Draft message ID that should receive the embedded email"
+                    },
+                    "source_message_id": {
+                        "type": "string",
+                        "description": "Existing message ID to embed as an email attachment"
+                    },
+                    "attachment_name": {
+                        "type": "string",
+                        "description": "Optional display name for the embedded email attachment"
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)"
+                    }
+                },
+                "required": ["draft_id", "source_message_id"]
+            }
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        draft_id = kwargs.get("draft_id")
+        source_message_id = kwargs.get("source_message_id")
+        attachment_name = kwargs.get("attachment_name")
+        target_mailbox = kwargs.get("target_mailbox")
+
+        if not draft_id:
+            raise ToolExecutionError("draft_id is required")
+        if not source_message_id:
+            raise ToolExecutionError("source_message_id is required")
+
+        try:
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+            draft_message = find_message_for_account(account, draft_id)
+            source_message = find_message_for_account(account, source_message_id)
+
+            embedded_message = build_embedded_message(account, source_message)
+            embedded_name = attachment_name or f"{safe_get(source_message, 'subject', 'attached-email')}.eml"
+            item_attachment = ItemAttachment(name=embedded_name, item=embedded_message)
+            draft_message.attach(item_attachment)
+
+            return format_success_response(
+                "Email attached to draft successfully",
+                draft_id=draft_id,
+                source_message_id=source_message_id,
+                attachment_name=embedded_name,
+                attachment_id=extract_attachment_id(item_attachment),
+                mailbox=mailbox
+            )
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            self.logger.error(f"Failed to attach email to draft: {e}")
+            raise ToolExecutionError(f"Failed to attach email to draft: {e}")
 
     def _read_pdf(self, content: bytes, extract_tables: bool, max_pages: int) -> str:
         """Extract text from PDF using pdfplumber."""

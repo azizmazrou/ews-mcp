@@ -1,12 +1,14 @@
 """Tests for attachment tools."""
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import base64
 
 from src.tools.attachment_tools import (
     ListAttachmentsTool,
-    DownloadAttachmentTool
+    DownloadAttachmentTool,
+    GetEmailMimeTool,
+    AttachEmailToDraftTool,
 )
 
 
@@ -159,3 +161,41 @@ async def test_download_attachment_not_found(mock_ews_client):
         )
 
     assert "not found" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_email_mime_tool(mock_ews_client):
+    """Test exporting MIME content for an email."""
+    tool = GetEmailMimeTool(mock_ews_client)
+    mock_message = MagicMock()
+    mock_message.subject = "Subject"
+    mock_message.mime_content = b"From: test@example.com\r\n\r\nHello"
+
+    with patch("src.tools.attachment_tools.find_message_for_account", return_value=mock_message):
+        result = await tool.execute(message_id="msg-1")
+
+    assert result["success"] is True
+    assert result["subject"] == "Subject"
+    assert result["mime_content_base64"]
+
+
+@pytest.mark.asyncio
+async def test_attach_email_to_draft_tool(mock_ews_client):
+    """Test embedding an existing email into a saved draft."""
+    tool = AttachEmailToDraftTool(mock_ews_client)
+    mock_draft = MagicMock()
+    mock_source = MagicMock()
+    mock_source.subject = "Original message"
+    mock_source.body = "Body text"
+    mock_source.to_recipients = []
+    mock_source.cc_recipients = []
+    mock_source.bcc_recipients = []
+    mock_source.mime_content = b"From: test@example.com\r\n\r\nHello"
+
+    with patch("src.tools.attachment_tools.find_message_for_account", side_effect=[mock_draft, mock_source]):
+        with patch("src.tools.attachment_tools.build_embedded_message", return_value=MagicMock()):
+            result = await tool.execute(draft_id="draft-1", source_message_id="msg-1")
+
+    assert result["success"] is True
+    assert result["attachment_name"] == "Original message.eml"
+    mock_draft.attach.assert_called_once()
