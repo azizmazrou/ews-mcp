@@ -596,6 +596,11 @@ class CheckAvailabilityTool(BaseTool):
                         "minimum": 15,
                         "maximum": 1440
                     },
+                    "include_self": {
+                        "type": "boolean",
+                        "description": "Include the current mailbox/user in the availability check, similar to Outlook Scheduling Assistant",
+                        "default": True
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
@@ -611,6 +616,7 @@ class CheckAvailabilityTool(BaseTool):
         start_time_str = kwargs.get("start_time")
         end_time_str = kwargs.get("end_time")
         interval_minutes = kwargs.get("interval_minutes", 30)
+        include_self = kwargs.get("include_self", True)
 
         if not email_addresses:
             raise ToolExecutionError("email_addresses is required and cannot be empty")
@@ -622,6 +628,27 @@ class CheckAvailabilityTool(BaseTool):
             target_mailbox = kwargs.get("target_mailbox")
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
+            normalized_emails = []
+            seen_emails = set()
+            for email in email_addresses:
+                if not email:
+                    continue
+                normalized = email.lower()
+                if normalized in seen_emails:
+                    continue
+                seen_emails.add(normalized)
+                normalized_emails.append(email)
+
+            current_mailbox = (
+                target_mailbox
+                if target_mailbox
+                else safe_get(account, "primary_smtp_address", None)
+            )
+            if include_self and current_mailbox:
+                current_mailbox_normalized = current_mailbox.lower()
+                if current_mailbox_normalized not in seen_emails:
+                    seen_emails.add(current_mailbox_normalized)
+                    normalized_emails.insert(0, current_mailbox)
 
             # Parse datetimes
             start_time = parse_datetime_tz_aware(start_time_str)
@@ -634,7 +661,7 @@ class CheckAvailabilityTool(BaseTool):
             if end_time <= start_time:
                 raise ToolExecutionError("end_time must be after start_time")
 
-            free_busy_accounts = build_free_busy_accounts(email_addresses)
+            free_busy_accounts = build_free_busy_accounts(normalized_emails)
             availability_data = list(account.protocol.get_free_busy_info(
                 accounts=free_busy_accounts,
                 start=start_time,
@@ -646,7 +673,7 @@ class CheckAvailabilityTool(BaseTool):
             # Older attribute names such as free_busy_view_type or merged_free_busy
             # are not populated, which would incorrectly make busy users appear free.
             availability_results = []
-            for email_address, busy_info in zip(email_addresses, availability_data):
+            for email_address, busy_info in zip(normalized_emails, availability_data):
                 result = {
                     "email": email_address,
                     "view_type": str(safe_get(busy_info, "view_type", None) or "DetailedMerged"),
@@ -688,11 +715,13 @@ class CheckAvailabilityTool(BaseTool):
 
                 availability_results.append(result)
 
-            self.logger.info(f"Retrieved availability for {len(email_addresses)} users")
+            self.logger.info(f"Retrieved availability for {len(normalized_emails)} users")
 
             return format_success_response(
-                f"Availability retrieved for {len(email_addresses)} user(s)",
+                f"Availability retrieved for {len(normalized_emails)} user(s)",
                 availability=availability_results,
+                checked_email_addresses=normalized_emails,
+                include_self=include_self,
                 response_timezone=display_start_time.isoformat()[-6:],
                 time_range={
                     "start": start_time_str,
