@@ -292,6 +292,9 @@ async def test_find_meeting_times_multiple_attendees(mock_ews_client):
 
     assert result["success"] is True
     assert len(result["attendees"]) == 5
+    assert mock_ews_client.account.protocol.get_free_busy_info.call_args.kwargs["accounts"][0] == (
+        "user1@example.com", "Required", False
+    )
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,7 @@ from .exceptions import EWSMCPException
 from .logging_system import get_logger
 from .openapi_adapter import OpenAPIAdapter
 
-# Import all tool classes (up to 40 tools total: 36 base + 4 AI)
+# Import all tool classes (up to 42 tools total: 38 base + 4 AI)
 from .tools import (
     CreateDraftTool,
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
@@ -38,9 +38,10 @@ from .tools import (
     # Task tools (5)
     CreateTaskTool, GetTasksTool, UpdateTaskTool,
     CompleteTaskTool, DeleteTaskTool,
-    # Attachment tools (5)
+    # Attachment tools (7)
     ListAttachmentsTool, DownloadAttachmentTool,
     AddAttachmentTool, DeleteAttachmentTool, ReadAttachmentTool,
+    GetEmailMimeTool, AttachEmailToDraftTool,
     # Search tools (1) — advanced_search/full_text_search merged into search_emails
     SearchByConversationTool,
     # Folder tools (3) — create/delete/rename/move merged into manage_folder
@@ -214,16 +215,18 @@ class EWSMCPServer:
             ])
             self.logger.info("Email tools enabled (11 tools)")
 
-        # Attachment tools (5 tools)
+        # Attachment tools (7 tools)
         if self.settings.enable_email:
             tool_classes.extend([
                 ListAttachmentsTool,
                 DownloadAttachmentTool,
                 AddAttachmentTool,
                 DeleteAttachmentTool,
-                ReadAttachmentTool
+                ReadAttachmentTool,
+                GetEmailMimeTool,
+                AttachEmailToDraftTool
             ])
-            self.logger.info("Attachment tools enabled (5 tools)")
+            self.logger.info("Attachment tools enabled (7 tools)")
 
         # Calendar tools (7 tools)
         if self.settings.enable_calendar:

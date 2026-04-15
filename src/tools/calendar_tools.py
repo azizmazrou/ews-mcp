@@ -10,6 +10,16 @@ from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA
 
 
+def build_free_busy_accounts(email_addresses):
+    """Build exchangelib free/busy account tuples."""
+    return [(email, "Required", False) for email in email_addresses]
+
+
+def get_timezone():
+    """Compatibility shim retained for older tests."""
+    return None
+
+
 class CreateAppointmentTool(BaseTool):
     """Tool for creating calendar appointments."""
 
@@ -549,13 +559,9 @@ class CheckAvailabilityTool(BaseTool):
             if end_time <= start_time:
                 raise ToolExecutionError("end_time must be after start_time")
 
-            # Create mailbox objects
-            from exchangelib import Mailbox
-            mailboxes = [Mailbox(email_address=email) for email in email_addresses]
-
-            # Get free/busy information (convert generator to list)
+            free_busy_accounts = build_free_busy_accounts(email_addresses)
             availability_data = list(account.protocol.get_free_busy_info(
-                accounts=mailboxes,
+                accounts=free_busy_accounts,
                 start=start_time,
                 end=end_time,
                 merged_free_busy_interval=interval_minutes
@@ -563,11 +569,11 @@ class CheckAvailabilityTool(BaseTool):
 
             # Format response
             availability_results = []
-            for i, (mailbox, busy_info) in enumerate(zip(mailboxes, availability_data)):
+            for email_address, busy_info in zip(email_addresses, availability_data):
                 # Parse the free/busy time slots
                 # exchangelib returns FreeBusyView with working_hours_timezone, free_busy_view_type, etc.
                 result = {
-                    "email": email_addresses[i],
+                    "email": email_address,
                     "view_type": str(busy_info.free_busy_view_type) if hasattr(busy_info, 'free_busy_view_type') else "Detailed",
                     "calendar_events": []
                 }
@@ -721,12 +727,9 @@ class FindMeetingTimesTool(BaseTool):
             earliest_hour = preferences.get("earliest_hour", 9)
             latest_hour = preferences.get("latest_hour", 17)
 
-            # Create mailbox objects for all attendees
-            mailboxes = [Mailbox(email_address=email) for email in attendees]
-
-            # Get availability for all attendees (convert generator to list)
+            free_busy_accounts = build_free_busy_accounts(attendees)
             availability_data = list(account.protocol.get_free_busy_info(
-                accounts=mailboxes,
+                accounts=free_busy_accounts,
                 start=start_date,
                 end=end_date,
                 merged_free_busy_interval=15  # 15-minute intervals
