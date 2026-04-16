@@ -1,8 +1,8 @@
 # Deployment Guide
 
-Complete guide for deploying EWS MCP Server v3.4 in various environments.
+Complete guide for deploying the EWS MCP Server in various environments.
 
-> **v3.4 Features:** Person-centric architecture, multi-strategy GAL search, enterprise logging (console for monitoring, files for troubleshooting), and intelligent caching.
+> **Security note:** the SSE/HTTP transport is currently unauthenticated and binds `0.0.0.0` by default. For any deployment beyond localhost, put the server behind an auth-enforcing reverse proxy (or bind `MCP_HOST=127.0.0.1`) and restrict network exposure. See [README — Known limitations](../README.md#known-limitations).
 
 ## Pre-built Docker Image (Easiest)
 

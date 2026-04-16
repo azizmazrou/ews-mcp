@@ -132,7 +132,7 @@ curl -X POST http://localhost:8000/api/tools/find_person \
 
 4. **Auto-Discovery**:
    - Open WebUI will automatically fetch `/openapi.json`
-   - All 36 tools will be discovered and made available
+   - All base tools (42, plus 4 AI tools if enabled) will be discovered and made available
    - Tools will appear in the function picker during chats
 
 5. **Start Using**:

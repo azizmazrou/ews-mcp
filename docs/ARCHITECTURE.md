@@ -1,6 +1,8 @@
-# Architecture Overview - v3.4
+# Architecture Overview
 
-Technical architecture and design decisions for EWS MCP Server v3.4 (Reliability & Code Quality).
+Technical architecture and design decisions for the EWS MCP Server. Target readers: maintainers and integrators. See [API.md](API.md) for per-tool input/output contracts.
+
+**Current tool inventory:** 42 base tools + 4 optional AI tools = **46 total**, organized into 10 categories (plus AI). See [Tool Registry](#4-tool-registry-srctools) below.
 
 ## System Architecture
 
@@ -19,11 +21,13 @@ Technical architecture and design decisions for EWS MCP Server v3.4 (Reliability
 │               │                                              │
 │  ┌────────────▼───────────────────────────────────────────┐ │
 │  │              Tool Registry & Router                     │ │
-│  │  - Contact Intelligence (2)  - Email (11)              │ │
-│  │  - Calendar (7)              - Contacts (3)            │ │
+│  │  42 base + 4 AI = 46 total                             │ │
+│  │  - Email (10)                - Drafts (3)              │ │
+│  │  - Attachments (7)           - Calendar (7)            │ │
+│  │  - Contacts (3)              - Contact Intel. (2)      │ │
 │  │  - Tasks (5)                 - Search (1)              │ │
-│  │  - Folders (2)               - Out-of-Office (1)       │ │
-│  │  - Attachments (5)                                     │ │
+│  │  - Folders (3)               - Out-of-Office (1)       │ │
+│  │  - AI (4, optional)                                    │ │
 │  └────────────┬───────────────────────────────────────────┘ │
 │               │                                              │
 │  ┌────────────▼───────────────────────────────────────────┐ │
