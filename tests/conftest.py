@@ -44,12 +44,21 @@ def mock_ews_client(mock_settings, mock_auth_handler):
     mock_account = MagicMock()
     mock_account.inbox = MagicMock()
     mock_account.sent = MagicMock()
+    mock_account.drafts = MagicMock()
+    mock_account.trash = MagicMock()
+    mock_account.junk = MagicMock()
     mock_account.calendar = MagicMock()
     mock_account.contacts = MagicMock()
     mock_account.tasks = MagicMock()
+    mock_account.root = MagicMock()
+    mock_account.root.children = []
+    mock_account.inbox.children = []
+    mock_account.protocol = MagicMock()
 
     client.account = mock_account
+    client.get_account = Mock(return_value=mock_account)
     client.test_connection = Mock(return_value=True)
+    mock_account.root.walk.return_value = []
 
     return client
 

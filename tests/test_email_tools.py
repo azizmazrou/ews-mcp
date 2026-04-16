@@ -11,7 +11,8 @@ from src.tools.email_tools import (
     DeleteEmailTool,
     MoveEmailTool,
     UpdateEmailTool,
-    CopyEmailTool
+    CopyEmailTool,
+    resolve_folder_for_account,
 )
 from src.tools.email_tools_draft import CreateDraftTool
 
@@ -179,6 +180,35 @@ async def test_move_email_tool_with_destination_folder_id(mock_ews_client):
 
 
 @pytest.mark.asyncio
+async def test_resolve_folder_for_account_prefers_root_for_custom_paths(mock_ews_client):
+    """Top-level custom paths should resolve from mailbox root before inbox fallback."""
+    top_level = MagicMock()
+    top_level.name = "Anwendungen"
+    nested = MagicMock()
+    nested.name = "ISA"
+    top_level.children = [nested]
+    mock_ews_client.account.root.children = [top_level]
+    mock_ews_client.account.inbox.children = []
+
+    resolved = await resolve_folder_for_account(mock_ews_client.account, "Anwendungen/ISA")
+
+    assert resolved is nested
+
+
+@pytest.mark.asyncio
+async def test_resolve_folder_for_account_supports_root_relative_paths(mock_ews_client):
+    """Root-relative custom paths should start from account.root instead of Inbox."""
+    top_level = MagicMock()
+    top_level.name = "Budget"
+    top_level.children = []
+    mock_ews_client.account.root.children = [top_level]
+
+    resolved = await resolve_folder_for_account(mock_ews_client.account, "/Budget")
+
+    assert resolved is top_level
+
+
+@pytest.mark.asyncio
 async def test_move_email_tool_requires_destination(mock_ews_client):
     """Test move_email requires folder name or folder ID."""
     tool = MoveEmailTool(mock_ews_client)
@@ -230,7 +260,6 @@ async def test_update_email_not_found(mock_ews_client):
     assert "not found" in str(exc_info.value).lower()
 
 
-@pytest.mark.skip(reason="Mock setup incomplete - folder_map lookup not mocked")
 @pytest.mark.asyncio
 async def test_copy_email_tool(mock_ews_client):
     """Test copying email to another folder."""
@@ -246,26 +275,41 @@ async def test_copy_email_tool(mock_ews_client):
     mock_copied.id = "copied-email-id"
     mock_email.copy.return_value = mock_copied
 
-    # Mock destination folder
     mock_dest_folder = MagicMock()
     mock_dest_folder.name = "Archive"
+    mock_email.folder = MagicMock(name="Inbox")
 
-    mock_ews_client.account.inbox.get.return_value = mock_email
-    mock_ews_client.account.sent.get.side_effect = Exception("Not found")
-    mock_ews_client.account.drafts.get.side_effect = Exception("Not found")
+    with patch("src.tools.email_tools.find_message_for_account", return_value=mock_email):
+        with patch("src.tools.email_tools.resolve_folder_for_account", return_value=mock_dest_folder):
+            result = await tool.execute(
+                message_id="email-to-copy",
+                destination_folder="archive"
+            )
 
-    # Mock folder map
-    folder_map = {"archive": mock_dest_folder}
+    assert result["success"] is True
+    assert result["destination_folder"] == "Archive"
+    mock_email.copy.assert_called_once_with(to_folder=mock_dest_folder)
 
-    with patch.dict('src.tools.email_tools.CopyEmailTool.execute.__globals__', {}, clear=False):
-        # Mock the folder finding
-        result = await tool.execute(
-            message_id="email-to-copy",
-            destination_folder="archive"
-        )
 
-    # Note: This test will fail in actual execution due to implementation details
-    # but demonstrates the test pattern
+@pytest.mark.asyncio
+async def test_copy_email_tool_with_destination_folder_id(mock_ews_client):
+    """Copy email should reuse the same folder resolver as move_email."""
+    tool = CopyEmailTool(mock_ews_client)
+    mock_email = MagicMock()
+    mock_folder = MagicMock()
+    mock_folder.name = "ISA"
+    mock_email.copy.return_value = MagicMock(id="copied-id")
+
+    with patch("src.tools.email_tools.find_message_for_account", return_value=mock_email):
+        with patch("src.tools.email_tools.resolve_folder_for_account", return_value=mock_folder) as mock_resolve:
+            result = await tool.execute(
+                message_id="email-to-copy",
+                destination_folder_id="AAMk" + ("x" * 60)
+            )
+
+    assert result["success"] is True
+    mock_resolve.assert_called_once()
+    mock_email.copy.assert_called_once_with(to_folder=mock_folder)
 
 
 @pytest.mark.asyncio

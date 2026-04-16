@@ -2,12 +2,96 @@
 
 from typing import Any, Dict
 from datetime import datetime, timedelta
-from exchangelib import CalendarItem, Mailbox, Attendee
+from exchangelib import CalendarItem, Mailbox, Attendee, EWSTimeZone
 
 from .base import BaseTool
 from ..models import CreateAppointmentRequest, MeetingResponse
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA
+from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA, get_timezone as get_configured_timezone
+
+
+def build_free_busy_accounts(email_addresses):
+    """Build exchangelib free/busy account tuples."""
+    return [(email, "Required", False) for email in email_addresses]
+
+
+def get_timezone():
+    """Compatibility shim retained for older tests."""
+    return None
+
+
+def format_free_busy_datetime(dt):
+    """Format free/busy datetimes in the configured local timezone.
+
+    Exchange free/busy responses may contain naive UTC datetimes. Convert those
+    explicitly so user-facing output matches the requested mailbox timezone.
+    """
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is None:
+        dt = dt.replace(tzinfo=EWSTimeZone("UTC"))
+    return dt.astimezone(get_configured_timezone()).isoformat()
+
+
+FREE_BUSY_LABELS = {
+    "0": "Free",
+    "1": "Tentative",
+    "2": "Busy",
+    "3": "OutOfOffice",
+    "4": "NoData",
+}
+
+
+def build_slot_summaries(start_time, interval_minutes, merged_free_busy):
+    """Expand merged free/busy codes into explicit local-time slots."""
+    slots = []
+    current = start_time
+    for code in merged_free_busy or "":
+        slot_end = current + timedelta(minutes=interval_minutes)
+        label = FREE_BUSY_LABELS.get(code, "Unknown")
+        slots.append({
+            "start": current.isoformat(),
+            "end": slot_end.isoformat(),
+            "code": code,
+            "label": label,
+            "is_blocking": code in {"2", "3", "4"},
+        })
+        current = slot_end
+    return slots
+
+
+def parse_display_datetime(dt_str):
+    """Parse the raw user-supplied datetime while preserving its explicit offset."""
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+
+
+def summarize_availability(merged_free_busy, calendar_events):
+    """Return a compact summary that is easier for LLMs and clients to interpret."""
+    codes = set(merged_free_busy or "")
+    busy_types = {str(safe_get(event, "busy_type", "")) for event in calendar_events or []}
+
+    if "3" in codes:
+        primary = "out_of_office"
+    elif "2" in codes:
+        primary = "busy"
+    elif "4" in codes:
+        primary = "no_data"
+    elif "WorkingElsewhere" in busy_types:
+        primary = "working_elsewhere"
+    elif "1" in codes:
+        primary = "tentative"
+    else:
+        primary = "free"
+
+    return {
+        "primary_status": primary,
+        "is_fully_free": codes <= {"0"} if merged_free_busy is not None else False,
+        "has_busy": "2" in codes,
+        "has_tentative": "1" in codes,
+        "has_out_of_office": "3" in codes,
+        "has_no_data": "4" in codes,
+        "has_working_elsewhere": "WorkingElsewhere" in busy_types,
+    }
 
 
 class CreateAppointmentTool(BaseTool):
@@ -512,6 +596,11 @@ class CheckAvailabilityTool(BaseTool):
                         "minimum": 15,
                         "maximum": 1440
                     },
+                    "include_self": {
+                        "type": "boolean",
+                        "description": "Include the current mailbox/user in the availability check, similar to Outlook Scheduling Assistant",
+                        "default": True
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
@@ -527,6 +616,7 @@ class CheckAvailabilityTool(BaseTool):
         start_time_str = kwargs.get("start_time")
         end_time_str = kwargs.get("end_time")
         interval_minutes = kwargs.get("interval_minutes", 30)
+        include_self = kwargs.get("include_self", True)
 
         if not email_addresses:
             raise ToolExecutionError("email_addresses is required and cannot be empty")
@@ -538,10 +628,32 @@ class CheckAvailabilityTool(BaseTool):
             target_mailbox = kwargs.get("target_mailbox")
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
+            normalized_emails = []
+            seen_emails = set()
+            for email in email_addresses:
+                if not email:
+                    continue
+                normalized = email.lower()
+                if normalized in seen_emails:
+                    continue
+                seen_emails.add(normalized)
+                normalized_emails.append(email)
+
+            current_mailbox = (
+                target_mailbox
+                if target_mailbox
+                else safe_get(account, "primary_smtp_address", None)
+            )
+            if include_self and current_mailbox:
+                current_mailbox_normalized = current_mailbox.lower()
+                if current_mailbox_normalized not in seen_emails:
+                    seen_emails.add(current_mailbox_normalized)
+                    normalized_emails.insert(0, current_mailbox)
 
             # Parse datetimes
             start_time = parse_datetime_tz_aware(start_time_str)
             end_time = parse_datetime_tz_aware(end_time_str)
+            display_start_time = parse_display_datetime(start_time_str)
 
             if not start_time or not end_time:
                 raise ToolExecutionError("Invalid datetime format. Use ISO 8601 format.")
@@ -549,59 +661,68 @@ class CheckAvailabilityTool(BaseTool):
             if end_time <= start_time:
                 raise ToolExecutionError("end_time must be after start_time")
 
-            # Create mailbox objects
-            from exchangelib import Mailbox
-            mailboxes = [Mailbox(email_address=email) for email in email_addresses]
-
-            # Get free/busy information (convert generator to list)
+            free_busy_accounts = build_free_busy_accounts(normalized_emails)
             availability_data = list(account.protocol.get_free_busy_info(
-                accounts=mailboxes,
+                accounts=free_busy_accounts,
                 start=start_time,
                 end=end_time,
                 merged_free_busy_interval=interval_minutes
             ))
 
-            # Format response
+            # exchangelib FreeBusyView exposes view_type / merged / calendar_events.
+            # Older attribute names such as free_busy_view_type or merged_free_busy
+            # are not populated, which would incorrectly make busy users appear free.
             availability_results = []
-            for i, (mailbox, busy_info) in enumerate(zip(mailboxes, availability_data)):
-                # Parse the free/busy time slots
-                # exchangelib returns FreeBusyView with working_hours_timezone, free_busy_view_type, etc.
+            for email_address, busy_info in zip(normalized_emails, availability_data):
                 result = {
-                    "email": email_addresses[i],
-                    "view_type": str(busy_info.free_busy_view_type) if hasattr(busy_info, 'free_busy_view_type') else "Detailed",
+                    "email": email_address,
+                    "view_type": str(safe_get(busy_info, "view_type", None) or "DetailedMerged"),
                     "calendar_events": []
                 }
 
                 # Add calendar event information if available
-                if hasattr(busy_info, 'calendar_event_array') and busy_info.calendar_event_array:
-                    for event in busy_info.calendar_event_array:
+                calendar_events = safe_get(busy_info, "calendar_events", None) or []
+                if calendar_events:
+                    for event in calendar_events:
                         result["calendar_events"].append({
-                            "start": format_datetime(event.start) if hasattr(event, 'start') else None,
-                            "end": format_datetime(event.end) if hasattr(event, 'end') else None,
+                            "start": format_free_busy_datetime(event.start) if hasattr(event, 'start') else None,
+                            "end": format_free_busy_datetime(event.end) if hasattr(event, 'end') else None,
                             "busy_type": str(event.busy_type) if hasattr(event, 'busy_type') else "Busy",
                             "details": safe_get(event, 'details')
                         })
 
                 # Add merged free/busy string if available
-                if hasattr(busy_info, 'merged_free_busy'):
-                    # The merged_free_busy is a string like "00002222000..." where:
-                    # 0=Free, 1=Tentative, 2=Busy, 3=OOF (Out of Office), 4=NoData
-                    result["merged_free_busy"] = busy_info.merged_free_busy
-                    result["free_busy_legend"] = {
-                        "0": "Free",
-                        "1": "Tentative",
-                        "2": "Busy",
-                        "3": "OutOfOffice",
-                        "4": "NoData"
-                    }
+                merged_free_busy = safe_get(busy_info, "merged", None)
+                if merged_free_busy is not None:
+                    result["merged_free_busy"] = merged_free_busy
+                    result["free_busy_legend"] = FREE_BUSY_LABELS
+                    result["slot_summaries"] = build_slot_summaries(
+                        start_time=display_start_time,
+                        interval_minutes=interval_minutes,
+                        merged_free_busy=merged_free_busy,
+                    )
+                    result["blocking_slots"] = [
+                        slot for slot in result["slot_summaries"] if slot["is_blocking"]
+                    ]
+                    result["non_free_slots"] = [
+                        slot for slot in result["slot_summaries"] if slot["code"] != "0"
+                    ]
+
+                result["availability_summary"] = summarize_availability(
+                    merged_free_busy=merged_free_busy,
+                    calendar_events=result["calendar_events"],
+                )
 
                 availability_results.append(result)
 
-            self.logger.info(f"Retrieved availability for {len(email_addresses)} users")
+            self.logger.info(f"Retrieved availability for {len(normalized_emails)} users")
 
             return format_success_response(
-                f"Availability retrieved for {len(email_addresses)} user(s)",
+                f"Availability retrieved for {len(normalized_emails)} user(s)",
                 availability=availability_results,
+                checked_email_addresses=normalized_emails,
+                include_self=include_self,
+                response_timezone=display_start_time.isoformat()[-6:],
                 time_range={
                     "start": start_time_str,
                     "end": end_time_str,
@@ -721,12 +842,9 @@ class FindMeetingTimesTool(BaseTool):
             earliest_hour = preferences.get("earliest_hour", 9)
             latest_hour = preferences.get("latest_hour", 17)
 
-            # Create mailbox objects for all attendees
-            mailboxes = [Mailbox(email_address=email) for email in attendees]
-
-            # Get availability for all attendees (convert generator to list)
+            free_busy_accounts = build_free_busy_accounts(attendees)
             availability_data = list(account.protocol.get_free_busy_info(
-                accounts=mailboxes,
+                accounts=free_busy_accounts,
                 start=start_date,
                 end=end_date,
                 merged_free_busy_interval=15  # 15-minute intervals

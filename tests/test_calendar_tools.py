@@ -127,11 +127,19 @@ async def test_check_availability_tool(mock_ews_client):
 
     # Mock availability data
     mock_availability = MagicMock()
-    mock_availability.free_busy_view_type = "Detailed"
-    mock_availability.merged_free_busy = "00002222000"
-    mock_availability.calendar_event_array = []
+    mock_availability.view_type = "DetailedMerged"
+    mock_availability.merged = "00002222000"
+    mock_availability.calendar_events = []
+    mock_self_availability = MagicMock()
+    mock_self_availability.view_type = "DetailedMerged"
+    mock_self_availability.merged = "00000000000"
+    mock_self_availability.calendar_events = []
 
-    mock_ews_client.account.protocol.get_free_busy_info.return_value = [mock_availability]
+    mock_ews_client.account.primary_smtp_address = "me@example.com"
+    mock_ews_client.account.protocol.get_free_busy_info.return_value = [
+        mock_self_availability,
+        mock_availability,
+    ]
 
     result = await tool.execute(
         email_addresses=["user1@example.com"],
@@ -141,10 +149,20 @@ async def test_check_availability_tool(mock_ews_client):
     )
 
     assert result["success"] is True
-    assert len(result["availability"]) == 1
-    assert result["availability"][0]["email"] == "user1@example.com"
-    assert "merged_free_busy" in result["availability"][0]
+    assert len(result["availability"]) == 2
+    assert result["checked_email_addresses"] == ["me@example.com", "user1@example.com"]
+    assert result["availability"][0]["email"] == "me@example.com"
+    assert result["availability"][1]["email"] == "user1@example.com"
+    assert "merged_free_busy" in result["availability"][1]
+    assert result["response_timezone"] == "+00:00"
+    assert result["availability"][0]["availability_summary"]["primary_status"] == "free"
+    assert result["availability"][1]["availability_summary"]["primary_status"] == "busy"
+    assert len(result["availability"][1]["blocking_slots"]) == 4
     mock_ews_client.account.protocol.get_free_busy_info.assert_called_once()
+    assert mock_ews_client.account.protocol.get_free_busy_info.call_args.kwargs["accounts"] == [
+        ("me@example.com", "Required", False),
+        ("user1@example.com", "Required", False)
+    ]
 
 
 @pytest.mark.asyncio
