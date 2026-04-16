@@ -1,21 +1,51 @@
-# EWS MCP Server v3.4
+# EWS MCP Server
 
 <div align="center">
 
-**The Most Powerful AI-Exchange Integration**
+**Microsoft Exchange integration for the Model Context Protocol**
 
-*Transform how AI assistants interact with Microsoft Exchange*
+*Give AI assistants first-class access to mail, calendar, contacts, tasks, and directory services*
 
-[![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](https://github.com/azizmazrou/ews-mcp)
+[![Version](https://img.shields.io/badge/version-3.4.x-blue.svg)](https://github.com/azizmazrou/ews-mcp)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/azizmazrou/ews-mcp)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
-[Quick Start](#-quick-start) | [Features](#-feature-highlights) | [Documentation](#-documentation) | [Examples](#-usage-examples)
+[Quick Start](#quick-start) | [Tools](#all-tools) | [Configuration](#configuration) | [Documentation](#documentation)
 
 </div>
 
 ---
+
+## Overview
+
+An MCP server that wraps [exchangelib](https://github.com/ecederstrand/exchangelib) to expose Microsoft Exchange Web Services (EWS) to MCP clients such as Claude Desktop, Open WebUI, or any custom client.
+
+- **46 tools** across email, drafts, attachments, calendar, contacts, directory (GAL), tasks, search, folders, out-of-office, and optional AI helpers
+- **3 auth modes**: OAuth2 (client credentials), Basic, NTLM
+- **Impersonation / delegation**: every non-AI tool accepts a `target_mailbox` to act on shared, delegated, or other users' mailboxes
+- **Two transports**: `stdio` (default, for Claude Desktop) and `sse` (HTTP server with OpenAPI schema, for Open WebUI and REST clients)
+- **Enterprise middleware**: rate limiter, circuit breaker, structured logging, audit log
+
+---
+
+## What's New (since v3.4.0)
+
+### Drafts workflow
+- `create_draft`, `create_reply_draft`, `create_forward_draft` — build reviewable HTML drafts in the Drafts folder before sending
+- HTML reply/forward prototypes preserve the original conversation, inline images, CDATA blocks, and Outlook-style quoted headers
+
+### Folder discovery & IDs
+- New `find_folder` tool — locate a folder by name or ID across the full hierarchy
+- `move_email` and `manage_folder` now accept `destination_folder_id` / `parent_folder_id` to resolve folders by stable Exchange ID rather than by display name
+
+### Availability & scheduling
+- `check_availability` now correctly parses exchangelib free/busy responses and includes the current mailbox by default
+- Scheduling responses clarified so the AI can act on the result without re-prompting
+
+### Platform
+- Windows wrapper entrypoint fixes the Claude Desktop MSIX working-directory issue
+- Signature placement, separator format, and duplicate `RE:` / `FW:` prefixes fixed in reply/forward
 
 ## What's New in v3.4
 
@@ -30,9 +60,9 @@
 
 ## What's New in v3.3
 
-### Tool Consolidation — 46 → 36 Tools
+### Tool Consolidation
 
-v3.3 merges 10 tools into 5 unified tools, reducing token cost by **~55%** per `list_tools` call:
+v3.3 merged 10 redundant tools into 5 unified tools (search, find_person, manage_folder, oof_settings, analyze_contacts). The base tool count later grew again as new features (drafts, find_folder, email MIME, attach-email-to-draft) were added.
 
 | Merge | Before | After |
 |-------|--------|-------|
@@ -56,7 +86,7 @@ manage_folder(action="create", folder_name="Archive")
 manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
 ```
 
-> All **36 tools** support `target_mailbox` parameter!
+> Every **base tool (42)** accepts `target_mailbox` for impersonation/delegation. The 4 optional AI tools currently act only on the primary mailbox — see [Known limitations](#known-limitations).
 
 ---
 
@@ -66,21 +96,18 @@ manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
 <tr>
 <td width="50%">
 
-### Email Operations (10 tools)
-- Send, read, search, delete emails
-- **Reply** with thread preservation
-- **Forward** with inline images intact
-- Move, copy, update email properties
-- **Unified search**: quick, advanced, full-text modes
+### Email (10 tools) + Drafts (3 tools)
+- Send, read, search (quick / advanced / full-text), delete, move, copy, update
+- Reply / Forward with thread + inline-image preservation
+- Draft variants (`create_draft`, `create_reply_draft`, `create_forward_draft`) for AI-review-before-send flows
 
 </td>
 <td width="50%">
 
-### Calendar Management (7 tools)
-- Create/update appointments
-- Meeting invitations & responses
-- Free/busy availability check
-- **AI-powered meeting time finder**
+### Calendar (7 tools)
+- Create, update, delete appointments
+- Accept / decline / tentative responses
+- Free/busy availability + multi-attendee time-finder
 - Timezone-aware scheduling
 
 </td>
@@ -88,18 +115,39 @@ manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
 <tr>
 <td>
 
-### Contact Intelligence (2 tools)
-- **find_person**: Multi-source search (GAL + Contacts + Email)
-- **analyze_contacts**: Network analysis, communication history, VIP detection
+### Contacts + Intelligence (5 tools)
+- `create_contact` / `update_contact` / `delete_contact`
+- `find_person` — unified GAL + contacts + email-history search
+- `analyze_contacts` — communication history, top contacts, domains, dormant, VIPs
+
+</td>
+<td>
+
+### Attachments (7 tools)
+- `list_attachments`, `download_attachment`, `add_attachment`, `delete_attachment`
+- `read_attachment` — text extraction for PDF, DOCX, XLSX
+- `get_email_mime` — raw RFC-822 MIME
+- `attach_email_to_draft` — attach an existing message as `.eml`
+
+</td>
+</tr>
+<tr>
+<td>
+
+### Folders (3) + Tasks (5) + Search (1) + OOF (1)
+- `list_folders`, `find_folder`, `manage_folder` (create/delete/rename/move)
+- Full task CRUD + `complete_task`
+- `search_by_conversation`, `oof_settings` (get/set)
 
 </td>
 <td>
 
 ### Enterprise Features
-- **Impersonation** - Access any mailbox
-- OAuth2 / Basic / NTLM auth
-- Intelligent caching (70% less API calls)
-- Enterprise logging & audit trails
+- Impersonation / delegation on every base tool
+- OAuth2 / Basic / NTLM
+- stdio + SSE/HTTP transports with OpenAPI 3.0 schema
+- Rate limiter, circuit breaker, structured logs, audit log
+- Optional AI layer (OpenAI / Anthropic / OpenAI-compatible)
 
 </td>
 </tr>
@@ -155,89 +203,112 @@ python -m src.main
 
 ---
 
-## All 36 Tools
+## All Tools
 
-### Email Tools (11)
+**Grand total: 46** — 42 base tools (always on, subject to category flags) + 4 optional AI tools.
+
+### Email (10)
 
 | Tool | Description |
 |------|-------------|
-| `send_email` | Send with attachments, CC/BCC, importance levels |
-| `read_emails` | Read from any folder with pagination |
-| `search_emails` | **Unified search** — `mode: "quick"` (default), `"advanced"`, `"full_text"` |
+| `send_email` | Send with attachments, CC/BCC, importance, inline base64 attachments |
+| `read_emails` | Read from any folder with pagination and `unread_only` filter |
+| `search_emails` | Unified search — `mode: "quick"` / `"advanced"` / `"full_text"` |
 | `get_email_details` | Full email content including HTML body |
-| `delete_email` | Soft delete (trash) or permanent removal |
-| `move_email` | Move between folders |
-| `copy_email` | Duplicate to another folder |
-| `update_email` | Mark read/unread, flag, categorize |
-| `reply_email` | Reply with thread & signature preservation |
-| `forward_email` | Forward with full body & inline images |
-| `list_attachments` | List all email attachments |
+| `delete_email` | Soft delete (trash) or `hard_delete: true` for permanent removal |
+| `move_email` | Move to another folder by name or `destination_folder_id` |
+| `copy_email` | Copy to another folder by name or `destination_folder_id` |
+| `update_email` | Mark read/unread, flag status, categories, importance |
+| `reply_email` | Reply with thread + signature + inline-image preservation |
+| `forward_email` | Forward with full body and inline images |
 
-### Attachment Tools (5)
-
-| Tool | Description |
-|------|-------------|
-| `list_attachments` | List attachments with metadata |
-| `download_attachment` | Download as base64 or save to file |
-| `add_attachment` | Attach files to draft emails |
-| `delete_attachment` | Remove attachments |
-| `read_attachment` | Extract text from PDF, DOCX, XLSX, PPTX, CSV, TXT, HTML, ZIP |
-
-### Calendar Tools (7)
+### Email Drafts (3)
 
 | Tool | Description |
 |------|-------------|
-| `create_appointment` | Schedule meetings with attendees |
-| `get_calendar` | Retrieve events for date range |
-| `update_appointment` | Modify existing appointments |
-| `delete_appointment` | Cancel meetings |
-| `respond_to_meeting` | Accept/decline/tentative responses |
-| `check_availability` | Get free/busy information |
-| `find_meeting_times` | AI-powered optimal time suggestions |
+| `create_draft` | Save a draft in `Drafts` for later review/send |
+| `create_reply_draft` | Build a reply draft (quoted original + signature placeholder) without sending |
+| `create_forward_draft` | Build a forward draft without sending |
 
-### Contact Tools (3)
+### Attachments (7)
 
 | Tool | Description |
 |------|-------------|
-| `create_contact` | Add new contacts with full details |
-| `update_contact` | Modify contact information |
-| `delete_contact` | Remove contacts |
+| `list_attachments` | List attachments with metadata (name, size, MIME, inline flag) |
+| `download_attachment` | Download as base64 or save to file (see security note in docs) |
+| `add_attachment` | Attach files to a draft email |
+| `delete_attachment` | Remove attachments from a message |
+| `read_attachment` | Extract text from PDF / DOCX / XLSX |
+| `get_email_mime` | Return full RFC-822 MIME content of a message |
+| `attach_email_to_draft` | Attach another message (as `.eml`) to a draft |
 
-### Contact Intelligence Tools (2)
-
-| Tool | Description |
-|------|-------------|
-| `find_person` | **Unified lookup** — `source: "all"` (default), `"gal"`, `"contacts"`, `"email_history"`, `"domain"` |
-| `analyze_contacts` | **Unified analysis** — `analysis_type: "communication_history"`, `"overview"`, `"top_contacts"`, `"by_domain"`, `"dormant"`, `"vip"` |
-
-### Task Tools (5)
+### Calendar (7)
 
 | Tool | Description |
 |------|-------------|
-| `create_task` | Create tasks with due dates |
-| `get_tasks` | List tasks by status |
-| `update_task` | Modify task details |
-| `complete_task` | Mark as complete |
-| `delete_task` | Remove tasks |
+| `create_appointment` | Schedule meetings with attendees, body, location, reminders |
+| `get_calendar` | Retrieve events for a date range |
+| `update_appointment` | Modify time, attendees, location, or cancel |
+| `delete_appointment` | Cancel meeting (with optional cancellation notification) |
+| `respond_to_meeting` | Accept / Decline / Tentative responses with optional body |
+| `check_availability` | Free/busy for attendees over a time window |
+| `find_meeting_times` | Suggested slots across multiple attendees |
 
-### Search Tools (1)
-
-| Tool | Description |
-|------|-------------|
-| `search_by_conversation` | Find all emails in a thread |
-
-### Folder Tools (2)
+### Contacts (3)
 
 | Tool | Description |
 |------|-------------|
-| `list_folders` | Get folder hierarchy with counts |
-| `manage_folder` | **Unified management** — `action: "create"`, `"delete"`, `"rename"`, `"move"` |
+| `create_contact` | Add a contact with email, phones, company, title, department |
+| `update_contact` | Modify contact fields |
+| `delete_contact` | Remove a contact |
 
-### Out-of-Office Tools (1)
+### Contact Intelligence (2)
 
 | Tool | Description |
 |------|-------------|
-| `oof_settings` | **Unified OOF** — `action: "get"` or `"set"` |
+| `find_person` | Unified lookup — `source: "all" / "gal" / "contacts" / "email_history" / "domain"` |
+| `analyze_contacts` | Unified analysis — `analysis_type: "communication_history" / "overview" / "top_contacts" / "by_domain" / "dormant" / "vip"` |
+
+### Tasks (5)
+
+| Tool | Description |
+|------|-------------|
+| `create_task` | Create task with due date, status, importance, reminder |
+| `get_tasks` | List tasks filtered by status / include_completed |
+| `update_task` | Modify task fields |
+| `complete_task` | Mark task complete |
+| `delete_task` | Remove a task |
+
+### Search (1)
+
+| Tool | Description |
+|------|-------------|
+| `search_by_conversation` | Find all messages sharing a conversation/thread ID |
+
+### Folders (3)
+
+| Tool | Description |
+|------|-------------|
+| `list_folders` | Folder hierarchy with optional counts, depth, hidden-folder toggle |
+| `find_folder` | Locate a folder by name or ID anywhere in the mailbox |
+| `manage_folder` | Unified management — `action: "create" / "delete" / "rename" / "move"` |
+
+### Out-of-Office (1)
+
+| Tool | Description |
+|------|-------------|
+| `oof_settings` | `action: "get"` / `"set"` — internal/external reply, scheduling |
+
+### AI (4, optional)
+
+Enabled per-feature via `enable_ai=true` plus individual flags. These tools currently act on the **primary mailbox only** (they do not honor `target_mailbox` — see [Known limitations](#known-limitations)).
+
+| Tool | Description | Feature flag |
+|------|-------------|--------------|
+| `semantic_search_emails` | Natural-language email search via embeddings | `enable_semantic_search` |
+| `classify_email` | Priority / sentiment / optional spam classification | `enable_email_classification` |
+| `summarize_email` | AI summary of a message (configurable length) | `enable_email_summarization` |
+| `suggest_replies` | Generate N draft reply variants | `enable_smart_replies` |
 
 ---
 
@@ -333,16 +404,52 @@ person = find_person(
 ### Smart Meeting Scheduling
 
 ```python
-# AI-powered meeting time finder
+# Suggest slots that work for every attendee in a date range
 find_meeting_times(
     attendees=["alice@company.com", "bob@company.com"],
     duration_minutes=60,
-    preferences={
-        "prefer_morning": True,
-        "working_hours_start": 9,
-        "working_hours_end": 17,
-        "avoid_lunch": True
-    }
+    start_date="2026-04-20",
+    end_date="2026-04-22",
+    time_slots_per_day=3,
+    min_confidence_percent=80,
+)
+```
+
+### Draft-before-send workflow
+
+Drafts give the AI assistant a safe "preview and confirm" step. Nothing leaves the mailbox until the user explicitly sends.
+
+```python
+# Create a reply draft
+draft = create_reply_draft(
+    message_id="AAMkAGI...",
+    body="<p>Thanks for the update — will review by Friday.</p>",
+    to_all=False,
+)
+# draft["draft_id"] → open in client / add attachments / send later
+
+# Attach files to the draft
+add_attachment(
+    message_id=draft["draft_id"],
+    attachment_paths=["/path/to/report.pdf"],
+)
+
+# Or attach another message as .eml
+attach_email_to_draft(
+    draft_id=draft["draft_id"],
+    message_id_to_attach="AAMkAGI-some-other-msg",
+)
+```
+
+### Folder discovery
+
+```python
+# Find a folder anywhere in the hierarchy by name
+folder = find_folder(folder_name="Archive/Q1 Reports")
+# Use the returned stable folder_id instead of a fragile display path
+move_email(
+    message_id="AAMkAGI...",
+    destination_folder_id=folder["folder_id"],
 )
 ```
 
@@ -377,68 +484,151 @@ Add to your Claude Desktop config:
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `EWS_EMAIL` | Yes | Your email address |
-| `EWS_AUTH_TYPE` | Yes | `oauth2`, `basic`, or `ntlm` |
-| `EWS_SERVER_URL` | No | Exchange server (auto-constructs EWS URL) |
+All settings are parsed by `src/config.py` (Pydantic `Settings`). Examples live in `.env.example`, `.env.basic.example`, `.env.oauth2.example`, `.env.ai.example`.
 
-**OAuth2 (Office 365):**
+#### Required
+
+| Variable | Description |
+|----------|-------------|
+| `EWS_EMAIL` | Primary mailbox email address |
+| `EWS_AUTH_TYPE` | `oauth2` (default), `basic`, or `ntlm` |
+
+#### EWS connection
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EWS_SERVER_URL` | — | Explicit server URL; if empty, autodiscover is used |
+| `EWS_AUTODISCOVER` | `true` | Enable Exchange autodiscover |
+
+#### Auth — OAuth2 (Office 365)
+
 | Variable | Description |
 |----------|-------------|
 | `EWS_CLIENT_ID` | Azure AD app client ID |
-| `EWS_CLIENT_SECRET` | Azure AD app secret |
+| `EWS_CLIENT_SECRET` | Azure AD app client secret |
 | `EWS_TENANT_ID` | Azure AD tenant ID |
 
-**Basic/NTLM:**
+#### Auth — Basic / NTLM
+
 | Variable | Description |
 |----------|-------------|
-| `EWS_USERNAME` | Username |
+| `EWS_USERNAME` | Username (email or `DOMAIN\\user`) |
 | `EWS_PASSWORD` | Password |
 
-**Impersonation (Optional):**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EWS_IMPERSONATION_ENABLED` | `false` | Enable multi-mailbox access |
-| `EWS_IMPERSONATION_TYPE` | `impersonation` | `impersonation` or `delegate` |
+#### Impersonation / delegation
 
-**Advanced:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TIMEZONE` | `UTC` | IANA timezone (e.g., `America/New_York`) |
+| `EWS_IMPERSONATION_ENABLED` | `false` | Enable `target_mailbox` on base tools |
+| `EWS_IMPERSONATION_TYPE` | `impersonation` | `impersonation` (service account with `ApplicationImpersonation`) or `delegate` |
+
+#### Transport
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` (HTTP + Server-Sent Events) |
+| `MCP_HOST` | `0.0.0.0` | Bind address for SSE (override to `127.0.0.1` for local-only) |
+| `MCP_PORT` | `8000` | Port for SSE |
+| `MCP_SERVER_NAME` | `ews-mcp-server` | Identifier advertised to MCP clients |
+
+#### OpenAPI (SSE transport)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `API_BASE_URL` | — | Public URL advertised in the OpenAPI `servers` array |
+| `API_BASE_URL_INTERNAL` | — | Internal container URL (e.g. `http://ews-mcp:8000`) |
+| `API_TITLE` | `Exchange Web Services (EWS) MCP API` | OpenAPI title |
+| `API_VERSION` | `3.4.0` | OpenAPI version |
+
+#### Category feature flags
+
+All default to `true`. Set to `false` to skip registering a whole category:
+
+| Variable | Toggles |
+|----------|---------|
+| `ENABLE_EMAIL` | Email, drafts, attachments |
+| `ENABLE_CALENDAR` | Calendar |
+| `ENABLE_CONTACTS` | Contacts + contact intelligence |
+| `ENABLE_TASKS` | Tasks |
+| `ENABLE_FOLDERS` | Folder tools (folders are always loaded, but can be disabled here) |
+| `ENABLE_ATTACHMENTS` | Attachment tools |
+
+#### AI (all optional, off by default)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_AI` | `false` | Master switch |
+| `AI_PROVIDER` | `openai` | `openai`, `anthropic`, or `local` (OpenAI-compatible) |
+| `AI_API_KEY` | — | Provider API key |
+| `AI_MODEL` | auto | e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20241022` |
+| `AI_EMBEDDING_MODEL` | auto | e.g. `text-embedding-3-small` |
+| `AI_BASE_URL` | — | Custom base URL (local / proxy) |
+| `AI_MAX_TOKENS` | `4096` | Completion tokens |
+| `AI_TEMPERATURE` | `0.7` | Sampling temperature |
+| `ENABLE_SEMANTIC_SEARCH` | `false` | Enables `semantic_search_emails` |
+| `ENABLE_EMAIL_CLASSIFICATION` | `false` | Enables `classify_email` |
+| `ENABLE_EMAIL_SUMMARIZATION` | `false` | Enables `summarize_email` |
+| `ENABLE_SMART_REPLIES` | `false` | Enables `suggest_replies` |
+
+#### Performance / reliability
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_CACHE` | `true` | Response caching |
+| `CACHE_TTL` | `300` | Cache TTL seconds |
+| `CONNECTION_POOL_SIZE` | `10` | EWS connection pool size |
+| `REQUEST_TIMEOUT` | `30` | HTTP timeout seconds |
+| `RATE_LIMIT_ENABLED` | `true` | Enable rate limiter |
+| `RATE_LIMIT_REQUESTS_PER_MINUTE` | `25` | Sliding-window limit |
+| `ENABLE_AUDIT_LOG` | `true` | Emit audit-log entries |
+| `MAX_ATTACHMENT_SIZE` | `157286400` | 150 MB default |
+
+#### Misc
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TIMEZONE` | `UTC` | IANA timezone (e.g. `America/New_York`) |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` (HTTP/REST) |
-| `MCP_PORT` | `8000` | Port for SSE transport |
 
 ---
 
 ## Architecture
 
 ```
-EWS MCP Server v3.4
-├── MCP Protocol Layer (stdio/SSE)
-├── Tool Registry (36 tools)
-│   ├── Email Tools (11) ─────────── send, read, search (3 modes), reply, forward...
-│   ├── Calendar Tools (7) ──────── appointments, meetings, availability
-│   ├── Contact Tools (3) ───────── create, update, delete
-│   ├── Intelligence Tools (2) ──── find_person (5 sources), analyze_contacts (6 types)
-│   ├── Task Tools (5) ──────────── task management
-│   ├── Search Tools (1) ────────── conversation threads
-│   ├── Folder Tools (2) ────────── list + manage_folder (4 actions)
-│   ├── Attachment Tools (5) ────── read, download, content extraction
-│   └── OOF Tools (1) ───────────── oof_settings (get/set)
-├── Service Layer
-│   ├── PersonService ───────────── person discovery & ranking
-│   ├── EmailService ────────────── email operations
-│   ├── ThreadService ───────────── conversation threading
-│   └── AttachmentService ───────── format support (PDF, DOCX, XLSX...)
-├── Adapter Layer
-│   ├── GALAdapter ──────────────── multi-strategy directory search
-│   └── CacheAdapter ────────────── intelligent TTL caching
-├── EWS Client (exchangelib)
-│   └── Impersonation Support ───── multi-mailbox access
-├── Authentication (OAuth2/Basic/NTLM)
-└── Exchange Web Services API
+EWS MCP Server
+├── MCP Protocol Layer             stdio  •  SSE (HTTP + /openapi.json)
+├── Middleware
+│   ├── RateLimiter                25 req/min sliding window (configurable)
+│   ├── CircuitBreaker             trips after 3 connectivity failures, 60s cool-down
+│   ├── ErrorHandler               exception → structured response mapper
+│   ├── Logging                    app log + error log + audit log (rotating)
+│   └── OpenAPI Adapter            per-tool POST /api/tools/{name} routes
+├── Tool Registry (42 base + 4 AI = 46)
+│   ├── Email              (10)    send, read, search(3 modes), update, delete, move, copy, reply, forward
+│   ├── Drafts             (3)     create_draft, create_reply_draft, create_forward_draft
+│   ├── Attachments        (7)     list, download, add, delete, read(PDF/DOCX/XLSX), mime, attach_email_to_draft
+│   ├── Calendar           (7)     create, get, update, delete, respond, availability, find_meeting_times
+│   ├── Contacts           (3)     create, update, delete
+│   ├── Contact Intelligence(2)    find_person, analyze_contacts
+│   ├── Tasks              (5)     create, get, update, complete, delete
+│   ├── Search             (1)     search_by_conversation
+│   ├── Folders            (3)     list, find, manage(create/delete/rename/move)
+│   ├── Out-of-Office      (1)     oof_settings(get/set)
+│   └── AI (optional)      (4)     semantic_search, classify, summarize, suggest_replies
+├── Services
+│   ├── PersonService              multi-source contact discovery + relationship scoring
+│   ├── EmailService               message lookups, folder resolution
+│   ├── ThreadService              conversation reconstruction
+│   └── AttachmentService          attachment I/O
+├── Adapters
+│   ├── GALAdapter                 multi-strategy directory search (exact → partial → domain)
+│   └── CacheAdapter               in-memory TTL cache
+├── AI (optional)
+│   ├── Providers                  OpenAI  •  Anthropic  •  OpenAI-compatible local
+│   ├── EmbeddingService           file-backed cache at data/embeddings/embeddings.json
+│   └── ClassificationService      priority / sentiment / summary / reply suggestions
+├── EWS Client (exchangelib)       impersonation & delegation via target_mailbox
+└── Authentication                 OAuth2 (MSAL) • Basic • NTLM
 ```
 
 ---
@@ -465,38 +655,25 @@ EWS MCP Server v3.4
 
 ---
 
+## Known limitations
+
+Items to be aware of when deploying. See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+- **AI tools do not honor `target_mailbox`.** `semantic_search_emails`, `classify_email`, `summarize_email`, and `suggest_replies` always operate on the primary authenticated mailbox. Use non-AI tools (`read_emails`, `search_emails`, `get_email_details`) with impersonation when you need multi-mailbox behaviour.
+- **`read_attachment` extracts PDF / DOCX / XLSX only.** Other formats fall through to the default "text/plain only" path.
+- **SSE transport is unauthenticated by default.** `MCP_HOST` defaults to `0.0.0.0`. For any deployment that is reachable beyond localhost, put the server behind an auth-enforcing reverse proxy or bind to `127.0.0.1`. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+- **Global TLS verification.** The EWS HTTP adapter currently does not verify server certificates. Intended for corporate environments with internal CAs; review before exposing to untrusted networks.
+- **Audit log content.** The audit log currently records tool arguments. Review `logs/` retention and access control if arguments may contain sensitive payloads.
+
 ## Version History
 
-### v3.4 - Reliability & Code Quality
-- **Circuit breaker**: Auto-trips after 3 EWS failures, instant rejection for 60s
-- **Async/await**: `asyncio.to_thread()` for blocking EWS calls, `asyncio.gather()` for concurrent scans
-- **Simplified errors**: 200-char max, human-readable validation messages
-- **Code cleanup**: -70 lines dead code, deduplicated JSON encoder
+See [CHANGELOG.md](CHANGELOG.md) for the full history. Recent highlights:
 
-### v3.3 - Tool Consolidation
-- **10 tools merged into 5**: 46 → 36 tools, ~55% token savings on `list_tools`
-- **Unified search**: `search_emails` with quick/advanced/full_text modes
-- **Unified contacts**: `find_person` with 5 source types, `analyze_contacts` with 6 analysis types
-- **Unified folders**: `manage_folder` with create/delete/rename/move actions
-- **Unified OOF**: `oof_settings` with get/set actions
-- **Server-side filtering**: `analyze_contacts` communication history uses EWS sender filter
-
-### v3.2 - Reply, Forward & Impersonation
-- **Reply & Forward**: Full body preservation, inline images, Outlook-style headers
-- **Impersonation**: All tools support `target_mailbox` parameter
-- **Documentation**: Comprehensive guides for new features
-
-### v3.0 - Person-Centric Architecture
-- Multi-strategy GAL search (eliminates 0-results bug)
-- Person-first data model with relationship scoring
-- Intelligent caching (70% reduction in API calls)
-- Enterprise logging system
-
-### v2.x - Enterprise Features
-- 40+ tools for email, calendar, contacts, tasks
-- Attachment content extraction (PDF, DOCX, XLSX, PPTX)
-- AI-powered meeting time finder
-- Folder management
+- **v3.4.x (Unreleased)** — HTML reply/forward drafts; `find_folder`; folder-ID support on move/parent resolution; Windows MSIX wrapper; availability parsing fix.
+- **v3.4.0** — Circuit breaker; `asyncio.to_thread` / `asyncio.gather`; 200-char error truncation; removed `handle_ews_errors`; deduplicated JSON encoder.
+- **v3.3.0** — Tool consolidation (unified search / find_person / manage_folder / oof_settings / analyze_contacts).
+- **v3.2.0** — Reply, forward, inline base64 attachments; impersonation on every base tool.
+- **v3.0.0** — Person-centric architecture; multi-strategy GAL search; enterprise logging.
 
 ---
 

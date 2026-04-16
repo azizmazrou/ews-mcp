@@ -1,8 +1,8 @@
 # Setup Guide
 
-Step-by-step guide to set up EWS MCP Server v3.4.
+Step-by-step guide to install and configure the EWS MCP Server.
 
-> **v3.0 Features:** Person-centric architecture, multi-strategy GAL search (fixes 0-results bug), enterprise logging, intelligent caching, and comprehensive attachment support.
+> **What you get:** 42 base tools plus 4 optional AI tools covering email (incl. reply/forward drafts), calendar, contacts, directory (GAL), tasks, folders (incl. ID-based references), attachments, and out-of-office. All base tools support `target_mailbox` via impersonation.
 
 ## Prerequisites
 

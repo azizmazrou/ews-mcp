@@ -1,6 +1,34 @@
 # API Documentation
 
-Complete reference for all EWS MCP Server v3.4 tools (36 base tools + 4 AI tools).
+Complete reference for all EWS MCP Server tools: **42 base tools** (always available, subject to category flags) and **4 optional AI tools** (`semantic_search_emails`, `classify_email`, `summarize_email`, `suggest_replies`). Grand total: **46**.
+
+| Category | Tools |
+|----------|-------|
+| Email | 10 |
+| Email Drafts | 3 |
+| Attachments | 7 |
+| Calendar | 7 |
+| Contacts | 3 |
+| Contact Intelligence | 2 |
+| Tasks | 5 |
+| Search | 1 |
+| Folders | 3 |
+| Out-of-Office | 1 |
+| AI (optional) | 4 |
+
+Every base tool accepts `target_mailbox` (when `EWS_IMPERSONATION_ENABLED=true`). **AI tools do not**, and always act on the primary authenticated mailbox.
+
+All responses follow the same shape:
+
+```json
+{ "success": true, "message": "...", "data": { ... } }
+```
+
+On failure:
+
+```json
+{ "success": false, "error": "short description (max 200 chars)" }
+```
 
 ## Contact Intelligence Tools (v3.3 Consolidated)
 
@@ -823,6 +851,102 @@ Unified folder management with 4 actions: create, delete, rename, move.
 }
 ```
 
+### find_folder
+
+Locate a folder by name or ID anywhere in the mailbox hierarchy. Returns the folder ID, full path, parent, and (when available) item count.
+
+**Input Schema:**
+```json
+{
+  "folder_name": "Archive/Q1 Reports",   // Optional: name or path
+  "folder_id": "AAMkAGF...",             // Optional: resolve by stable ID
+  "target_mailbox": "other@example.com"  // Optional: impersonation
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "folder": {
+    "folder_id": "AAMkAGF...",
+    "name": "Q1 Reports",
+    "path": "Archive/Q1 Reports",
+    "parent_id": "AAMkAGF...",
+    "item_count": 42,
+    "child_count": 0
+  }
+}
+```
+
+Use `folder_id` from this response with `move_email`, `copy_email` (`destination_folder_id`), or `manage_folder` (`parent_folder_id`) for robust folder references.
+
+## Email Drafts
+
+Draft tools let an AI assistant prepare a message in the Drafts folder for the user to review/edit/send. Nothing leaves the mailbox until it is explicitly sent.
+
+### create_draft
+
+Create a new email draft.
+
+**Input Schema:**
+```json
+{
+  "to": ["recipient@example.com"],          // Required
+  "subject": "Draft subject",                // Required (min length 1)
+  "body": "<p>Draft body (HTML supported)</p>", // Required
+  "cc": ["cc@example.com"],
+  "bcc": ["bcc@example.com"],
+  "importance": "Normal",                    // Low / Normal / High
+  "attachments": ["/path/to/file.pdf"],
+  "inline_attachments": [
+    { "file_name": "logo.png", "content_id": "logo1", "file_content": "base64..." }
+  ],
+  "target_mailbox": "shared@example.com"
+}
+```
+
+**Response:**
+```json
+{ "success": true, "draft_id": "AAMkAGF...", "folder": "drafts" }
+```
+
+### create_reply_draft
+
+Build a reply draft for AI preview-before-send. Preserves original conversation threading, quoted headers (From/To/Sent/Subject), inline images, and signature placement.
+
+**Input Schema:**
+```json
+{
+  "message_id": "AAMkAGF...",       // Required: original message
+  "body": "<p>Your draft reply</p>", // Required
+  "to_all": false,                   // Reply-all vs. reply to sender
+  "subject": "Optional override",
+  "attachments": ["/path/to/file.pdf"],
+  "target_mailbox": "shared@example.com"
+}
+```
+
+**Response:** `{ "success": true, "draft_id": "AAMkAGF..." }`
+
+### create_forward_draft
+
+Build a forward draft (full body + inline images + attachments preserved).
+
+**Input Schema:**
+```json
+{
+  "message_id": "AAMkAGF...",      // Required: original message
+  "to": ["recipient@example.com"],  // Required: forward recipients
+  "body": "<p>Forward message</p>", // Required
+  "subject": "Optional override",
+  "attachments": ["/path/to/file.pdf"],
+  "target_mailbox": "shared@example.com"
+}
+```
+
+**Response:** `{ "success": true, "draft_id": "AAMkAGF..." }`
+
 ## Enhanced Attachment Tools
 
 ### add_attachment
@@ -876,6 +1000,50 @@ Remove attachments from emails by attachment ID or name.
   "attachment_id": "AAMkAGA...",
   "attachment_name": "old_file.pdf",
   "message_id": "AAMkAGF..."
+}
+```
+
+### get_email_mime
+
+Return the full RFC-822 MIME content of a message (useful for archival, forensics, and external processors that expect `.eml` input).
+
+**Input Schema:**
+```json
+{
+  "message_id": "AAMkAGF...",
+  "target_mailbox": "shared@example.com"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message_id": "AAMkAGF...",
+  "mime_content": "Received: from ...\r\nFrom: ...\r\nTo: ...\r\n\r\n<body>",
+  "size_bytes": 12345
+}
+```
+
+### attach_email_to_draft
+
+Attach an existing message (as `.eml`) to a draft. Use in combination with `create_draft` / `create_reply_draft` / `create_forward_draft` when you want to forward/quote a full message as an attachment rather than inline.
+
+**Input Schema:**
+```json
+{
+  "draft_id": "AAMkAGF-draft-id...",
+  "message_id_to_attach": "AAMkAGF-original-msg...",
+  "target_mailbox": "shared@example.com"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "draft_id": "AAMkAGF-draft-id...",
+  "attachment_name": "Fwd_original_subject.eml"
 }
 ```
 
@@ -1062,6 +1230,113 @@ Copy an email to another folder while preserving the original.
   "source_folder": "inbox",
   "destination_folder": "archive",
   "subject": "Important Document"
+}
+```
+
+## AI Tools (optional)
+
+Disabled by default. Enable via `ENABLE_AI=true` plus the per-feature flag listed below. Requires `AI_PROVIDER`, `AI_API_KEY`, and `AI_MODEL` (and `AI_EMBEDDING_MODEL` for semantic search).
+
+> AI tools do **not** accept `target_mailbox`; they operate on the primary authenticated mailbox.
+
+### semantic_search_emails
+
+Search emails by semantic similarity using embeddings. Enabled by `ENABLE_SEMANTIC_SEARCH=true`.
+
+**Input Schema:**
+```json
+{
+  "query": "invoices about Q1 cloud spend",  // Required: natural-language query
+  "folder": "inbox",                          // Optional: inbox (default) / sent / drafts / all
+  "max_results": 10,                          // 1-100
+  "threshold": 0.7                            // 0.0-1.0 similarity cutoff
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "query": "invoices about Q1 cloud spend",
+  "total_results": 3,
+  "results": [
+    {
+      "message_id": "AAMkAGF...",
+      "subject": "AWS Q1 invoice",
+      "from": "billing@aws.amazon.com",
+      "similarity_score": 0.89,
+      "received_time": "2026-03-05T10:00:00"
+    }
+  ]
+}
+```
+
+### classify_email
+
+Classify an email's priority, sentiment, and (optionally) spam probability. Enabled by `ENABLE_EMAIL_CLASSIFICATION=true`.
+
+**Input Schema:**
+```json
+{
+  "message_id": "AAMkAGF...",
+  "include_spam_detection": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "classification": {
+    "priority": "high",
+    "sentiment": "neutral",
+    "category": "customer_support",
+    "spam_probability": 0.03
+  }
+}
+```
+
+### summarize_email
+
+Generate an AI summary of an email. Enabled by `ENABLE_EMAIL_SUMMARIZATION=true`.
+
+**Input Schema:**
+```json
+{
+  "message_id": "AAMkAGF...",
+  "max_length": 200           // 50-500 characters
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "summary": "Customer reports login failure after yesterday's deploy; wants ETA for fix."
+}
+```
+
+### suggest_replies
+
+Generate N draft reply variants. Enabled by `ENABLE_SMART_REPLIES=true`.
+
+**Input Schema:**
+```json
+{
+  "message_id": "AAMkAGF...",
+  "num_suggestions": 3        // 1-5
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "suggestions": [
+    "Thanks for the update — will review and get back by EOD.",
+    "Acknowledged. Can we sync tomorrow at 10 to walk through the details?",
+    "Received; looping in the platform team for a second opinion."
+  ]
 }
 ```
 

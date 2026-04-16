@@ -2,6 +2,8 @@
 
 EWS MCP Server supports operating on behalf of other users through Exchange impersonation or delegation. This allows a service account to access multiple mailboxes without requiring separate credentials for each user.
 
+> **Note:** every **base tool (42)** accepts a `target_mailbox` parameter. The **4 optional AI tools** (`semantic_search_emails`, `classify_email`, `summarize_email`, `suggest_replies`) currently ignore `target_mailbox` and always operate on the primary authenticated mailbox.
+
 ## Overview
 
 | Feature | Impersonation | Delegation |
@@ -174,8 +176,9 @@ list_folders(
 )
 
 # Create folder in another user's mailbox
-create_folder(
-    name="Project X",
+manage_folder(
+    action="create",
+    folder_name="Project X",
     parent_folder="inbox",
     target_mailbox="user@domain.com"
 )
