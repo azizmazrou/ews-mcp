@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — Drafts, folder discovery, availability fixes
+
+### New Tools (+4)
+
+Base tool count: **42** (38 → 42 with the additions below). Total with AI: **46**.
+
+- `create_draft` — create an email draft in the Drafts folder without sending
+- `create_reply_draft` — build a reply draft (quoted original, signature placeholder) for AI preview-before-send
+- `create_forward_draft` — build a forward draft for AI preview-before-send
+- `find_folder` — locate a folder by name or ID anywhere in the mailbox hierarchy
+
+### New Features
+
+- **HTML reply/forward drafts** (`src/tools/email_tools_draft.py`): preserve the original conversation, inline images, CDATA blocks, and Outlook-style quoted headers when composing a reply or forward.
+- **Folder-ID support** on `move_email`, `copy_email`, and `manage_folder`: pass `destination_folder_id` / `parent_folder_id` to resolve by stable Exchange ID instead of display name or path.
+- **Email MIME export** (`get_email_mime`): return the raw RFC-822 MIME of a message.
+- **Attach email to draft** (`attach_email_to_draft`): attach another message as an `.eml` file to a draft.
+- **Windows MSIX wrapper**: new entrypoint script corrects the Claude Desktop MSIX working-directory bug on Windows.
+
+### Bug Fixes
+
+- **Availability parsing** (`check_availability`): correctly parse exchangelib `merged_free_busy` responses.
+- **Availability coverage**: include the current authenticated mailbox in availability checks by default.
+- **Scheduling responses**: clarify free/busy output so the AI can act on the result without a second round-trip.
+- **Reply / forward drafts**: fix threading metadata, signature placement, and duplicate `RE:` / `FW:` prefixes; preserve styles and CDATA in quoted HTML bodies.
+- **Draft attachments**: attachment flow on drafts was failing in certain edge cases; fixed as part of the backlog-folder / availability / draft-attachment work.
+
+### Documentation
+
+- README fully refreshed: accurate tool counts (42 base + 4 AI = 46), full tool tables per category, complete environment-variable reference, corrected architecture diagram, new "Known limitations" section.
+- New draft-workflow and folder-discovery examples.
+
+### Known Limitations (unchanged from v3.4.0)
+
+- The four AI tools (`semantic_search_emails`, `classify_email`, `summarize_email`, `suggest_replies`) do not honor `target_mailbox`; they always act on the primary authenticated mailbox.
+- `read_attachment` extracts PDF / DOCX / XLSX only.
+- The SSE/HTTP transport is unauthenticated and binds `0.0.0.0` by default — put it behind an auth-enforcing reverse proxy for any non-local deployment.
+
+---
+
 ## v3.4.0 — Phase 3+4: Reliability & Code Quality (2026-03-15)
 
 ### New Features
@@ -76,10 +116,12 @@
 | `get_communication_history` | `analyze_contacts` with `analysis_type: "communication_history"` | Add `analysis_type: "communication_history"` |
 | `analyze_network` | `analyze_contacts` with `analysis_type: "overview"` etc. | Use `analyze_contacts(analysis_type="...")` |
 
-### Tool Count
+### Tool Count (at v3.3 release)
 - **Before:** 46 tools (42 base + 4 AI)
-- **After:** 36 tools (32 base + 4 AI)
+- **After v3.3:** 36 tools (32 base + 4 AI)
 - **Reduction:** -10 tools
+
+> **Note:** The base tool count has since grown back to 42 with the addition of `create_draft`, `create_reply_draft`, `create_forward_draft`, `find_folder`, `get_email_mime`, and `attach_email_to_draft` in later releases (see the Unreleased section at the top of this file).
 
 ### New Merged Tools
 

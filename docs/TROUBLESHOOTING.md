@@ -1,8 +1,8 @@
 # Troubleshooting Guide
 
-Common issues and solutions for EWS MCP Server v3.4.
+Common issues and solutions for the EWS MCP Server.
 
-> **Note:** Many issues from v2.x have been resolved in v3.0, particularly the GAL 0-results bug which is now completely fixed with multi-strategy search.
+> **Note:** Many earlier GAL 0-results / recipient-resolution issues are resolved by the multi-strategy `find_person` search. When in doubt, call `find_person` with `source="all"` — it falls back across GAL, contacts, and email history.
 
 ## Authentication Issues
 
