@@ -25,7 +25,7 @@ from .openapi_adapter import OpenAPIAdapter
 
 # Import all tool classes (up to 42 tools total: 38 base + 4 AI)
 from .tools import (
-    CreateDraftTool,
+    CreateDraftTool, CreateReplyDraftTool, CreateForwardDraftTool,
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
     DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool,
     ReplyEmailTool, ForwardEmailTool,
@@ -202,6 +202,8 @@ class EWSMCPServer:
         if self.settings.enable_email:
             tool_classes.extend([
                 CreateDraftTool,
+                CreateReplyDraftTool,
+                CreateForwardDraftTool,
                 SendEmailTool,
                 ReadEmailsTool,
                 SearchEmailsTool,
@@ -213,7 +215,7 @@ class EWSMCPServer:
                 ReplyEmailTool,
                 ForwardEmailTool
             ])
-            self.logger.info("Email tools enabled (11 tools)")
+            self.logger.info("Email tools enabled (13 tools)")
 
         # Attachment tools (7 tools)
         if self.settings.enable_email:
