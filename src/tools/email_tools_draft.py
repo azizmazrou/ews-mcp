@@ -21,7 +21,11 @@ from ..utils import (
     ews_id_to_str,
     attach_inline_files,
     INLINE_ATTACHMENTS_SCHEMA,
+    escape_html,
+    format_body_for_html,
+    sanitize_html,
 )
+from .email_tools import add_reply_prefix, add_forward_prefix
 
 
 class CreateDraftTool(BaseTool):
@@ -218,7 +222,8 @@ class CreateReplyDraftTool(BaseTool):
 
             original_message = find_message_for_account(account, message_id)
             original_subject = safe_get(original_message, "subject", "") or ""
-            reply_subject = f"RE: {original_subject}" if original_subject else "RE:"
+            # Use shared prefix helpers so we don't produce "RE: RE: ..." stacks.
+            reply_subject = add_reply_prefix(original_subject) if original_subject else "RE:"
             original_sender = safe_get(original_message, "sender", None)
             original_from_email = ""
             if original_sender and hasattr(original_sender, "email_address"):
@@ -247,21 +252,31 @@ class CreateReplyDraftTool(BaseTool):
                 reply_to_recipients = [Mailbox(email_address=original_from_email)]
 
             header = format_forward_header(original_message)
-            original_body_html = extract_body_html(original_message)
+            safe_from = escape_html(header.get("from", ""))
+            safe_to = escape_html(header.get("to", ""))
+            safe_cc = escape_html(header.get("cc", ""))
+            safe_sent = escape_html(header.get("sent", ""))
+            safe_subject = escape_html(header.get("subject", ""))
+
+            original_body_html = sanitize_html(extract_body_html(original_message))
             original_body_html = clean_original_body_for_signature(original_body_html)
 
+            # Render user body safely: plain text gets HTML-escaped and newlines
+            # converted to <br/>; HTML goes through the lightweight sanitiser.
+            user_body_html = format_body_for_html(body)
+
             headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
-<b>From:</b> {header['from']}<br/>
-<b>Sent:</b> {header['sent']}<br/>'''
-            if header["to"]:
-                headers_html += f'''<b>To:</b> {header['to']}<br/>'''
-            if header["cc"]:
-                headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
-            headers_html += f'''<b>Subject:</b> {header['subject']}
+<b>From:</b> {safe_from}<br/>
+<b>Sent:</b> {safe_sent}<br/>'''
+            if safe_to:
+                headers_html += f'''<b>To:</b> {safe_to}<br/>'''
+            if safe_cc:
+                headers_html += f'''<b>Cc:</b> {safe_cc}<br/>'''
+            headers_html += f'''<b>Subject:</b> {safe_subject}
 </p>'''
 
             complete_body = f'''<div class="WordSection1">
-<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{body}</p>
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_body_html}</p>
 </div>
 <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
 {headers_html}
@@ -393,24 +408,33 @@ class CreateForwardDraftTool(BaseTool):
 
             original_message = find_message_for_account(account, message_id)
             original_subject = safe_get(original_message, "subject", "") or ""
-            forward_subject = f"FW: {original_subject}" if original_subject else "FW:"
+            # Shared prefix helper avoids "FW: FW: ..." stacks.
+            forward_subject = add_forward_prefix(original_subject) if original_subject else "FW:"
 
             header = format_forward_header(original_message)
-            original_body_html = extract_body_html(original_message)
+            safe_from = escape_html(header.get("from", ""))
+            safe_to = escape_html(header.get("to", ""))
+            safe_cc = escape_html(header.get("cc", ""))
+            safe_sent = escape_html(header.get("sent", ""))
+            safe_subject = escape_html(header.get("subject", ""))
+
+            original_body_html = sanitize_html(extract_body_html(original_message))
             original_body_html = clean_original_body_for_signature(original_body_html)
 
+            user_body_html = format_body_for_html(body)
+
             headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
-<b>From:</b> {header['from']}<br/>
-<b>Date:</b> {header['sent']}<br/>
-<b>Subject:</b> {header['subject']}<br/>'''
-            if header["to"]:
-                headers_html += f'''<b>To:</b> {header['to']}<br/>'''
-            if header["cc"]:
-                headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+<b>From:</b> {safe_from}<br/>
+<b>Date:</b> {safe_sent}<br/>
+<b>Subject:</b> {safe_subject}<br/>'''
+            if safe_to:
+                headers_html += f'''<b>To:</b> {safe_to}<br/>'''
+            if safe_cc:
+                headers_html += f'''<b>Cc:</b> {safe_cc}<br/>'''
             headers_html += "</p>"
 
             complete_body = f'''<div class="WordSection1">
-<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{body}</p>
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_body_html}</p>
 </div>
 <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
 {headers_html}

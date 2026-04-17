@@ -31,10 +31,21 @@ class Settings(BaseSettings):
     # Server configuration
     mcp_server_name: str = "ews-mcp-server"
     mcp_transport: Literal["stdio", "sse"] = "stdio"
-    mcp_host: str = "0.0.0.0"
+    # Default to localhost. The SSE transport serves an unauthenticated-by-default
+    # REST surface; operators must opt in to 0.0.0.0 and should set MCP_API_KEY
+    # before doing so. See README "Known limitations".
+    mcp_host: str = "127.0.0.1"
     mcp_port: int = 8000
+    # If set, the SSE/HTTP transport requires this API key in the
+    # Authorization: Bearer <key> header (or X-API-Key header) on every
+    # non-health endpoint. Required whenever mcp_host is not 127.0.0.1/localhost.
+    mcp_api_key: Optional[str] = None
     timezone: str = "UTC"
     log_level: str = "INFO"
+
+    # TLS for EWS/autodiscover. Default is verified TLS (secure). Set to true
+    # only for corporate Exchange with self-signed certs and review the risks.
+    ews_insecure_skip_verify: bool = False
 
     # OpenAPI/REST API Configuration
     api_base_url: Optional[str] = None  # External URL for API (e.g., https://api.example.com)
@@ -105,20 +116,46 @@ class Settings(BaseSettings):
             if not self.ews_username or not self.ews_password:
                 raise ValueError(f"{self.ews_auth_type.upper()} auth requires ews_username and ews_password")
 
+        # SSE transport binding safety: require API key if not loopback.
+        if self.mcp_transport == "sse":
+            loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+            if self.mcp_host not in loopback_hosts and not self.mcp_api_key:
+                raise ValueError(
+                    "SSE transport bound to a non-loopback address requires "
+                    "MCP_API_KEY to be set. Either set MCP_API_KEY or bind "
+                    "MCP_HOST to 127.0.0.1 and put the server behind an "
+                    "auth-enforcing reverse proxy."
+                )
+
         # Validate AI settings
         if self.enable_ai:
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
             if not self.ai_api_key and self.ai_provider != "local":
                 raise ValueError(f"AI enabled but ai_api_key not provided for {self.ai_provider}")
             if not self.ai_model:
-                # Set default models based on provider
                 if self.ai_provider == "openai":
                     self.ai_model = "gpt-4o-mini"
                 elif self.ai_provider == "anthropic":
                     self.ai_model = "claude-3-5-sonnet-20241022"
+                if self.ai_model:
+                    _log.info(
+                        f"AI_MODEL not set; defaulting to {self.ai_model!r} "
+                        f"for provider={self.ai_provider}"
+                    )
             if self.enable_semantic_search and not self.ai_embedding_model:
-                # Set default embedding model
                 if self.ai_provider == "openai":
                     self.ai_embedding_model = "text-embedding-3-small"
+                    _log.info(
+                        "AI_EMBEDDING_MODEL not set; defaulting to "
+                        "'text-embedding-3-small' for semantic search"
+                    )
+                elif self.ai_provider == "local":
+                    _log.warning(
+                        "enable_semantic_search=true with AI_PROVIDER=local but "
+                        "AI_EMBEDDING_MODEL is not set. Set AI_EMBEDDING_MODEL "
+                        "explicitly for local/OpenAI-compatible endpoints."
+                    )
 
         return self
 

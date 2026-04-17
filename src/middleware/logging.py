@@ -7,6 +7,63 @@ from pathlib import Path
 from typing import Any, Dict
 
 
+# Fields whose values must be redacted before being written to any log (audit
+# or otherwise). Match is case-insensitive and substring-based so variants
+# like "client_secret", "access_token", "auth_token" are covered.
+_SENSITIVE_KEY_PATTERNS: tuple = (
+    "password", "token", "secret", "api_key", "apikey", "authorization",
+    # Mail content — bodies can contain PII, attachments are base64 blobs.
+    "body", "html_body", "text_body",
+    "file_content", "content_base64", "mime_content", "mime_content_base64",
+    "inline_attachments",
+)
+
+
+def _is_sensitive(key: str) -> bool:
+    lower = str(key).lower()
+    return any(pattern in lower for pattern in _SENSITIVE_KEY_PATTERNS)
+
+
+def redact_sensitive(obj: Any, max_str: int = 200) -> Any:
+    """Return a copy of obj with sensitive fields replaced by "[redacted]".
+
+    - Dict keys that match _SENSITIVE_KEY_PATTERNS are replaced whole-value.
+    - Lists/tuples are walked recursively.
+    - Long strings are truncated so a single audit line cannot grow unbounded.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, str):
+        if len(obj) > max_str:
+            return obj[: max_str - 3] + "..."
+        return obj
+    if isinstance(obj, (int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        redacted: Dict[str, Any] = {}
+        for key, value in obj.items():
+            if _is_sensitive(key):
+                if isinstance(value, (list, tuple)):
+                    redacted[key] = f"[redacted: {len(value)} item(s)]"
+                elif isinstance(value, str):
+                    redacted[key] = f"[redacted: {len(value)} chars]"
+                else:
+                    redacted[key] = "[redacted]"
+            else:
+                redacted[key] = redact_sensitive(value, max_str)
+        return redacted
+    if isinstance(obj, (list, tuple)):
+        return [redact_sensitive(item, max_str) for item in obj]
+    # Fallback: stringify and truncate.
+    try:
+        text = str(obj)
+    except Exception:
+        return "[non-serializable]"
+    if len(text) > max_str:
+        return text[: max_str - 3] + "..."
+    return text
+
+
 DEFAULT_LOG_DIR = Path("logs")
 FALLBACK_LOG_DIR = Path("/tmp/ews_mcp_logs")
 
@@ -109,10 +166,15 @@ class AuditLogger:
         success: bool,
         details: Dict[str, Any] = None
     ) -> None:
-        """Log operation for audit trail."""
+        """Log operation for audit trail.
+
+        Sensitive fields in `details` (passwords, tokens, email bodies,
+        attachment bytes) are redacted before being written to audit.log.
+        """
         message = f"op={operation} | user={user} | success={success}"
         if details:
-            message += f" | {details}"
+            safe_details = redact_sensitive(details)
+            message += f" | {safe_details}"
 
         if success:
             self.logger.info(message)

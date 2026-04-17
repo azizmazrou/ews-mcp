@@ -1,7 +1,12 @@
 version: '3.8'
 
-# EWS MCP v3.4 - Person-Centric Exchange Server
-# Build from source for development/testing
+# EWS MCP - Person-Centric Exchange Server
+# Build from source for development/testing.
+#
+# SSE transport reminder: MCP_HOST defaults to 127.0.0.1. If you set
+# MCP_TRANSPORT=sse and want the port reachable outside the container,
+# set MCP_HOST=0.0.0.0 AND MCP_API_KEY=<secret> in your .env. The server
+# refuses to bind a non-loopback address without an API key.
 
 services:
   ews-mcp-server:

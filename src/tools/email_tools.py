@@ -27,7 +27,12 @@ import re
 from .base import BaseTool
 from ..models import SendEmailRequest, EmailSearchRequest, EmailDetails
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, find_message_for_account, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA
+from ..utils import (
+    format_success_response, safe_get, truncate_text, parse_datetime_tz_aware,
+    find_message_across_folders, find_message_for_account, ews_id_to_str,
+    attach_inline_files, INLINE_ATTACHMENTS_SCHEMA,
+    escape_html, format_body_for_html, sanitize_html,
+)
 from .folder_tools import find_folder_by_id, get_standard_folder_map
 
 
@@ -1092,7 +1097,7 @@ class SearchEmailsTool(BaseTool):
                     results_per_folder = max_results // len(folders) if len(folders) > 1 else max_results
                     for email in query[:results_per_folder]:
                         all_results.append({
-                            "message_id": safe_get(email, 'id', ''),
+                            "message_id": ews_id_to_str(safe_get(email, 'id', '')),
                             "subject": safe_get(email, 'subject', ''),
                             "from": safe_get(email, 'sender', {}).email_address if hasattr(safe_get(email, 'sender', {}), 'email_address') else '',
                             "to": [r.email_address for r in safe_get(email, 'to_recipients', []) if hasattr(r, 'email_address')],
@@ -1734,14 +1739,23 @@ class ReplyEmailTool(BaseTool):
                 self.logger.info(f"Reply to {original_from_email}")
 
             # Build the complete reply body manually
-            # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
-            user_message = body if body else ""
+            # 1. User's message at top, rendered safely (plain text -> escaped +
+            #    <br/>, existing HTML -> lightly sanitised against script/style/
+            #    javascript: payloads). See utils.format_body_for_html.
+            user_message_html = format_body_for_html(body)
 
-            # 2. Format the reply headers from original email metadata
+            # 2. Format the reply headers from original email metadata. These
+            #    fields originate in an inbound email (attacker-controlled) and
+            #    MUST be HTML-escaped before interpolation.
             header = format_forward_header(original_message)
+            safe_from = escape_html(header.get('from', ''))
+            safe_to = escape_html(header.get('to', ''))
+            safe_cc = escape_html(header.get('cc', ''))
+            safe_sent = escape_html(header.get('sent', ''))
+            safe_subject = escape_html(header.get('subject', ''))
 
             # 3. Get the original email body HTML (preserves styles but strips document structure)
-            original_body_html = extract_body_html(original_message)
+            original_body_html = sanitize_html(extract_body_html(original_message))
             self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
             # Clean original body - rename WordSection1 to OriginalSection
@@ -1754,15 +1768,15 @@ class ReplyEmailTool(BaseTool):
             # - Headers inline in separator div
             # - original body (with OriginalSection class to avoid Exclaimer confusion)
             complete_body = f'''<div class="WordSection1">
-<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message_html}</p>
 </div>
 <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
-<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;"><b>From:</b> {header['from']}<br/>
-<b>Sent:</b> {header['sent']}<br/>
-<b>To:</b> {header['to']}<br/>'''
-            if header['cc']:
-                complete_body += f'''<b>Cc:</b> {header['cc']}<br/>'''
-            complete_body += f'''<b>Subject:</b> {header['subject']}</p>
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;"><b>From:</b> {safe_from}<br/>
+<b>Sent:</b> {safe_sent}<br/>
+<b>To:</b> {safe_to}<br/>'''
+            if safe_cc:
+                complete_body += f'''<b>Cc:</b> {safe_cc}<br/>'''
+            complete_body += f'''<b>Subject:</b> {safe_subject}</p>
 </div>
 {original_body_html}'''
 
@@ -1933,14 +1947,21 @@ class ForwardEmailTool(BaseTool):
             forward_subject = add_forward_prefix(original_subject)
 
             # Build the complete forward body manually
-            # 1. User's message at top (wrapped in WordSection1 for Exclaimer signature placement)
-            user_message = body if body else ""
+            # 1. User's message at top, rendered safely (plain text -> escaped +
+            #    <br/>, existing HTML -> lightly sanitised). See utils.format_body_for_html.
+            user_message_html = format_body_for_html(body)
 
-            # 2. Format the forward headers from original email metadata
+            # 2. Format the forward headers from original email metadata; these
+            #    are attacker-controlled and must be HTML-escaped.
             header = format_forward_header(original_message)
+            safe_from = escape_html(header.get('from', ''))
+            safe_to = escape_html(header.get('to', ''))
+            safe_cc = escape_html(header.get('cc', ''))
+            safe_sent = escape_html(header.get('sent', ''))
+            safe_subject = escape_html(header.get('subject', ''))
 
             # 3. Get the original email body HTML (preserves styles but strips document structure)
-            original_body_html = extract_body_html(original_message)
+            original_body_html = sanitize_html(extract_body_html(original_message))
             self.logger.info(f"Extracted original body: {len(original_body_html)} characters")
 
             # Clean original body - rename WordSection1 to OriginalSection
@@ -1949,13 +1970,13 @@ class ForwardEmailTool(BaseTool):
 
             # 4. Build headers block (Outlook format)
             headers_html = f'''<p style="font-size:11pt;font-family:Calibri,sans-serif;">
-<b>From:</b> {header['from']}<br/>
-<b>Date:</b> {header['sent']}<br/>
-<b>Subject:</b> {header['subject']}<br/>'''
-            if header['to']:
-                headers_html += f'''<b>To:</b> {header['to']}<br/>'''
-            if header['cc']:
-                headers_html += f'''<b>Cc:</b> {header['cc']}<br/>'''
+<b>From:</b> {safe_from}<br/>
+<b>Date:</b> {safe_sent}<br/>
+<b>Subject:</b> {safe_subject}<br/>'''
+            if safe_to:
+                headers_html += f'''<b>To:</b> {safe_to}<br/>'''
+            if safe_cc:
+                headers_html += f'''<b>Cc:</b> {safe_cc}<br/>'''
             headers_html += '''</p>'''
 
             # 5. Construct complete body matching Outlook's exact structure
@@ -1964,15 +1985,15 @@ class ForwardEmailTool(BaseTool):
             # - divRplyFwdMsg: headers block
             # - original body (with OriginalSection class to avoid Exclaimer confusion)
             complete_body = f'''<div class="WordSection1">
-<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message}</p>
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message_html}</p>
 </div>
 <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
-<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;"><b>From:</b> {header['from']}<br/>
-<b>Sent:</b> {header['sent']}<br/>
-<b>To:</b> {header['to']}<br/>'''
-            if header['cc']:
-                complete_body += f'''<b>Cc:</b> {header['cc']}<br/>'''
-            complete_body += f'''<b>Subject:</b> {header['subject']}</p>
+<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;"><b>From:</b> {safe_from}<br/>
+<b>Sent:</b> {safe_sent}<br/>
+<b>To:</b> {safe_to}<br/>'''
+            if safe_cc:
+                complete_body += f'''<b>Cc:</b> {safe_cc}<br/>'''
+            complete_body += f'''<b>Subject:</b> {safe_subject}</p>
 </div>
 {original_body_html}'''
 

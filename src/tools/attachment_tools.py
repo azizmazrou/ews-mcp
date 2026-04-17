@@ -3,6 +3,8 @@
 from typing import Any, Dict, List
 import base64
 import io
+import os
+import re
 from pathlib import Path
 
 from exchangelib import Body, HTMLBody, ItemAttachment, Message
@@ -10,6 +12,49 @@ from exchangelib import Body, HTMLBody, ItemAttachment, Message
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, safe_get, find_message_across_folders, find_message_for_account
+
+
+# Download jail for attachment file writes. Default: ./downloads inside the
+# project working directory (created on first use). Operators can override via
+# EWS_DOWNLOAD_DIR. download_attachment(save_path=...) is interpreted relative
+# to this directory; absolute paths, "..", and symlinks that escape the jail
+# are rejected.
+_DEFAULT_DOWNLOAD_DIR = Path(os.environ.get("EWS_DOWNLOAD_DIR", "downloads"))
+
+
+def _safe_basename(name: str) -> str:
+    """Strip directory traversal / path separators from a user-supplied name."""
+    if not name:
+        return "attachment"
+    name = os.path.basename(name)
+    # Collapse any remaining path-like characters
+    name = re.sub(r"[\\/]+", "_", name).strip()
+    return name or "attachment"
+
+
+def resolve_download_path(save_path: str | None, default_name: str) -> Path:
+    """Resolve a save_path into a safe, jailed absolute Path.
+
+    - If save_path is None/empty, use default_name inside the jail.
+    - If save_path contains a directory part, only the basename is honoured.
+    - The returned path is guaranteed to live inside the download jail.
+    """
+    jail = _DEFAULT_DOWNLOAD_DIR.resolve()
+    jail.mkdir(parents=True, exist_ok=True)
+
+    filename = _safe_basename(save_path) if save_path else _safe_basename(default_name)
+    candidate = (jail / filename).resolve()
+
+    # Verify the resolved path is still inside the jail (defence against
+    # symlink tricks or unusual basename behaviour).
+    try:
+        candidate.relative_to(jail)
+    except ValueError:
+        raise ToolExecutionError(
+            "Invalid save_path: resolved outside the download directory"
+        )
+
+    return candidate
 
 
 def extract_attachment_id(attachment) -> str:
@@ -232,13 +277,11 @@ class DownloadAttachmentTool(BaseTool):
                 )
 
             elif return_as == "file_path":
-                # Save to file
-                file_path = Path(save_path)
+                # Save to file, jailed under the configured download directory.
+                # save_path is treated as a basename hint only; directory
+                # components are stripped and "../" is neutralised.
+                file_path = resolve_download_path(save_path, attachment_name)
 
-                # Create parent directories if they don't exist
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-
-                # Write content to file
                 with open(file_path, 'wb') as f:
                     f.write(content)
 
@@ -631,6 +674,120 @@ class ReadAttachmentTool(BaseTool):
             self.logger.error(f"Failed to read attachment: {e}")
             raise ToolExecutionError(f"Failed to read attachment: {e}")
 
+    def _read_pdf(self, content: bytes, extract_tables: bool, max_pages: int) -> str:
+        """Extract text from PDF using pdfplumber."""
+        try:
+            import pdfplumber
+        except ImportError:
+            raise ToolExecutionError(
+                "pdfplumber not installed. Run: pip install pdfplumber>=0.10.0"
+            )
+
+        text_parts = []
+        pdf_bytes = io.BytesIO(content)
+
+        try:
+            with pdfplumber.open(pdf_bytes) as pdf:
+                total_pages = len(pdf.pages)
+                pages_to_process = min(total_pages, max_pages)
+
+                for page_num in range(pages_to_process):
+                    page = pdf.pages[page_num]
+                    text_parts.append(f"--- Page {page_num + 1} of {total_pages} ---")
+
+                    # Extract text (supports UTF-8/Arabic)
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(page_text)
+
+                    # Extract tables if requested
+                    if extract_tables:
+                        tables = page.extract_tables()
+                        for table_num, table in enumerate(tables, 1):
+                            text_parts.append(f"\n[Table {table_num}]")
+                            for row in table:
+                                row_text = " | ".join(str(cell) if cell else "" for cell in row)
+                                text_parts.append(row_text)
+
+                if total_pages > max_pages:
+                    text_parts.append(f"\n... (truncated at {max_pages} pages, {total_pages - max_pages} pages omitted)")
+
+            return "\n\n".join(text_parts)
+
+        except Exception as e:
+            raise ToolExecutionError(f"Failed to read PDF: {str(e)}")
+
+    def _read_docx(self, content: bytes, extract_tables: bool) -> str:
+        """Extract text from DOCX using python-docx."""
+        try:
+            from docx import Document
+        except ImportError:
+            raise ToolExecutionError(
+                "python-docx not installed. Run: pip install python-docx>=1.0.0"
+            )
+
+        text_parts = []
+        docx_bytes = io.BytesIO(content)
+
+        try:
+            doc = Document(docx_bytes)
+
+            # Extract paragraphs (supports UTF-8/Arabic)
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text_parts.append(para.text)
+
+            # Extract tables if requested
+            if extract_tables:
+                for table_num, table in enumerate(doc.tables, 1):
+                    text_parts.append(f"\n[Table {table_num}]")
+                    for row in table.rows:
+                        row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                        if row_text.strip():
+                            text_parts.append(row_text)
+
+            return "\n\n".join(text_parts)
+
+        except Exception as e:
+            raise ToolExecutionError(f"Failed to read DOCX: {str(e)}")
+
+    def _read_excel(self, content: bytes) -> str:
+        """Extract data from Excel using openpyxl."""
+        try:
+            import openpyxl
+        except ImportError:
+            raise ToolExecutionError(
+                "openpyxl not installed. Run: pip install openpyxl>=3.1.0"
+            )
+
+        text_parts = []
+        excel_bytes = io.BytesIO(content)
+
+        try:
+            # Load workbook (data_only=True to get calculated values)
+            workbook = openpyxl.load_workbook(excel_bytes, data_only=True)
+
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                text_parts.append(f"--- Sheet: {sheet_name} ---")
+
+                # Extract all rows
+                for row in sheet.iter_rows(values_only=True):
+                    # Skip empty rows
+                    if any(cell is not None for cell in row):
+                        row_text = " | ".join(
+                            str(cell) if cell is not None else ""
+                            for cell in row
+                        )
+                        text_parts.append(row_text)
+
+                text_parts.append("")  # Empty line between sheets
+
+            return "\n".join(text_parts)
+
+        except Exception as e:
+            raise ToolExecutionError(f"Failed to read Excel: {str(e)}")
+
 
 class GetEmailMimeTool(BaseTool):
     """Tool for retrieving raw MIME content for an email."""
@@ -755,117 +912,3 @@ class AttachEmailToDraftTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to attach email to draft: {e}")
             raise ToolExecutionError(f"Failed to attach email to draft: {e}")
-
-    def _read_pdf(self, content: bytes, extract_tables: bool, max_pages: int) -> str:
-        """Extract text from PDF using pdfplumber."""
-        try:
-            import pdfplumber
-        except ImportError:
-            raise ToolExecutionError(
-                "pdfplumber not installed. Run: pip install pdfplumber>=0.10.0"
-            )
-
-        text_parts = []
-        pdf_bytes = io.BytesIO(content)
-
-        try:
-            with pdfplumber.open(pdf_bytes) as pdf:
-                total_pages = len(pdf.pages)
-                pages_to_process = min(total_pages, max_pages)
-
-                for page_num in range(pages_to_process):
-                    page = pdf.pages[page_num]
-                    text_parts.append(f"--- Page {page_num + 1} of {total_pages} ---")
-
-                    # Extract text (supports UTF-8/Arabic)
-                    page_text = page.extract_text()
-                    if page_text:
-                        text_parts.append(page_text)
-
-                    # Extract tables if requested
-                    if extract_tables:
-                        tables = page.extract_tables()
-                        for table_num, table in enumerate(tables, 1):
-                            text_parts.append(f"\n[Table {table_num}]")
-                            for row in table:
-                                row_text = " | ".join(str(cell) if cell else "" for cell in row)
-                                text_parts.append(row_text)
-
-                if total_pages > max_pages:
-                    text_parts.append(f"\n... (truncated at {max_pages} pages, {total_pages - max_pages} pages omitted)")
-
-            return "\n\n".join(text_parts)
-
-        except Exception as e:
-            raise ToolExecutionError(f"Failed to read PDF: {str(e)}")
-
-    def _read_docx(self, content: bytes, extract_tables: bool) -> str:
-        """Extract text from DOCX using python-docx."""
-        try:
-            from docx import Document
-        except ImportError:
-            raise ToolExecutionError(
-                "python-docx not installed. Run: pip install python-docx>=1.0.0"
-            )
-
-        text_parts = []
-        docx_bytes = io.BytesIO(content)
-
-        try:
-            doc = Document(docx_bytes)
-
-            # Extract paragraphs (supports UTF-8/Arabic)
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    text_parts.append(para.text)
-
-            # Extract tables if requested
-            if extract_tables:
-                for table_num, table in enumerate(doc.tables, 1):
-                    text_parts.append(f"\n[Table {table_num}]")
-                    for row in table.rows:
-                        row_text = " | ".join(cell.text.strip() for cell in row.cells)
-                        if row_text.strip():
-                            text_parts.append(row_text)
-
-            return "\n\n".join(text_parts)
-
-        except Exception as e:
-            raise ToolExecutionError(f"Failed to read DOCX: {str(e)}")
-
-    def _read_excel(self, content: bytes) -> str:
-        """Extract data from Excel using openpyxl."""
-        try:
-            import openpyxl
-        except ImportError:
-            raise ToolExecutionError(
-                "openpyxl not installed. Run: pip install openpyxl>=3.1.0"
-            )
-
-        text_parts = []
-        excel_bytes = io.BytesIO(content)
-
-        try:
-            # Load workbook (data_only=True to get calculated values)
-            workbook = openpyxl.load_workbook(excel_bytes, data_only=True)
-
-            for sheet_name in workbook.sheetnames:
-                sheet = workbook[sheet_name]
-                text_parts.append(f"--- Sheet: {sheet_name} ---")
-
-                # Extract all rows
-                for row in sheet.iter_rows(values_only=True):
-                    # Skip empty rows
-                    if any(cell is not None for cell in row):
-                        row_text = " | ".join(
-                            str(cell) if cell is not None else ""
-                            for cell in row
-                        )
-                        text_parts.append(row_text)
-
-                text_parts.append("")  # Empty line between sheets
-
-            return "\n".join(text_parts)
-
-        except Exception as e:
-            raise ToolExecutionError(f"Failed to read Excel: {str(e)}")

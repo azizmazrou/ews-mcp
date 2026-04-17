@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import tempfile
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from .base import EmbeddingProvider
@@ -41,14 +43,29 @@ class EmbeddingService:
                 self.logger.warning(f"Failed to load embeddings cache: {e}")
 
     def _save_cache(self):
-        """Save embeddings cache to disk."""
+        """Save embeddings cache to disk atomically.
+
+        Writes to a temp file in the same directory and renames over the
+        target so a crash mid-write cannot corrupt the cache.
+        """
         if not self.cache_dir:
             return
 
         cache_file = self.cache_dir / "embeddings.json"
         try:
-            with open(cache_file, 'w') as f:
-                json.dump(self.embedding_cache, f)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="embeddings-", suffix=".json.tmp", dir=self.cache_dir
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self.embedding_cache, f)
+                os.replace(tmp_path, cache_file)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             self.logger.warning(f"Failed to save embeddings cache: {e}")
 
@@ -99,9 +116,9 @@ class EmbeddingService:
             return [r.embedding for r in responses]
 
         # Check cache
-        embeddings = []
-        texts_to_embed = []
-        indices_to_embed = []
+        embeddings: List[Tuple[int, List[float]]] = []
+        texts_to_embed: List[str] = []
+        indices_to_embed: List[int] = []
 
         for i, text in enumerate(texts):
             cache_key = self._get_cache_key(text)
@@ -111,15 +128,17 @@ class EmbeddingService:
                 texts_to_embed.append(text)
                 indices_to_embed.append(i)
 
-        # Embed uncached texts
+        # Embed uncached texts. texts_to_embed[pos] corresponds positionally
+        # to responses[pos] and to the original texts[indices_to_embed[pos]].
         if texts_to_embed:
             responses = await self.provider.embed_batch(texts_to_embed)
-            for i, response in zip(indices_to_embed, responses):
-                embeddings.append((i, response.embedding))
-                # Cache it
-                cache_key = self._get_cache_key(texts_to_embed[indices_to_embed.index(i)])
-                self.embedding_cache[cache_key] = response.embedding
+            for pos, (original_idx, response) in enumerate(zip(indices_to_embed, responses)):
+                embedding = response.embedding
+                embeddings.append((original_idx, embedding))
+                cache_key = self._get_cache_key(texts_to_embed[pos])
+                self.embedding_cache[cache_key] = embedding
 
+            # One disk write for the whole batch (was N writes / call).
             self._save_cache()
 
         # Sort by original index

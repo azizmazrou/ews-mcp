@@ -128,12 +128,15 @@ class AttachmentService:
     async def _get_message(self, message_id: str):
         """Get message from any folder."""
         for folder_name in ['inbox', 'sent', 'drafts']:
-            folder = getattr(self.ews_client.account, folder_name)
+            folder = getattr(self.ews_client.account, folder_name, None)
+            if folder is None:
+                continue
             try:
                 message = folder.get(id=message_id)
                 if message:
                     return message
-            except:
+            except Exception as e:
+                self.logger.debug(f"Message not in {folder_name}: {e}")
                 continue
         return None
 
@@ -421,8 +424,8 @@ class AttachmentService:
                             with zf.open(file_info) as f:
                                 content_text = f.read().decode('utf-8')
                                 result.extracted_content[file_info.filename] = content_text
-                        except:
-                            pass
+                        except Exception as e:
+                            self.logger.debug(f"Skipped {file_info.filename}: {e}")
 
             result.success = True
             return result

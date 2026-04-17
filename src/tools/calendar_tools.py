@@ -268,12 +268,15 @@ class GetCalendarTool(BaseTool):
             else:
                 start_date = make_tz_aware(datetime.now())
 
-            end_date = kwargs.get("end_date")
-            if end_date:
-                end_date = parse_datetime_tz_aware(end_date)
-                # If end_date is at midnight (00:00:00), it means user provided date-only
-                # Add 1 day to include the full day's events
-                if end_date.hour == 0 and end_date.minute == 0 and end_date.second == 0:
+            end_date_raw = kwargs.get("end_date")
+            if end_date_raw:
+                end_date = parse_datetime_tz_aware(end_date_raw)
+                # If the caller supplied a date-only string (no 'T'), treat it
+                # as "the whole of that day" by extending through the next
+                # midnight. Previously we did this whenever the parsed time
+                # happened to be exactly 00:00:00, which over-collected events
+                # whenever someone deliberately requested a midnight boundary.
+                if end_date is not None and isinstance(end_date_raw, str) and "T" not in end_date_raw:
                     end_date = end_date + timedelta(days=1)
             else:
                 # Use days_ahead parameter (default: 7, max: 90)
@@ -874,50 +877,59 @@ class FindMeetingTimesTool(BaseTool):
                     current_time = (current_time + timedelta(days=1)).replace(hour=earliest_hour, minute=0, second=0)
                     continue
 
-                # Check if all attendees are available
+                # Check if all attendees are available for the full slot.
+                # Treat missing data (slot past end of merged_free_busy) or
+                # attendees without a merged_free_busy response as BUSY so we
+                # never surface a slot we couldn't actually verify.
                 all_available = True
+                buffer_available = True
                 for busy_info in availability_data:
-                    # Check merged_free_busy string if available
-                    if hasattr(busy_info, 'merged_free_busy') and busy_info.merged_free_busy:
-                        # Calculate time offset in 15-minute intervals
-                        minutes_from_start = int((current_time - start_date).total_seconds() / 60)
-                        interval_index = minutes_from_start // 15
+                    merged = getattr(busy_info, 'merged_free_busy', None)
+                    if not merged:
+                        all_available = False
+                        break
 
-                        # Check duration worth of intervals
-                        intervals_needed = (duration_minutes + 14) // 15  # Round up
+                    minutes_from_start = int((current_time - start_date).total_seconds() / 60)
+                    interval_index = minutes_from_start // 15
+                    intervals_needed = (duration_minutes + 14) // 15  # Round up
 
-                        if interval_index + intervals_needed <= len(busy_info.merged_free_busy):
-                            for i in range(intervals_needed):
-                                status = busy_info.merged_free_busy[interval_index + i]
-                                # 0=Free, 1=Tentative, 2=Busy, 3=OOF, 4=NoData
-                                if status in ['2', '3']:  # Busy or Out of Office
-                                    all_available = False
-                                    break
+                    # Slot must fit entirely within the returned data.
+                    if interval_index + intervals_needed > len(merged):
+                        all_available = False
+                        break
 
-                            if not all_available:
+                    for i in range(intervals_needed):
+                        status = merged[interval_index + i]
+                        # 0=Free, 1=Tentative, 2=Busy, 3=OOF, 4=NoData
+                        if status in ('2', '3', '4'):
+                            all_available = False
+                            break
+
+                    if not all_available:
+                        break
+
+                    # Buffer check (only used for scoring, not for filtering).
+                    if avoid_back_to_back:
+                        buffer_intervals = max(1, min_break_minutes // 15)
+                        pre_start = max(0, interval_index - buffer_intervals)
+                        post_end = min(len(merged), interval_index + intervals_needed + buffer_intervals)
+                        for i in range(pre_start, post_end):
+                            if merged[i] in ('2', '3'):
+                                buffer_available = False
                                 break
 
                 if all_available:
-                    # Calculate a score for this time slot
                     score = 100
 
-                    # Preference scoring
                     if prefer_morning and current_time.hour < 12:
                         score += 20
                     if prefer_afternoon and current_time.hour >= 13:
                         score += 20
 
-                    # Penalize very early or very late times
                     if current_time.hour < 9 or current_time.hour > 16:
                         score -= 10
 
-                    # Check for back-to-back meetings
-                    if avoid_back_to_back:
-                        # Check 15 minutes before and after
-                        buffer_start = current_time - timedelta(minutes=min_break_minutes)
-                        buffer_end = slot_end + timedelta(minutes=min_break_minutes)
-
-                        # Simple check - if we have buffer time, add to score
+                    if avoid_back_to_back and buffer_available:
                         score += 10
 
                     suggestions.append({
@@ -929,8 +941,16 @@ class FindMeetingTimesTool(BaseTool):
                         "time_of_day": "Morning" if current_time.hour < 12 else "Afternoon" if current_time.hour < 17 else "Evening"
                     })
 
-                # Move to next 15-minute interval
-                current_time += timedelta(minutes=15)
+                    # Advance past the accepted slot (plus buffer) so we don't
+                    # emit N overlapping suggestions at 15-minute offsets of
+                    # the same hour.
+                    advance = timedelta(
+                        minutes=duration_minutes + (min_break_minutes if avoid_back_to_back else 0)
+                    )
+                    current_time = current_time + advance
+                else:
+                    # Keep scanning in 15-minute steps.
+                    current_time += timedelta(minutes=15)
 
             # Sort suggestions by score (highest first)
             suggestions.sort(key=lambda x: x['score'], reverse=True)

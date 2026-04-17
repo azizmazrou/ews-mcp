@@ -67,6 +67,13 @@ EWS_PASSWORD=your-password
 EWS_SERVER_URL=https://your-exchange-server/EWS/Exchange.asmx
 EWS_AUTH_TYPE=basic
 TIMEZONE=Asia/Riyadh
+
+# SSE transport for Open WebUI. MCP_HOST must be 0.0.0.0 for the
+# port to be reachable from the Open WebUI container, and MCP_API_KEY
+# must be set — the server refuses a non-loopback bind without one.
+MCP_TRANSPORT=sse
+MCP_HOST=0.0.0.0
+MCP_API_KEY=$(openssl rand -hex 32 2>/dev/null || echo "change-me-32-chars-or-more")
 EOF
 
 # Start the server

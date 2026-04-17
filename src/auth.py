@@ -1,8 +1,6 @@
 """Authentication handlers for Exchange Web Services."""
 
 from exchangelib import Credentials, OAuth2Credentials, NTLM
-from msal import ConfidentialClientApplication
-from typing import Optional
 import logging
 
 from .config import Settings
@@ -15,7 +13,6 @@ class AuthHandler:
     def __init__(self, config: Settings):
         self.config = config
         self.logger = logging.getLogger(__name__)
-        self._token_cache: Optional[str] = None
 
     def get_credentials(self) -> Credentials:
         """Get appropriate credentials based on auth type."""
@@ -34,34 +31,17 @@ class AuthHandler:
             raise AuthenticationError(f"Authentication setup failed: {e}")
 
     def _get_oauth2_credentials(self) -> OAuth2Credentials:
-        """Get OAuth2 credentials using MSAL."""
+        """Build OAuth2 credentials. exchangelib manages the token lifecycle
+        internally via MSAL when given client_id/client_secret/tenant_id;
+        pre-fetching a token here only added latency and a failure surface.
+        """
         try:
-            # Create MSAL app
-            app = ConfidentialClientApplication(
-                client_id=self.config.ews_client_id,
-                client_credential=self.config.ews_client_secret,
-                authority=f"https://login.microsoftonline.com/{self.config.ews_tenant_id}"
-            )
-
-            # Get token
-            scopes = ["https://outlook.office365.com/.default"]
-            result = app.acquire_token_for_client(scopes=scopes)
-
-            if "access_token" not in result:
-                error = result.get("error_description", "Unknown error")
-                raise AuthenticationError(f"Failed to acquire OAuth2 token: {error}")
-
-            access_token = result["access_token"]
-            self._token_cache = access_token
-
-            # Return OAuth2 credentials
             return OAuth2Credentials(
                 client_id=self.config.ews_client_id,
                 client_secret=self.config.ews_client_secret,
                 tenant_id=self.config.ews_tenant_id,
                 identity=self.config.ews_email
             )
-
         except Exception as e:
             self.logger.error(f"OAuth2 authentication failed: {e}")
             raise AuthenticationError(f"OAuth2 setup failed: {e}")
@@ -89,7 +69,6 @@ class AuthHandler:
             raise AuthenticationError(f"NTLM auth failed: {e}")
 
     def refresh_token(self) -> None:
-        """Refresh OAuth2 token if needed."""
+        """Token refresh is handled inside exchangelib. Kept for API stability."""
         if self.config.ews_auth_type == "oauth2":
-            self.logger.info("Refreshing OAuth2 token")
-            self._get_oauth2_credentials()
+            self.logger.debug("OAuth2 token refresh is handled by exchangelib")

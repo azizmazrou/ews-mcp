@@ -47,16 +47,26 @@ class ThreadService:
         self.logger.info(f"Getting thread for message: {message_id}")
 
         try:
-            # Get the original message
-            # Search in multiple folders
+            # Get the original message. exchangelib exposes Deleted Items as
+            # `trash`, not `deleted`, so enumerate explicitly and skip folders
+            # that don't exist rather than catching a bare except.
             message = None
-            for folder_name in ['inbox', 'sent', 'drafts']:
-                folder = getattr(self.ews_client.account, folder_name)
+            account = self.ews_client.account
+            candidates = [
+                ('inbox', getattr(account, 'inbox', None)),
+                ('sent', getattr(account, 'sent', None)),
+                ('drafts', getattr(account, 'drafts', None)),
+                ('deleted', getattr(account, 'trash', None)),
+            ]
+            for folder_name, folder in candidates:
+                if folder is None:
+                    continue
                 try:
                     message = folder.get(id=message_id)
                     if message:
                         break
-                except:
+                except Exception as e:
+                    self.logger.debug(f"Message not in {folder_name}: {e}")
                     continue
 
             if not message:

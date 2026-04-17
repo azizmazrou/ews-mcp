@@ -125,20 +125,34 @@ async def test_download_attachment_as_file(mock_ews_client, tmp_path):
     mock_message.attachments = [mock_attachment]
     mock_ews_client.account.inbox.get.return_value = mock_message
 
-    # Use temporary path
-    save_path = tmp_path / "downloaded.pdf"
+    # The tool jails writes to EWS_DOWNLOAD_DIR (defaults to ./downloads).
+    # Point the jail at the pytest tmp_path and verify we still get the
+    # correct filename and content at the returned absolute path.
+    import os
+    from pathlib import Path
+    os.environ["EWS_DOWNLOAD_DIR"] = str(tmp_path)
+    # Re-import so the module picks up the new env var.
+    import importlib
+    from src.tools import attachment_tools as _at
+    importlib.reload(_at)
+
+    tool = _at.DownloadAttachmentTool(mock_ews_client)
 
     result = await tool.execute(
         message_id="test-id",
         attachment_id="att456",
         return_as="file_path",
-        save_path=str(save_path)
+        save_path="downloaded.pdf"
     )
 
     assert result["success"] is True
     assert result["name"] == "document.pdf"
     assert "file_path" in result
-    assert save_path.read_bytes() == b"PDF content here"
+    saved = Path(result["file_path"])
+    assert saved.name == "downloaded.pdf"
+    # Resolved path must live inside the jail (no traversal).
+    assert str(saved).startswith(str(tmp_path))
+    assert saved.read_bytes() == b"PDF content here"
 
 
 @pytest.mark.asyncio

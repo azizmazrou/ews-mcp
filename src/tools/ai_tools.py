@@ -3,8 +3,16 @@
 from typing import Any, Dict
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, find_message_across_folders
+from ..utils import format_success_response, safe_get, find_message_for_account
 from ..ai import get_ai_provider, get_embedding_provider, EmailClassificationService, EmbeddingService
+
+
+_TARGET_MAILBOX_SCHEMA = {
+    "target_mailbox": {
+        "type": "string",
+        "description": "Email address to operate on (requires EWS_IMPERSONATION_ENABLED=true)"
+    }
+}
 
 
 class SemanticSearchEmailsTool(BaseTool):
@@ -40,7 +48,8 @@ class SemanticSearchEmailsTool(BaseTool):
                         "default": 0.7,
                         "minimum": 0.0,
                         "maximum": 1.0
-                    }
+                    },
+                    **_TARGET_MAILBOX_SCHEMA
                 },
                 "required": ["query"]
             }
@@ -52,6 +61,7 @@ class SemanticSearchEmailsTool(BaseTool):
         folder_name = kwargs.get("folder", "inbox").lower()
         max_results = kwargs.get("max_results", 10)
         threshold = kwargs.get("threshold", 0.7)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not query:
             raise ToolExecutionError("query is required")
@@ -64,16 +74,18 @@ class SemanticSearchEmailsTool(BaseTool):
 
             embedding_service = EmbeddingService(embedding_provider, cache_dir="data/embeddings")
 
-            # Get folder
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+
             folder_map = {
-                "inbox": self.ews_client.account.inbox,
-                "sent": self.ews_client.account.sent,
-                "drafts": self.ews_client.account.drafts,
-                "archive": self.ews_client.account.archive,
-                "all": self.ews_client.account.inbox  # For now, just inbox
+                "inbox": account.inbox,
+                "sent": account.sent,
+                "drafts": account.drafts,
+                "archive": getattr(account, 'archive', account.inbox),
+                "all": account.inbox,  # Placeholder; "all" maps to inbox today
             }
 
-            folder = folder_map.get(folder_name, self.ews_client.account.inbox)
+            folder = folder_map.get(folder_name, account.inbox)
 
             # Fetch recent emails
             emails = list(folder.all().order_by('-datetime_received')[:100])
@@ -116,7 +128,8 @@ class SemanticSearchEmailsTool(BaseTool):
                 f"Found {len(formatted_results)} semantically similar emails",
                 query=query,
                 result_count=len(formatted_results),
-                results=formatted_results
+                results=formatted_results,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -144,7 +157,8 @@ class ClassifyEmailTool(BaseTool):
                         "type": "boolean",
                         "description": "Include spam/phishing detection",
                         "default": False
-                    }
+                    },
+                    **_TARGET_MAILBOX_SCHEMA
                 },
                 "required": ["message_id"]
             }
@@ -154,6 +168,7 @@ class ClassifyEmailTool(BaseTool):
         """Execute email classification."""
         message_id = kwargs.get("message_id")
         include_spam = kwargs.get("include_spam_detection", False)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -166,8 +181,10 @@ class ClassifyEmailTool(BaseTool):
 
             classification_service = EmailClassificationService(ai_provider)
 
-            # Find message across all folders (including custom subfolders)
-            message = find_message_across_folders(self.ews_client, message_id)
+            # Resolve account (honours target_mailbox when impersonation is enabled).
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+            message = find_message_for_account(account, message_id)
 
             # Extract email details
             subject = safe_get(message, 'subject', '')
@@ -188,7 +205,8 @@ class ClassifyEmailTool(BaseTool):
                 "Email classified successfully",
                 message_id=message_id,
                 subject=subject,
-                classification=classification
+                classification=classification,
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -218,7 +236,8 @@ class SummarizeEmailTool(BaseTool):
                         "default": 200,
                         "minimum": 50,
                         "maximum": 500
-                    }
+                    },
+                    **_TARGET_MAILBOX_SCHEMA
                 },
                 "required": ["message_id"]
             }
@@ -228,6 +247,7 @@ class SummarizeEmailTool(BaseTool):
         """Execute email summarization."""
         message_id = kwargs.get("message_id")
         max_length = kwargs.get("max_length", 200)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -240,8 +260,9 @@ class SummarizeEmailTool(BaseTool):
 
             classification_service = EmailClassificationService(ai_provider)
 
-            # Find message across all folders (including custom subfolders)
-            message = find_message_across_folders(self.ews_client, message_id)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+            message = find_message_for_account(account, message_id)
 
             # Extract email details
             subject = safe_get(message, 'subject', '')
@@ -261,7 +282,8 @@ class SummarizeEmailTool(BaseTool):
                 message_id=message_id,
                 subject=subject,
                 summary=summary,
-                summary_length=len(summary)
+                summary_length=len(summary),
+                mailbox=mailbox
             )
 
         except ToolExecutionError:
@@ -291,7 +313,8 @@ class SuggestRepliesTool(BaseTool):
                         "default": 3,
                         "minimum": 1,
                         "maximum": 5
-                    }
+                    },
+                    **_TARGET_MAILBOX_SCHEMA
                 },
                 "required": ["message_id"]
             }
@@ -301,6 +324,7 @@ class SuggestRepliesTool(BaseTool):
         """Execute smart reply suggestion generation."""
         message_id = kwargs.get("message_id")
         num_suggestions = kwargs.get("num_suggestions", 3)
+        target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -313,8 +337,9 @@ class SuggestRepliesTool(BaseTool):
 
             classification_service = EmailClassificationService(ai_provider)
 
-            # Find message across all folders (including custom subfolders)
-            message = find_message_across_folders(self.ews_client, message_id)
+            account = self.get_account(target_mailbox)
+            mailbox = self.get_mailbox_info(target_mailbox)
+            message = find_message_for_account(account, message_id)
 
             # Extract email details
             subject = safe_get(message, 'subject', '')
@@ -336,7 +361,8 @@ class SuggestRepliesTool(BaseTool):
                 message_id=message_id,
                 subject=subject,
                 suggestions=suggestions,
-                suggestion_count=len(suggestions)
+                suggestion_count=len(suggestions),
+                mailbox=mailbox
             )
 
         except ToolExecutionError:

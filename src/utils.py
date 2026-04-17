@@ -2,9 +2,11 @@
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
+import html
 import logging
 import os
 import json
+import re
 from exchangelib import EWSTimeZone, EWSDateTime, EWSDate
 import pytz
 
@@ -66,10 +68,12 @@ def make_tz_aware(dt: datetime) -> EWSDateTime:
     )
 
 
-def parse_datetime_tz_aware(dt_str: str) -> EWSDateTime:
+def parse_datetime_tz_aware(dt_str: Optional[str]) -> Optional[EWSDateTime]:
     """Parse ISO 8601 datetime string and return as EWSDateTime with EWSTimeZone.
 
-    This ensures all datetime objects used with exchangelib have the correct timezone format.
+    Returns None if the input is empty or unparseable. Callers that require
+    a value should check for None before using the result (assigning None to
+    exchangelib datetime fields is a hard-to-diagnose silent failure).
     """
     if not dt_str:
         return None
@@ -81,14 +85,16 @@ def parse_datetime_tz_aware(dt_str: str) -> EWSDateTime:
         # Convert to EWSDateTime with configured timezone
         return make_tz_aware(dt)
     except ValueError:
+        logging.getLogger(__name__).debug(f"parse_datetime_tz_aware: bad value: {dt_str!r}")
         return None
 
 
-def parse_date_tz_aware(date_str: str) -> EWSDate:
+def parse_date_tz_aware(date_str: Optional[str]) -> Optional[EWSDate]:
     """Parse ISO 8601 date/datetime string and return as EWSDate.
 
-    Used for task due_date and start_date fields which only accept EWSDate, not EWSDateTime.
-    Accepts both date-only strings (2025-11-15) and full datetime strings (2025-11-15T17:00:00+03:00).
+    Used for task due_date and start_date fields which only accept EWSDate,
+    not EWSDateTime. Accepts date-only ('2025-11-15') and datetime strings.
+    Returns None on empty/unparseable input.
     """
     if not date_str:
         return None
@@ -106,6 +112,7 @@ def parse_date_tz_aware(date_str: str) -> EWSDate:
         # Create EWSDate from the date components only (no time)
         return EWSDate(dt.year, dt.month, dt.day)
     except ValueError:
+        logging.getLogger(__name__).debug(f"parse_date_tz_aware: bad value: {date_str!r}")
         return None
 
 
@@ -126,10 +133,67 @@ def parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def sanitize_html(html: str) -> str:
-    """Basic HTML sanitization."""
-    # In production, use a proper HTML sanitizer like bleach
-    return html
+def escape_html(text: Any) -> str:
+    """HTML-escape an arbitrary value for safe interpolation into markup.
+
+    Returns an empty string for None. Accepts non-string values by coercing
+    to str. Use for every field that is embedded into an HTML template we
+    emit (reply/forward quoted headers, user-supplied body when treated as
+    plain text, etc.).
+    """
+    if text is None:
+        return ""
+    return html.escape(str(text), quote=True)
+
+
+def sanitize_html(html_content: str) -> str:
+    """Sanitize HTML that will be sent to Exchange.
+
+    Strips <script> and <style> blocks and dangerous inline handlers. This is
+    intentionally conservative — full allowlist sanitisation would require
+    bleach/lxml. Use escape_html for text that should never contain markup.
+    """
+    if not html_content:
+        return ""
+
+    cleaned = re.sub(
+        r"<\s*(script|style)[^>]*>.*?<\s*/\s*\1\s*>",
+        "",
+        html_content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Strip event handlers (onclick=, onerror=, ...). Matches on attribute
+    # boundaries to avoid clobbering CSS selectors.
+    cleaned = re.sub(
+        r"(?i)\son[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+        "",
+        cleaned,
+    )
+    # Neutralise javascript: URIs inside href/src attributes.
+    cleaned = re.sub(
+        r"(?i)(href|src)\s*=\s*([\"']?)\s*javascript:",
+        r"\1=\2about:blank;",
+        cleaned,
+    )
+    return cleaned
+
+
+def format_body_for_html(body: Optional[str]) -> str:
+    """Return an HTML-safe rendering of a user-supplied body.
+
+    - If the body already contains tags, run it through sanitize_html so
+      attacker-controlled markup is neutralised while the author's intent is
+      preserved.
+    - Otherwise treat it as plain text: HTML-escape and convert newlines to
+      <br/> so line breaks survive the round trip.
+    """
+    if not body:
+        return ""
+    body = body.strip()
+    looks_like_html = bool(re.search(r"<[^>]+>", body))
+    if looks_like_html:
+        return sanitize_html(body)
+    return escape_html(body).replace("\n", "<br/>")
 
 
 def truncate_text(text: str, max_length: int = 100) -> str:
@@ -378,6 +442,25 @@ def find_message_across_folders(ews_client, message_id):
     return find_message_for_account(ews_client.account, message_id)
 
 
+def _safe_content_id(file_name: str, index: int, existing: set) -> str:
+    """Produce a safe, unique cid: value from an arbitrary file name.
+
+    Content-ID values are embedded into HTML (`cid:...`) and should be ASCII
+    with no whitespace, `<`, `>`, quotes, or collision with other inlines in
+    the same message.
+    """
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", file_name).strip("-")
+    if not base:
+        base = f"inline-{index}"
+    candidate = base
+    suffix = 1
+    while candidate in existing:
+        suffix += 1
+        candidate = f"{base}-{suffix}"
+    existing.add(candidate)
+    return candidate
+
+
 def attach_inline_files(message, inline_attachments: list) -> int:
     """Attach base64-encoded files to an EWS message or calendar item.
 
@@ -396,19 +479,27 @@ def attach_inline_files(message, inline_attachments: list) -> int:
     from exchangelib import FileAttachment
 
     count = 0
-    for att in inline_attachments:
+    used_cids: set = set()
+    for index, att in enumerate(inline_attachments):
         file_name = att.get("file_name")
         file_content = att.get("file_content")
         if not file_name or not file_content:
             continue
 
         is_inline = att.get("is_inline", False)
+        content_id = (
+            att.get("content_id")
+            or (_safe_content_id(file_name, index, used_cids) if is_inline else None)
+        )
+        if is_inline and content_id:
+            used_cids.add(content_id)
+
         file_attachment = FileAttachment(
             name=file_name,
             content=base64.b64decode(file_content),
             content_type=att.get("content_type", "application/octet-stream"),
             is_inline=is_inline,
-            content_id=file_name if is_inline else None,
+            content_id=content_id,
         )
         message.attach(file_attachment)
         count += 1
