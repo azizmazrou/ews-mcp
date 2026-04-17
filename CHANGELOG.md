@@ -1,6 +1,171 @@
 # Changelog
 
-## Unreleased — Drafts, folder discovery, availability fixes
+## Unreleased — Security and reliability hardening
+
+This release closes the 6 HIGH-severity findings from the end-to-end security
+review and the top code-quality bugs found alongside them. **Behaviour
+changes that operators need to know about** are called out under
+"Breaking / operator-visible changes".
+
+### Security fixes (HIGH)
+
+- **S1 — Authenticated HTTP/SSE transport.** When `MCP_API_KEY` is set,
+  every request to `/sse`, `/messages`, `/openapi.json`, and
+  `/api/tools/{tool}` must present `Authorization: Bearer <key>` (or
+  `X-API-Key`). Only `/health` remains public. The OpenAPI schema now
+  advertises `bearerAuth` instead of the unenforced `basicAuth`.
+- **S2 — TLS verification restored by default.** The EWS HTTP adapter
+  no longer globally disables certificate verification. Set
+  `EWS_INSECURE_SKIP_VERIFY=true` to opt back in for internal Exchange
+  servers with private CAs — a `WARNING` log line is emitted when used.
+- **S3 — `download_attachment` path jail.** `save_path` is now treated
+  as a basename hint only; directory components and `..` are stripped
+  and the resolved path is verified to live inside `EWS_DOWNLOAD_DIR`
+  (defaults to `./downloads`). This closes the pre-auth
+  arbitrary-file-write → RCE chain with S1.
+- **S4 — HTML injection in reply/forward drafts fixed.** `reply_email`,
+  `forward_email`, `create_reply_draft`, and `create_forward_draft`
+  now HTML-escape the original message's From/To/Cc/Subject/Sent
+  fields and pass user-supplied bodies through a proper sanitiser
+  (`utils.sanitize_html`, which now actually removes `<script>`,
+  `<style>`, `on*=` handlers, and `javascript:` URIs). Plain-text
+  bodies are escaped and newline→`<br/>` converted.
+- **S5 — Audit log redaction.** `AuditLogger.log_operation` now runs
+  every `details` payload through a new `redact_sensitive()` helper
+  before writing to `audit.log`. Fields matching `password`, `token`,
+  `secret`, `api_key`, `authorization`, `body`, `html_body`,
+  `text_body`, `file_content`, `content_base64`, `mime_content`, or
+  `inline_attachments` are replaced with `[redacted]` / length hints.
+- **S6 — Default bind `127.0.0.1`.** `MCP_HOST` defaults to loopback;
+  the SSE startup now refuses to bind a non-loopback address without
+  `MCP_API_KEY`, and warns when running on loopback with no API key.
+
+### Code-quality fixes (High)
+
+- **C1** `read_attachment` now correctly extracts PDF / DOCX / XLSX.
+  The `_read_pdf`, `_read_docx`, `_read_excel` methods were incorrectly
+  placed on `AttachEmailToDraftTool` (they were unreachable from
+  `ReadAttachmentTool.execute`, which silently fell back to a generic
+  "Failed to read attachment" error for every non-TXT extraction).
+- **C2** `main.py` now returns **JSON** over the MCP transport.
+  Responses were built with `str(result)` (Python repr — single
+  quotes, `True/False/None`, opaque `str(datetime(...))`).
+- **C3** `find_meeting_times` fixes: slots outside the returned
+  `merged_free_busy` range are now treated as **unavailable** (they
+  were falsely reported as free), dead buffer-check code now actually
+  runs, and accepted slots advance by `duration_minutes` so the tool
+  stops emitting N overlapping 15-minute shifts of the same hour.
+- **C4** `EmailService.get_message` and `ThreadService.get_thread` now
+  use `account.trash` instead of the nonexistent `account.deleted`
+  (which previously raised and was swallowed by a bare `except:`,
+  silently skipping Deleted Items).
+- **C5** OAuth2 credential path simplified. `AuthHandler` no longer
+  pre-fetches an MSAL token that was then thrown away; `exchangelib`
+  already handles the OAuth2 token lifecycle internally.
+- **C6** Advanced search responses now stringify `ItemId` via
+  `ews_id_to_str` so `message_id` is a plain string, matching the
+  other search modes.
+
+### Code-quality fixes (Medium)
+
+- **C7** `RateLimiter`, `CircuitBreaker`, and `CacheAdapter` are now
+  thread-safe; a `threading.Lock` guards every mutating critical
+  section so concurrent tool executions don't race on the rate window,
+  failure count, or cache dict.
+- **C8** Inline-attachment `content_id` values are sanitized (spaces
+  → dashes, non-ASCII stripped) and de-duplicated so multiple inlines
+  with the same basename don't collide and so `cid:...` references
+  render correctly in Outlook/OWA.
+- **C9** `parse_datetime_tz_aware` / `parse_date_tz_aware` are now
+  annotated `Optional[...]` to match their actual behaviour; bad
+  inputs log a DEBUG line so silent None-assignment to exchangelib
+  fields stops being invisible.
+- **C10** `CreateReplyDraftTool` / `CreateForwardDraftTool` now use
+  `add_reply_prefix` / `add_forward_prefix` so threads no longer stack
+  "RE: RE: RE: …".
+- **C11** Plain-text bodies in reply/forward/draft tools are HTML-escaped
+  and newlines converted to `<br/>` (handled by the new
+  `utils.format_body_for_html`).
+- **C12** `ConnectionError` renamed to `EWSConnectionError` (alias
+  kept for one release). The old name shadowed the Python builtin of
+  the same name and broke `isinstance(e, ConnectionError)` matching
+  for real OS-level socket errors.
+- **C13** `GetCalendar` end-date heuristic no longer over-collects the
+  day after when the caller explicitly asks for events ending at
+  midnight; it now checks whether the input was date-only (no `T`).
+- **C14** `EmbeddingService._save_cache` writes atomically
+  (`tempfile` + `os.replace`) so a crash mid-write cannot corrupt
+  `embeddings.json`.
+- **C15** `EmbeddingService.embed_batch` no longer has an O(N²)
+  `indices_to_embed.index(i)` lookup; replaced with positional
+  iteration.
+- **C16** `openapi_adapter.handle_rest_request` now returns a proper
+  HTTP status (400 / 401 / 429 / 503 / 500) when a tool fails, matching
+  the advertised OpenAPI responses.
+- **C17** Tool-count comments corrected in `main.py` (42 base + 4 AI = 46).
+- **C19** AI tools (`semantic_search_emails`, `classify_email`,
+  `summarize_email`, `suggest_replies`) now accept `target_mailbox`
+  for impersonation — they used to be the only four tools that
+  ignored it.
+
+### Code-quality fixes (Low)
+
+- **C21** Remaining bare `except:` clauses in `attachment_service.py`
+  replaced with logged `except Exception:` blocks.
+- **C22** `run_server.py` no longer hardcodes `C:\Tools\ews-mcp`. It
+  uses `os.path.dirname(os.path.abspath(__file__))` so the MSIX
+  wrapper works from any install location on any OS.
+- **C25** Config now logs when `AI_MODEL` / `AI_EMBEDDING_MODEL`
+  defaults are applied (previously silent) and warns when semantic
+  search is enabled against a local provider without
+  `AI_EMBEDDING_MODEL` set.
+
+### New settings
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MCP_API_KEY` | — | Bearer token required on every non-`/health` request on the SSE transport |
+| `MCP_HOST` | `127.0.0.1` (was `0.0.0.0`) | Bind address for SSE |
+| `EWS_INSECURE_SKIP_VERIFY` | `false` | Opt-in for internal Exchange with private CAs |
+| `EWS_DOWNLOAD_DIR` | `downloads` | Jail directory for `download_attachment` writes |
+
+### Breaking / operator-visible changes
+
+- **SSE transport binds `127.0.0.1` by default.** Docker-compose files
+  that expect the server on `0.0.0.0` must now set `MCP_HOST=0.0.0.0`
+  **and** `MCP_API_KEY=<secret>` — startup refuses the combination
+  without a key.
+- **TLS is verified by default.** Setups that depended on the old
+  behaviour must set `EWS_INSECURE_SKIP_VERIFY=true` or install the
+  internal CA bundle into the container's trust store.
+- **`download_attachment` save path is jailed.** Callers can no
+  longer pick an arbitrary filesystem location; only the basename of
+  `save_path` is honoured and the file is written under
+  `EWS_DOWNLOAD_DIR`. The response `file_path` shows the actual
+  location.
+- **MCP tool responses are now JSON** rather than Python repr.
+  Clients that relied on parsing `True`/`False`/single-quoted dicts
+  need to switch to `json.loads`.
+- **`ConnectionError` → `EWSConnectionError`.** The old name is
+  aliased for one release but should be replaced in any downstream
+  `except` / `isinstance` checks.
+
+### Files changed (18)
+
+`src/main.py`, `src/config.py`, `src/auth.py`, `src/ews_client.py`,
+`src/exceptions.py`, `src/utils.py`, `src/openapi_adapter.py`,
+`src/middleware/logging.py`, `src/middleware/rate_limiter.py`,
+`src/middleware/circuit_breaker.py`, `src/middleware/error_handler.py`,
+`src/adapters/cache_adapter.py`, `src/tools/attachment_tools.py`,
+`src/tools/email_tools.py`, `src/tools/email_tools_draft.py`,
+`src/tools/calendar_tools.py`, `src/tools/ai_tools.py`,
+`src/services/email_service.py`, `src/services/thread_service.py`,
+`src/services/attachment_service.py`, `src/ai/embedding_service.py`,
+`run_server.py`, `tests/test_attachment_tools.py`.
+
+---
+
+## Prior to this release (also unreleased) — Drafts, folder discovery, availability fixes
 
 ### New Tools (+4)
 

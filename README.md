@@ -86,7 +86,7 @@ manage_folder(action="create", folder_name="Archive")
 manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
 ```
 
-> Every **base tool (42)** accepts `target_mailbox` for impersonation/delegation. The 4 optional AI tools currently act only on the primary mailbox — see [Known limitations](#known-limitations).
+> All **46 tools** (42 base + 4 AI) accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`.
 
 ---
 
@@ -171,6 +171,13 @@ EWS_AUTH_TYPE=basic
 EWS_USERNAME=user@company.com
 EWS_PASSWORD=your-password
 TIMEZONE=UTC
+
+# If you plan to reach the SSE transport from outside the container,
+# set MCP_HOST=0.0.0.0 AND an API key — the server refuses to bind a
+# non-loopback address without an API key.
+# MCP_TRANSPORT=sse
+# MCP_HOST=0.0.0.0
+# MCP_API_KEY=$(openssl rand -hex 32)
 EOF
 
 # Run
@@ -301,7 +308,7 @@ python -m src.main
 
 ### AI (4, optional)
 
-Enabled per-feature via `enable_ai=true` plus individual flags. These tools currently act on the **primary mailbox only** (they do not honor `target_mailbox` — see [Known limitations](#known-limitations)).
+Enabled per-feature via `enable_ai=true` plus individual flags. Accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`.
 
 | Tool | Description | Feature flag |
 |------|-------------|--------------|
@@ -499,6 +506,8 @@ All settings are parsed by `src/config.py` (Pydantic `Settings`). Examples live 
 |----------|---------|-------------|
 | `EWS_SERVER_URL` | — | Explicit server URL; if empty, autodiscover is used |
 | `EWS_AUTODISCOVER` | `true` | Enable Exchange autodiscover |
+| `EWS_INSECURE_SKIP_VERIFY` | `false` | Disable TLS certificate verification for EWS traffic. Opt-in only — use when the corporate Exchange uses a private CA that cannot be installed into the container trust store. |
+| `EWS_DOWNLOAD_DIR` | `downloads` | Jail directory for `download_attachment` writes (`save_path` is treated as a basename hint only). |
 
 #### Auth — OAuth2 (Office 365)
 
@@ -527,8 +536,9 @@ All settings are parsed by `src/config.py` (Pydantic `Settings`). Examples live 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` (HTTP + Server-Sent Events) |
-| `MCP_HOST` | `0.0.0.0` | Bind address for SSE (override to `127.0.0.1` for local-only) |
+| `MCP_HOST` | `127.0.0.1` | Bind address for SSE. Non-loopback values require `MCP_API_KEY` |
 | `MCP_PORT` | `8000` | Port for SSE |
+| `MCP_API_KEY` | — | Required bearer token on every non-`/health` request when the server is reachable beyond loopback. Clients send `Authorization: Bearer <key>` or `X-API-Key: <key>`. |
 | `MCP_SERVER_NAME` | `ews-mcp-server` | Identifier advertised to MCP clients |
 
 #### OpenAPI (SSE transport)
@@ -655,15 +665,31 @@ EWS MCP Server
 
 ---
 
-## Known limitations
+## Security & operations notes
 
-Items to be aware of when deploying. See [CHANGELOG.md](CHANGELOG.md) for the full history.
+Things to be aware of when deploying. See the Unreleased section of
+[CHANGELOG.md](CHANGELOG.md) for the specific hardening work this covers.
 
-- **AI tools do not honor `target_mailbox`.** `semantic_search_emails`, `classify_email`, `summarize_email`, and `suggest_replies` always operate on the primary authenticated mailbox. Use non-AI tools (`read_emails`, `search_emails`, `get_email_details`) with impersonation when you need multi-mailbox behaviour.
-- **`read_attachment` extracts PDF / DOCX / XLSX only.** Other formats fall through to the default "text/plain only" path.
-- **SSE transport is unauthenticated by default.** `MCP_HOST` defaults to `0.0.0.0`. For any deployment that is reachable beyond localhost, put the server behind an auth-enforcing reverse proxy or bind to `127.0.0.1`. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-- **Global TLS verification.** The EWS HTTP adapter currently does not verify server certificates. Intended for corporate environments with internal CAs; review before exposing to untrusted networks.
-- **Audit log content.** The audit log currently records tool arguments. Review `logs/` retention and access control if arguments may contain sensitive payloads.
+- **SSE transport now defaults to loopback.** `MCP_HOST` defaults to
+  `127.0.0.1`. To expose the server on a non-loopback address you
+  must also set `MCP_API_KEY=<secret>` — clients then pass
+  `Authorization: Bearer <secret>` (or `X-API-Key: <secret>`) on every
+  non-`/health` request. Startup refuses the insecure combination.
+- **TLS verification is on by default.** Set
+  `EWS_INSECURE_SKIP_VERIFY=true` only if your internal Exchange
+  server uses a private CA that cannot be installed into the container's
+  trust store. A warning is logged when this is enabled.
+- **Attachment downloads are jailed.** `download_attachment(save_path=...)`
+  now writes inside `EWS_DOWNLOAD_DIR` (default `./downloads`);
+  directory components and `..` in the caller-supplied path are
+  stripped. The response `file_path` tells you the resolved location.
+- **Audit-log redaction.** Email bodies, token fields, and base64
+  attachment content are replaced with `[redacted]` before being
+  written to `audit.log`.
+- **AI tools now honour `target_mailbox`.** All 46 tools (42 base + 4 AI)
+  accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`.
+- **`read_attachment` supports PDF / DOCX / XLSX / TXT.** Other formats
+  return an "Unsupported file type" error.
 
 ## Version History
 

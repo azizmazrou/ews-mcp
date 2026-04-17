@@ -11,9 +11,16 @@ class AuthenticationError(EWSMCPException):
     pass
 
 
-class ConnectionError(EWSMCPException):
+class EWSConnectionError(EWSMCPException):
     """Connection to Exchange failed."""
     pass
+
+
+# Deprecated alias. `ConnectionError` shadows the Python builtin of the same
+# name, so `except ConnectionError` blocks in code that imported this name
+# silently stopped matching real OS-level socket/HTTP errors. New code should
+# use `EWSConnectionError`; this alias is retained for one release.
+ConnectionError = EWSConnectionError  # noqa: A001
 
 
 class RateLimitError(EWSMCPException):

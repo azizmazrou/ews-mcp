@@ -6,6 +6,7 @@ Trips after N consecutive failures, resets after timeout.
 
 import time
 import logging
+import threading
 from enum import Enum
 from typing import Optional
 
@@ -19,7 +20,12 @@ class CircuitState(str, Enum):
 
 
 class CircuitBreaker:
-    """Simple circuit breaker for EWS operations."""
+    """Thread-safe circuit breaker for EWS operations.
+
+    A single lock guards state/count transitions so concurrent tool
+    executions (SSE + asyncio.gather) can't race on failure counts or
+    on the CLOSED → OPEN → HALF_OPEN → CLOSED walk.
+    """
 
     def __init__(
         self,
@@ -34,45 +40,49 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time: Optional[float] = None
         self.logger = logging.getLogger(__name__)
+        self._lock = threading.Lock()
 
     def check(self) -> None:
         """Check if requests are allowed. Raises if circuit is open."""
-        if self.state == CircuitState.CLOSED:
-            return
-
-        if self.state == CircuitState.OPEN:
-            elapsed = time.time() - (self.last_failure_time or 0)
-            if elapsed >= self.reset_timeout:
-                self.state = CircuitState.HALF_OPEN
-                self.logger.info(f"Circuit '{self.name}' half-open, allowing probe request")
+        with self._lock:
+            if self.state == CircuitState.CLOSED:
                 return
-            raise ToolExecutionError(
-                f"Exchange unavailable (circuit open). Retry in {int(self.reset_timeout - elapsed)}s."
-            )
 
-        # HALF_OPEN: allow one probe request
-        return
+            if self.state == CircuitState.OPEN:
+                elapsed = time.time() - (self.last_failure_time or 0)
+                if elapsed >= self.reset_timeout:
+                    self.state = CircuitState.HALF_OPEN
+                    self.logger.info(f"Circuit '{self.name}' half-open, allowing probe request")
+                    return
+                raise ToolExecutionError(
+                    f"Exchange unavailable (circuit open). Retry in {int(self.reset_timeout - elapsed)}s."
+                )
+
+            # HALF_OPEN: allow one probe request
+            return
 
     def record_success(self) -> None:
         """Record a successful request."""
-        if self.state == CircuitState.HALF_OPEN:
-            self.logger.info(f"Circuit '{self.name}' recovered, closing")
-        self.state = CircuitState.CLOSED
-        self.failure_count = 0
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.logger.info(f"Circuit '{self.name}' recovered, closing")
+            self.state = CircuitState.CLOSED
+            self.failure_count = 0
 
     def record_failure(self) -> None:
         """Record a failed request."""
-        self.failure_count += 1
-        self.last_failure_time = time.time()
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
 
-        if self.state == CircuitState.HALF_OPEN:
-            self.state = CircuitState.OPEN
-            self.logger.warning(f"Circuit '{self.name}' re-opened after probe failure")
-        elif self.failure_count >= self.failure_threshold:
-            self.state = CircuitState.OPEN
-            self.logger.warning(
-                f"Circuit '{self.name}' opened after {self.failure_count} consecutive failures"
-            )
+            if self.state == CircuitState.HALF_OPEN:
+                self.state = CircuitState.OPEN
+                self.logger.warning(f"Circuit '{self.name}' re-opened after probe failure")
+            elif self.failure_count >= self.failure_threshold:
+                self.state = CircuitState.OPEN
+                self.logger.warning(
+                    f"Circuit '{self.name}' opened after {self.failure_count} consecutive failures"
+                )
 
 
 # Global instance

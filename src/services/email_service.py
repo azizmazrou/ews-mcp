@@ -130,14 +130,27 @@ class EmailService:
             EmailMessage object or None
         """
         try:
-            # Search in multiple folders
-            for folder_name in ['inbox', 'sent', 'drafts', 'deleted']:
-                folder = getattr(self.ews_client.account, folder_name)
+            # Search across the common folders. exchangelib exposes the
+            # Deleted Items folder as `trash`, not `deleted` — fetching
+            # `account.deleted` used to raise and get swallowed by a bare
+            # except, silently dropping messages in Deleted Items.
+            account = self.ews_client.account
+            candidates = [
+                ('inbox', getattr(account, 'inbox', None)),
+                ('sent', getattr(account, 'sent', None)),
+                ('drafts', getattr(account, 'drafts', None)),
+                ('deleted', getattr(account, 'trash', None)),
+                ('junk', getattr(account, 'junk', None)),
+            ]
+            for folder_name, folder in candidates:
+                if folder is None:
+                    continue
                 try:
                     message = folder.get(id=message_id)
                     if message:
                         return EmailMessage.from_ews_message(message)
-                except:
+                except Exception as e:
+                    self.logger.debug(f"Message not in {folder_name}: {e}")
                     continue
 
             return None

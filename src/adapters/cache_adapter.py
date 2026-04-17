@@ -1,6 +1,7 @@
 """Simple in-memory cache adapter for EWS MCP v3.0."""
 
 import logging
+import threading
 from typing import Any, Optional, Dict, Callable
 from datetime import datetime, timedelta
 import asyncio
@@ -11,6 +12,10 @@ class CacheAdapter:
     Simple in-memory cache with TTL support.
 
     Reduces load on Exchange servers by caching frequent queries.
+
+    Thread-safe: a single lock guards the underlying dict so concurrent
+    get/set/delete calls from the SSE transport and asyncio.gather paths
+    don't race on read-modify-write sequences.
     """
 
     # Default cache durations (seconds)
@@ -28,6 +33,7 @@ class CacheAdapter:
         self.logger = logging.getLogger(__name__)
         self.hit_count = 0
         self.miss_count = 0
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[Any]:
         """
@@ -39,19 +45,21 @@ class CacheAdapter:
         Returns:
             Cached value if exists and not expired, None otherwise
         """
-        if key not in self.cache:
-            self.miss_count += 1
-            return None
+        with self._lock:
+            if key not in self.cache:
+                self.miss_count += 1
+                return None
 
-        value, expires_at = self.cache[key]
+            value, expires_at = self.cache[key]
 
-        # Check if expired
-        if datetime.now() >= expires_at:
-            del self.cache[key]
-            self.miss_count += 1
-            return None
+            # Check if expired
+            if datetime.now() >= expires_at:
+                del self.cache[key]
+                self.miss_count += 1
+                return None
 
-        self.hit_count += 1
+            self.hit_count += 1
+
         self.logger.debug(f"Cache HIT: {key}")
         return value
 
@@ -71,20 +79,23 @@ class CacheAdapter:
         """
         duration = duration or 300
         expires_at = datetime.now() + timedelta(seconds=duration)
-        self.cache[key] = (value, expires_at)
+        with self._lock:
+            self.cache[key] = (value, expires_at)
         self.logger.debug(f"Cache SET: {key} (TTL: {duration}s)")
 
     def delete(self, key: str) -> None:
         """Delete key from cache."""
-        if key in self.cache:
-            del self.cache[key]
-            self.logger.debug(f"Cache DELETE: {key}")
+        with self._lock:
+            if key in self.cache:
+                del self.cache[key]
+                self.logger.debug(f"Cache DELETE: {key}")
 
     def clear(self) -> None:
         """Clear all cache."""
-        self.cache.clear()
-        self.hit_count = 0
-        self.miss_count = 0
+        with self._lock:
+            self.cache.clear()
+            self.hit_count = 0
+            self.miss_count = 0
         self.logger.info("Cache cleared")
 
     async def get_or_fetch(

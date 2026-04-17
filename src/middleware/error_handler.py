@@ -5,7 +5,7 @@ from typing import Any, Dict
 from ..exceptions import (
     EWSMCPException,
     AuthenticationError,
-    ConnectionError,
+    EWSConnectionError,
     RateLimitError,
     ValidationError,
     ToolExecutionError
@@ -23,7 +23,7 @@ class ErrorHandler:
         error_msg = f"{context}: {str(e)}" if context else str(e)
 
         # Log based on error type
-        if isinstance(e, (AuthenticationError, ConnectionError)):
+        if isinstance(e, (AuthenticationError, EWSConnectionError)):
             self.logger.error(f"Critical error: {error_msg}")
         elif isinstance(e, (ValidationError, RateLimitError)):
             self.logger.warning(f"User error: {error_msg}")
@@ -42,5 +42,5 @@ class ErrorHandler:
 
     def _is_retryable(self, e: Exception) -> bool:
         """Determine if error is retryable."""
-        retryable_types = (ConnectionError, RateLimitError)
+        retryable_types = (EWSConnectionError, RateLimitError)
         return isinstance(e, retryable_types)

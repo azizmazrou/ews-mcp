@@ -6,14 +6,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import logging
 import pytz
 from typing import Optional, Dict
-import urllib3
 
 from .config import Settings
 from .auth import AuthHandler
-from .exceptions import ConnectionError, AuthenticationError
-
-# Suppress SSL warnings when using NoVerifyHTTPAdapter
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from .exceptions import EWSConnectionError, AuthenticationError
 
 
 class EWSClient:
@@ -26,8 +22,20 @@ class EWSClient:
         self._account: Optional[Account] = None
         self._impersonated_accounts: Dict[str, Account] = {}
 
-        # Configure exchangelib
-        BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
+        # TLS verification: verified by default. Only disable when the operator
+        # explicitly sets EWS_INSECURE_SKIP_VERIFY=true (e.g. internal Exchange
+        # with a private CA that cannot be installed into the container trust
+        # store). Downgrading to NoVerifyHTTPAdapter opens a MITM risk for
+        # credentials and tokens — log loudly.
+        if getattr(self.config, "ews_insecure_skip_verify", False):
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
+            self.logger.warning(
+                "EWS_INSECURE_SKIP_VERIFY=true: TLS certificate verification "
+                "DISABLED for all Exchange traffic. This is unsafe on untrusted "
+                "networks. Prefer installing your internal CA bundle."
+            )
 
     @property
     def account(self) -> Account:
@@ -127,7 +135,7 @@ class EWSClient:
                 )
             else:
                 # No server URL and autodiscover disabled
-                raise ConnectionError(
+                raise EWSConnectionError(
                     "No EWS_SERVER_URL provided and EWS_AUTODISCOVER is disabled. "
                     "Either provide EWS_SERVER_URL or enable EWS_AUTODISCOVER."
                 )
@@ -142,7 +150,7 @@ class EWSClient:
             raise
         except Exception as e:
             self.logger.error(f"Failed to create account: {e}")
-            raise ConnectionError(f"Failed to connect to Exchange: {e}")
+            raise EWSConnectionError(f"Failed to connect to Exchange: {e}")
 
     def test_connection(self) -> bool:
         """Test EWS connection."""
@@ -178,7 +186,7 @@ class EWSClient:
             Account object for the specified mailbox
 
         Raises:
-            ConnectionError: If impersonation is not enabled or fails
+            EWSConnectionError: If impersonation is not enabled or fails
         """
         # Return primary account if no target specified
         if not target_mailbox or target_mailbox.lower() == self.config.ews_email.lower():
@@ -186,7 +194,7 @@ class EWSClient:
 
         # Check if impersonation is enabled
         if not self.config.ews_impersonation_enabled:
-            raise ConnectionError(
+            raise EWSConnectionError(
                 f"Impersonation not enabled. Set EWS_IMPERSONATION_ENABLED=true "
                 f"to access mailbox: {target_mailbox}"
             )
@@ -246,7 +254,7 @@ class EWSClient:
                     default_timezone=tz
                 )
             else:
-                raise ConnectionError(
+                raise EWSConnectionError(
                     "No EWS_SERVER_URL provided and EWS_AUTODISCOVER is disabled."
                 )
 
@@ -261,7 +269,7 @@ class EWSClient:
 
         except Exception as e:
             self.logger.error(f"Failed to access mailbox {target_mailbox}: {e}")
-            raise ConnectionError(
+            raise EWSConnectionError(
                 f"Failed to access mailbox {target_mailbox}: {e}. "
                 f"Ensure the service account has ApplicationImpersonation role "
                 f"or delegate access to this mailbox."

@@ -22,8 +22,9 @@ from .middleware.rate_limiter import RateLimiter
 from .exceptions import EWSMCPException
 from .logging_system import get_logger
 from .openapi_adapter import OpenAPIAdapter
+from .utils import safe_json_dumps
 
-# Import all tool classes (up to 42 tools total: 38 base + 4 AI)
+# Import all tool classes (46 total: 42 base + 4 optional AI)
 from .tools import (
     CreateDraftTool, CreateReplyDraftTool, CreateForwardDraftTool,
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
@@ -150,7 +151,7 @@ class EWSMCPServer:
                 except Exception as e:
                     return [TextContent(
                         type="text",
-                        text=str(self.error_handler.handle_exception(e, f"Rate limit"))
+                        text=safe_json_dumps(self.error_handler.handle_exception(e, f"Rate limit"))
                     )]
 
             # Check if tool exists
@@ -162,7 +163,7 @@ class EWSMCPServer:
                 }
                 return [TextContent(
                     type="text",
-                    text=str(error_response)
+                    text=safe_json_dumps(error_response)
                 )]
 
             # Execute tool
@@ -172,7 +173,8 @@ class EWSMCPServer:
             try:
                 result = await tool.safe_execute(**arguments)
 
-                # Audit log
+                # Audit log — AuditLogger.log_operation redacts sensitive
+                # fields (body/token/attachment content) before writing.
                 if self.settings.enable_audit_log:
                     self.audit_logger.log_operation(
                         operation=name,
@@ -183,7 +185,7 @@ class EWSMCPServer:
 
                 return [TextContent(
                     type="text",
-                    text=str(result)
+                    text=safe_json_dumps(result)
                 )]
 
             except Exception as e:
@@ -191,14 +193,14 @@ class EWSMCPServer:
                 error_response = self.error_handler.handle_exception(e, f"Tool: {name}")
                 return [TextContent(
                     type="text",
-                    text=str(error_response)
+                    text=safe_json_dumps(error_response)
                 )]
 
     def register_tools(self):
-        """Register all enabled tools (36 base tools, up to 40 with AI)."""
+        """Register all enabled tools (42 base tools, up to 46 with AI)."""
         tool_classes = []
 
-        # Email tools (11 tools — search_emails includes quick/advanced/full_text modes)
+        # Email tools (10 core + 3 drafts = 13)
         if self.settings.enable_email:
             tool_classes.extend([
                 CreateDraftTool,
@@ -382,6 +384,12 @@ class EWSMCPServer:
                     )
             elif self.settings.mcp_transport == "sse":
                 self.logger.info(f"Server ready - listening on http://{self.settings.mcp_host}:{self.settings.mcp_port}")
+                if not self.settings.mcp_api_key:
+                    self.logger.warning(
+                        "SSE transport is running without MCP_API_KEY. Only /health is public; "
+                        "all other endpoints accept unauthenticated requests. Bind to 127.0.0.1 "
+                        "or set MCP_API_KEY before exposing the port beyond localhost."
+                    )
                 await self.run_sse()
 
         except KeyboardInterrupt:
@@ -451,12 +459,64 @@ class EWSMCPServer:
                     except Exception:
                         pass  # Connection already broken
 
+        # API key verification for non-health endpoints.
+        # When MCP_API_KEY is set, every request (except /health) must include
+        # either `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+        api_key = self.settings.mcp_api_key
+
+        async def _send_401(send, reason: str = "Unauthorized") -> None:
+            body = b'{"success":false,"error":"' + reason.encode("utf-8") + b'"}'
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(body)).encode()],
+                    [b"www-authenticate", b'Bearer realm="ews-mcp"'],
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+
+        def _authorized(headers: list) -> bool:
+            if not api_key:
+                return True
+            for name, value in headers:
+                name_lower = name.lower() if isinstance(name, bytes) else name.encode().lower()
+                if name_lower == b"authorization":
+                    raw = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+                    if raw.lower().startswith("bearer "):
+                        if raw[7:].strip() == api_key:
+                            return True
+                elif name_lower == b"x-api-key":
+                    raw = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+                    if raw.strip() == api_key:
+                        return True
+            return False
+
         # Create a simple ASGI router that handles both MCP and REST endpoints
         async def app(scope, receive, send):
             """ASGI router for MCP SSE transport + REST API."""
             if scope["type"] == "http":
                 path = scope["path"]
                 method = scope["method"]
+
+                # Health check is always public
+                if path == "/health" and method == "GET":
+                    await send({
+                        "type": "http.response.start",
+                        "status": 200,
+                        "headers": [[b"content-type", b"application/json"]],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"status":"ok","tools":' + str(len(self.tools)).encode() + b'}',
+                    })
+                    return
+
+                # All other endpoints require auth when MCP_API_KEY is set
+                if not _authorized(scope.get("headers") or []):
+                    await _send_401(send)
+                    return
 
                 # MCP SSE endpoints
                 if path == "/sse" and method == "GET":
@@ -515,18 +575,6 @@ class EWSMCPServer:
                     await send({
                         "type": "http.response.body",
                         "body": response_body,
-                    })
-
-                elif path == "/health" and method == "GET":
-                    # Health check
-                    await send({
-                        "type": "http.response.start",
-                        "status": 200,
-                        "headers": [[b"content-type", b"application/json"]],
-                    })
-                    await send({
-                        "type": "http.response.body",
-                        "body": b'{"status":"ok","tools":' + str(len(self.tools)).encode() + b'}',
                     })
 
                 else:

@@ -153,15 +153,19 @@ class OpenAPIAdapter:
             ],
             "components": {
                 "securitySchemes": {
-                    "basicAuth": {
+                    "bearerAuth": {
                         "type": "http",
-                        "scheme": "basic",
-                        "description": "Exchange credentials passed via environment variables"
+                        "scheme": "bearer",
+                        "description": (
+                            "Set MCP_API_KEY on the server; clients send "
+                            "'Authorization: Bearer <key>' (or X-API-Key header) "
+                            "on every non-health request."
+                        )
                     }
                 }
             },
             "security": [
-                {"basicAuth": []}
+                {"bearerAuth": []}
             ]
         }
 
@@ -250,12 +254,28 @@ class OpenAPIAdapter:
             tool = self.tools[tool_name]
             result = await tool.safe_execute(**arguments)
 
-            # Return successful response
+            # Map tool-level failure to an HTTP status so proxies / clients
+            # can branch on the transport-level result. Tools surface the
+            # category in result["error_type"] when available.
+            status = 200
+            if not result.get("success", False):
+                error_type = str(result.get("error_type", "")).lower()
+                if "validation" in error_type:
+                    status = 400
+                elif "authentication" in error_type:
+                    status = 401
+                elif "ratelimit" in error_type or "rate_limit" in error_type:
+                    status = 429
+                elif "connection" in error_type:
+                    status = 503
+                else:
+                    status = 500
+
             return {
                 "success": result.get("success", False),
                 "data": result,
-                "message": result.get("message", ""),
-                "status": 200
+                "message": result.get("message", result.get("error", "")),
+                "status": status
             }
 
         except Exception as e:

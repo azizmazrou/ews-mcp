@@ -37,6 +37,9 @@ logs/*
 logs/analysis/*
 !logs/analysis/.gitkeep
 
+# Attachment download jail (runtime-only, path set by EWS_DOWNLOAD_DIR)
+downloads/
+
 # OS
 .DS_Store
 Thumbs.db
