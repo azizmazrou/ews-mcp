@@ -159,6 +159,24 @@ class Settings(BaseSettings):
                         "AI_EMBEDDING_MODEL is not set. Set AI_EMBEDDING_MODEL "
                         "explicitly for local/OpenAI-compatible endpoints."
                     )
+            # Catch the common typo AI_EMBEDDING_MODEL=ollama (or any other
+            # provider name). Ollama needs the actual model name, e.g.
+            # 'nomic-embed-text'. Warn at load time so operators see it in
+            # the startup log instead of on the first semantic_search call.
+            if (
+                self.enable_semantic_search
+                and self.ai_embedding_model
+                and self.ai_embedding_model.strip().lower()
+                in {"ollama", "openai", "anthropic", "cohere", "voyage", "local"}
+            ):
+                _log.warning(
+                    "AI_EMBEDDING_MODEL=%r looks like a provider name, not a "
+                    "model name. Typical values: 'text-embedding-3-small' "
+                    "(OpenAI), 'nomic-embed-text' (Ollama), 'bge-m3' "
+                    "(BAAI). The upstream will likely return "
+                    "'model not found' — update AI_EMBEDDING_MODEL.",
+                    self.ai_embedding_model,
+                )
 
         return self
 

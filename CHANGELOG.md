@@ -1,5 +1,122 @@
 # Changelog
 
+## Unreleased — Bug 1 (find_meeting_times) + Bug 2 (embedding error surfacing)
+
+Two operator-reported regressions from the v3.4 security/reliability release
+are fixed here.
+
+### Bug 1 — `find_meeting_times` returned 0 suggestions on a free calendar
+
+`FindMeetingTimesTool.execute` read `busy_info.merged_free_busy`, but
+exchangelib's `FreeBusyView` exposes the merged availability string as
+`busy_info.merged` (the sibling tool `check_availability` was already
+reading `.merged` correctly — fixed in commit `f33632c`). After the C3
+fix that treats "missing merged data" as *busy*, this bug caused every
+slot to be rejected even when the mailbox was entirely free.
+
+**Fix:**
+
+- New helper `_extract_merged(busy_info)` in `src/tools/calendar_tools.py`
+  reads `.merged` first and falls back to the legacy `.merged_free_busy`
+  attribute, so behaviour is correct whatever exchangelib decides to
+  populate.
+- `FindMeetingTimesTool` now uses the helper.
+- A DEBUG-level diagnostic line logs `start_date`, `end_date`, `tzinfo`,
+  `len(availability_data)`, and a sample of merged-string lengths when
+  `LOG_LEVEL=DEBUG`, so this class of bug is trivial to diagnose next
+  time.
+
+### Bug 2 — `semantic_search_emails` silently returned 0 hits on embedding failure
+
+`OpenAIEmbeddingProvider.embed()` called `raise_for_status()` then
+indexed into `response.json()["data"][0]`. Two failure modes slipped past
+with generic error messages:
+
+- A non-2xx response from Ollama/OpenAI's embeddings endpoint (e.g.
+  `model "ollama" not found`) was wrapped in httpx's generic
+  `HTTPStatusError` text without the upstream body.
+- Some OpenAI-compat servers reply **HTTP 200 with an `{"error": ...}`
+  body** — the index access then raised `KeyError`, bubbling up as
+  "Failed to perform semantic search: 'data'".
+
+**Fix (in order of defence-in-depth):**
+
+1. **New `EmbeddingError` exception** (`src/exceptions.py`). Dedicated
+   error type callers can catch to distinguish embedding failures from
+   other tool errors.
+2. **`OpenAIEmbeddingProvider._post_embeddings`** (new): centralises the
+   HTTP call, pulls the upstream error message out of the body (handles
+   `{"error": {"message": ...}}` and `{"error": "string"}`), wraps
+   network failures with a clear message, and rejects 2xx responses with
+   a top-level `error` field or a missing `data` array.
+3. **`OpenAIEmbeddingProvider.health_check()`**: small probe method
+   callers can use at startup (or first invocation) to convert "0 hits
+   at query time" into a visible failure.
+4. **`SemanticSearchEmailsTool.execute`**:
+   - When the folder has no messages, return an explicit
+     `success: true, result_count: 0, message: "No messages found in
+     folder '...'"` — distinguishable from an embedding failure.
+   - When `EmbeddingError` is raised, surface the upstream message plus
+     an actionable hint:
+     `Embedding provider error: <upstream> | Hint: Verify
+     AI_EMBEDDING_MODEL matches an installed model at AI_BASE_URL (e.g.
+     'text-embedding-3-small' for OpenAI, 'nomic-embed-text' for Ollama).`
+5. **Config warning** (`src/config.py`): when
+   `ENABLE_SEMANTIC_SEARCH=true` and `AI_EMBEDDING_MODEL` is set to a
+   likely-provider-name (`ollama`, `openai`, `anthropic`, `cohere`,
+   `voyage`, `local`), log a warning at startup so operators catch the
+   typo before the first search call.
+6. **Size cap**: `embed_batch` refuses more than 256 inputs per call to
+   keep the process responsive; callers can iterate.
+
+### Acceptance (matches the bug reporter's test plan)
+
+Bug 1 — reproduction call against an all-free calendar now returns ≥ 5
+suggestions (up to `max_suggestions`).
+
+Bug 2 — with the wrong model, the repro call now returns:
+
+```json
+{
+  "success": false,
+  "error": "Embedding provider error: Embedding provider returned HTTP 404 for model 'ollama': model \"ollama\" not found, try pulling it first | Hint: Verify AI_EMBEDDING_MODEL matches an installed model at AI_BASE_URL (e.g. 'text-embedding-3-small' for OpenAI, 'nomic-embed-text' for Ollama)."
+}
+```
+
+With a correct model the call returns ranked results as before.
+
+### Tests
+
+`tests/test_bug_fixes.py` — 17 new tests:
+
+- `_extract_merged` helper: picks the current attribute, falls back to
+  legacy, returns None when absent.
+- `find_meeting_times`: all-free, partial-busy, missing-merged,
+  legacy-attribute paths.
+- `OpenAIEmbeddingProvider`: 404 + error body surfaced, 200 +
+  error-body surfaced, missing `data` rejected, mismatched batch size
+  rejected, empty input short-circuits without network, connection
+  errors wrapped, happy-path still returns a vector, provider-name
+  warning on init.
+- `SemanticSearchEmailsTool`: upstream error surfaced to operator with
+  hint, empty folder returns explicit "No messages" message.
+
+All 17 pass; full suite: 164 passing (was 147), 18 pre-existing failures
+unchanged.
+
+### Files changed
+
+```
+src/exceptions.py            (+10)  EmbeddingError
+src/ai/openai_provider.py    (+90, -15)  hardened HTTP + health_check
+src/tools/calendar_tools.py  (+30, -1)   _extract_merged + debug log
+src/tools/ai_tools.py        (+25, -5)   empty folder + embedding error
+src/config.py                (+18)  typo-warning for AI_EMBEDDING_MODEL
+tests/test_bug_fixes.py      (+330, new)
+```
+
+---
+
 ## Unreleased — Agent-secretary stack (memory, commitments, approvals, rules, briefings)
 
 Adds a persistent, per-mailbox state layer and 24 new MCP tools that
