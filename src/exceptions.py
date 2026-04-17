@@ -41,3 +41,14 @@ class ToolExecutionError(EWSMCPException):
 class ConfigurationError(EWSMCPException):
     """Configuration error."""
     pass
+
+
+class EmbeddingError(EWSMCPException):
+    """An AI embedding provider returned an error or malformed response.
+
+    Raised by ``OpenAIEmbeddingProvider`` when the upstream endpoint
+    (OpenAI, Ollama in OpenAI-compat mode, or any other compatible
+    provider) replies with a non-2xx status, an ``{"error": ...}`` body,
+    or a 2xx body that is missing the expected ``data`` array.
+    """
+    pass

@@ -2,7 +2,7 @@
 
 from typing import Any, Dict
 from .base import BaseTool
-from ..exceptions import ToolExecutionError
+from ..exceptions import EmbeddingError, ToolExecutionError
 from ..utils import format_success_response, safe_get, find_message_for_account
 from ..ai import get_ai_provider, get_embedding_provider, EmailClassificationService, EmbeddingService
 
@@ -102,14 +102,40 @@ class SemanticSearchEmailsTool(BaseTool):
                     "text": text
                 })
 
-            # Perform semantic search
-            results = await embedding_service.search_similar(
-                query=query,
-                documents=documents,
-                text_key="text",
-                top_k=max_results,
-                threshold=threshold
-            )
+            if not documents:
+                # No mail to rank — don't embed anything. Be explicit so the
+                # operator doesn't confuse this with an embedding failure.
+                return format_success_response(
+                    f"No messages found in folder {folder_name!r}",
+                    query=query,
+                    result_count=0,
+                    results=[],
+                    mailbox=mailbox,
+                    folder=folder_name,
+                )
+
+            # Probe the embedding endpoint with the query FIRST. If the
+            # provider is misconfigured (wrong model, wrong base_url,
+            # missing model in Ollama, etc.) we want the error to surface
+            # here rather than after scanning the inbox — and we want the
+            # upstream error message to appear verbatim in the response.
+            try:
+                results = await embedding_service.search_similar(
+                    query=query,
+                    documents=documents,
+                    text_key="text",
+                    top_k=max_results,
+                    threshold=threshold,
+                )
+            except EmbeddingError as exc:
+                hint = (
+                    "Verify AI_EMBEDDING_MODEL matches an installed model at "
+                    "AI_BASE_URL (e.g. 'text-embedding-3-small' for OpenAI, "
+                    "'nomic-embed-text' for Ollama)."
+                )
+                raise ToolExecutionError(
+                    f"Embedding provider error: {exc} | Hint: {hint}"
+                ) from exc
 
             # Format results
             formatted_results = []

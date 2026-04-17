@@ -1,6 +1,7 @@
 """Calendar operation tools for EWS MCP Server."""
 
-from typing import Any, Dict
+import logging
+from typing import Any, Dict, Optional
 from datetime import datetime, timedelta
 from exchangelib import CalendarItem, Mailbox, Attendee, EWSTimeZone
 
@@ -13,6 +14,26 @@ from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, 
 def build_free_busy_accounts(email_addresses):
     """Build exchangelib free/busy account tuples."""
     return [(email, "Required", False) for email in email_addresses]
+
+
+def _extract_merged(busy_info: Any) -> Optional[str]:
+    """Return the merged free/busy string for a FreeBusyView.
+
+    exchangelib's ``FreeBusyView`` exposes the merged string under ``.merged``.
+    Some earlier code (and callers) used the attribute name
+    ``merged_free_busy`` which is never populated by exchangelib; reading it
+    directly returns ``None`` and makes every slot look unavailable. We
+    accept both attributes here so behaviour stays correct if exchangelib
+    adds or renames an attribute upstream.
+    """
+    if busy_info is None:
+        return None
+    merged = safe_get(busy_info, "merged", None)
+    if merged:
+        return merged
+    # Fall back to the legacy/alternate name some external code may expose.
+    merged_alt = safe_get(busy_info, "merged_free_busy", None)
+    return merged_alt or None
 
 
 def get_timezone():
@@ -853,6 +874,19 @@ class FindMeetingTimesTool(BaseTool):
                 merged_free_busy_interval=15  # 15-minute intervals
             ))
 
+            # Diagnostic context useful when debugging bad suggestion output.
+            # Keep it compact so we don't flood logs at INFO.
+            if self.logger.isEnabledFor(logging.DEBUG):
+                sample_lens = [
+                    len(_extract_merged(info) or "") for info in availability_data[:3]
+                ]
+                self.logger.debug(
+                    "find_meeting_times: start=%s end=%s tz=%s attendees=%d "
+                    "availability_data=%d merged_lens_sample=%s",
+                    start_date, end_date, getattr(start_date, "tzinfo", None),
+                    len(attendees), len(availability_data), sample_lens,
+                )
+
             # Analyze availability and find open slots
             suggestions = []
             current_time = start_date
@@ -879,12 +913,16 @@ class FindMeetingTimesTool(BaseTool):
 
                 # Check if all attendees are available for the full slot.
                 # Treat missing data (slot past end of merged_free_busy) or
-                # attendees without a merged_free_busy response as BUSY so we
+                # attendees without a merged free/busy response as BUSY so we
                 # never surface a slot we couldn't actually verify.
                 all_available = True
                 buffer_available = True
                 for busy_info in availability_data:
-                    merged = getattr(busy_info, 'merged_free_busy', None)
+                    # exchangelib's FreeBusyView exposes `.merged`; older code
+                    # in this file (and some external references) used the
+                    # string `merged_free_busy`. Accept both so we don't
+                    # silently fail when the attribute shape changes.
+                    merged = _extract_merged(busy_info)
                     if not merged:
                         all_available = False
                         break
