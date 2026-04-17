@@ -555,6 +555,15 @@ class SendEmailTool(BaseTool):
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to send on behalf of (requires impersonation/delegate access)"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "When true, validate inputs and build the Message object but DO NOT send. "
+                            "Returns the computed subject/recipients/body preview. Useful for AI agents "
+                            "that want to 'what would this send' before committing."
+                        )
                     }
                 },
                 "required": ["to", "subject", "body"]
@@ -565,6 +574,7 @@ class SendEmailTool(BaseTool):
         """Send email via EWS."""
         # Get target mailbox for impersonation
         target_mailbox = kwargs.pop("target_mailbox", None)
+        dry_run = bool(kwargs.pop("dry_run", False))
 
         # Validate input
         request = self.validate_input(SendEmailRequest, **kwargs)
@@ -663,6 +673,30 @@ class SendEmailTool(BaseTool):
             if inline_count > 0:
                 attachment_count += inline_count
                 self.logger.info(f"Added {inline_count} inline (base64) attachment(s)")
+
+            # Dry-run short-circuit: return a preview of what WOULD be sent
+            # without actually calling message.send(). Nothing is persisted
+            # to Exchange, no Drafts entry is created.
+            if dry_run:
+                self.logger.info(
+                    f"DRY RUN: would send to {', '.join(request.to)} "
+                    f"with {attachment_count} attachment(s)"
+                )
+                body_preview = email_body[:280] + ("..." if len(email_body) > 280 else "")
+                return format_success_response(
+                    "Dry run — no email sent",
+                    dry_run=True,
+                    sent=False,
+                    would_send_to=request.to,
+                    would_cc=request.cc or [],
+                    would_bcc=request.bcc or [],
+                    subject=request.subject,
+                    body_preview=body_preview,
+                    body_type=body_type,
+                    attachments_count=attachment_count,
+                    importance=request.importance.value,
+                    mailbox=mailbox,
+                )
 
             # Send the message (attachments are included automatically)
             message.send()

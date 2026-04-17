@@ -1,5 +1,121 @@
 # Changelog
 
+## Unreleased — Agent-secretary stack (memory, commitments, approvals, rules, briefings)
+
+Adds a persistent, per-mailbox state layer and 24 new MCP tools that
+turn the server from a stateless Exchange client into an **agentic
+secretary**. See [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md) for
+the full guide.
+
+### New infrastructure
+
+- **`src/memory/`** — SQLite-backed, per-mailbox KV store with
+  namespaces, TTL, size caps (1 MiB/value, 50 MiB/namespace), atomic
+  read-delete (`consume`), and an audit table. Every mailbox gets its
+  own file under `EWS_MEMORY_DIR` (default `data/memory/`) with a
+  SHA-256-prefix filename — raw emails never touch the filesystem.
+- **Typed repositories** — `CommitmentRepo`, `ApprovalRepo`, `RuleRepo`,
+  `VoiceRepo`, `OOFPolicyRepo`. Each wraps the KV in a typed API and
+  validates inputs.
+- **BaseTool.get_memory_store()** — single helper every agent tool uses
+  to reach the store for the authenticated primary mailbox.
+
+### New MCP tools (24)
+
+- **Memory** (4): `memory_set`, `memory_get`, `memory_list`, `memory_delete`
+- **Commitments** (4): `track_commitment`, `list_commitments`,
+  `resolve_commitment`, `extract_commitments` (AI-assisted)
+- **Approval queue** (5): `submit_for_approval`,
+  `list_pending_approvals`, `approve`, `reject`,
+  `execute_approved_action` (atomic, single-use)
+- **Voice profile** (2): `build_voice_profile` (samples Sent folder,
+  AI-generates a style card), `get_voice_profile`
+- **Rule engine** (5): `rule_create`, `rule_list`, `rule_delete`,
+  `rule_simulate`, `evaluate_rules_on_message`. Match keys and action
+  types are strict allow-lists.
+- **OOF policy** (3): `configure_oof_policy`, `get_oof_policy`,
+  `apply_oof_policy` (creates drafts, never sends)
+- **Compound** (2): `generate_briefing` (inbox delta + meetings +
+  commitments + overdue tasks + VIP activity), `prepare_meeting`
+  (attendees + history + notes + attachment previews)
+
+### `send_email` gains `dry_run`
+
+`send_email(dry_run=true)` validates inputs, builds the Message object,
+and returns a preview without calling `message.send()` or touching the
+Drafts folder. Useful for "what would this send" pre-flight checks.
+
+### New config flags
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ENABLE_AGENT` | `true` | Registers the 24 agent-secretary tools |
+| `EWS_MEMORY_DIR` | `data/memory` | Jail for per-mailbox SQLite files |
+
+### Tool count
+
+- Base tools: 42 → **66** (24 new base tools under `ENABLE_AGENT=true`)
+- Optional AI tools: 4 → 4 (unchanged)
+- Grand total with everything on: **70**
+
+### Security properties
+
+- Per-mailbox file isolation by design (no shared tables between users)
+- SQL placeholder-only queries
+- Path jailing on the DB file directory
+- Strict alphabet for namespaces and keys
+- Value size caps + LRU pruning
+- Atomic `consume` for single-use approval tokens
+- Allow-lists for rule actions, match keys, and approval-queue actions
+- AI prompts enforce PII-redaction instructions for the voice profile
+- Forward rules only ever create drafts
+
+### Test coverage
+
+`tests/test_agent_secretary.py` — 23 new tests covering:
+- Memory roundtrip, isolation, key/namespace validation, size caps,
+  TTL expiry, list filtering, atomic consume, path jailing
+- Commitment lifecycle, overdue filter, validation errors
+- Approval submit/decide, action allow-list, double-consume refusal,
+  TTL validation
+- Rule action and match-key allow-lists, `fnmatch` semantics, AND
+  combination across multiple match keys
+- Voice and OOF repo roundtrips
+- Reserved-namespace refusal from generic memory tools
+
+All 23 pass; 18 pre-existing failures unchanged (147 passing total).
+
+### Files added
+
+```
+src/memory/__init__.py
+src/memory/store.py
+src/memory/models.py
+src/tools/memory_tools.py
+src/tools/commitment_tools.py
+src/tools/approval_tools.py
+src/tools/voice_tools.py
+src/tools/rule_tools.py
+src/tools/oof_policy_tools.py
+src/tools/briefing_tools.py
+src/tools/meeting_prep_tools.py
+tests/test_agent_secretary.py
+docs/AGENT_SECRETARY.md
+```
+
+### Known follow-ups (intentionally deferred)
+
+- Background watcher that fires `evaluate_rules_on_message` on
+  inbound mail via `exchangelib` streaming notifications. Manual
+  evaluation works today; the watcher is a separate infra change.
+- Scheduled/recurring agent tasks (cron-style). Out of scope for this
+  PR; plugs into the same memory layer when added.
+- Memory-backed voice application inside `suggest_replies` /
+  `create_reply_draft` prompts. The profile is stored and fetchable;
+  wiring it into each draft prompt is a narrow follow-up.
+
+---
+
 ## Unreleased — Security and reliability hardening
 
 This release closes the 6 HIGH-severity findings from the end-to-end security

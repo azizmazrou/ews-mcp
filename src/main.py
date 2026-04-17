@@ -24,7 +24,7 @@ from .logging_system import get_logger
 from .openapi_adapter import OpenAPIAdapter
 from .utils import safe_json_dumps
 
-# Import all tool classes (46 total: 42 base + 4 optional AI)
+# Import all tool classes (67 total: 63 base + 4 optional AI)
 from .tools import (
     CreateDraftTool, CreateReplyDraftTool, CreateForwardDraftTool,
     SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
@@ -53,7 +53,25 @@ from .tools import (
     SemanticSearchEmailsTool, ClassifyEmailTool,
     SummarizeEmailTool, SuggestRepliesTool,
     # Contact Intelligence tools (2) — communication_history/analyze_network merged into analyze_contacts
-    FindPersonTool, AnalyzeContactsTool
+    FindPersonTool, AnalyzeContactsTool,
+    # --- Agent-secretary tools ---
+    # Memory (4)
+    MemorySetTool, MemoryGetTool, MemoryListTool, MemoryDeleteTool,
+    # Commitments (4)
+    TrackCommitmentTool, ListCommitmentsTool, ResolveCommitmentTool,
+    ExtractCommitmentsTool,
+    # Approvals (5)
+    SubmitForApprovalTool, ListPendingApprovalsTool, ApproveTool, RejectTool,
+    ExecuteApprovedActionTool,
+    # Voice profile (2)
+    BuildVoiceProfileTool, GetVoiceProfileTool,
+    # Rule engine (5)
+    RuleCreateTool, RuleListTool, RuleDeleteTool, RuleSimulateTool,
+    EvaluateRulesOnMessageTool,
+    # OOF policy (3)
+    ConfigureOOFPolicyTool, GetOOFPolicyTool, ApplyOOFPolicyTool,
+    # Compound tools (2)
+    GenerateBriefingTool, PrepareMeetingTool,
 )
 
 class EWSMCPServer:
@@ -308,11 +326,43 @@ class EWSMCPServer:
             tool_classes.extend(ai_tools)
             self.logger.info(f"AI tools enabled ({len(ai_tools)} tools)")
 
+        # Agent-secretary tools (memory + commitments + approvals + rules +
+        # voice + OOF policy + briefing + meeting prep). Opt-in via
+        # ENABLE_AGENT (default True).
+        if getattr(self.settings, "enable_agent", True):
+            tool_classes.extend([
+                # Memory primitives
+                MemorySetTool, MemoryGetTool, MemoryListTool, MemoryDeleteTool,
+                # Commitments
+                TrackCommitmentTool, ListCommitmentsTool, ResolveCommitmentTool,
+                ExtractCommitmentsTool,
+                # Approvals
+                SubmitForApprovalTool, ListPendingApprovalsTool, ApproveTool, RejectTool,
+                # Voice profile
+                BuildVoiceProfileTool, GetVoiceProfileTool,
+                # Rule engine
+                RuleCreateTool, RuleListTool, RuleDeleteTool, RuleSimulateTool,
+                EvaluateRulesOnMessageTool,
+                # OOF policy
+                ConfigureOOFPolicyTool, GetOOFPolicyTool, ApplyOOFPolicyTool,
+                # Compound tools
+                GenerateBriefingTool, PrepareMeetingTool,
+            ])
+            self.logger.info("Agent-secretary tools enabled (24 tools)")
+
         # Instantiate and register tools
         for tool_class in tool_classes:
             tool = tool_class(self.ews_client)
             schema = tool.get_schema()
             self.tools[schema["name"]] = tool
+
+        # ExecuteApprovedActionTool needs the tool registry, so wire it after
+        # every other tool is in place. This is why it isn't in the block
+        # above.
+        if getattr(self.settings, "enable_agent", True):
+            executor = ExecuteApprovedActionTool(self.ews_client, self.tools)
+            executor_schema = executor.get_schema()
+            self.tools[executor_schema["name"]] = executor
 
         self.logger.info(f"Registered {len(self.tools)} tools: {', '.join(self.tools.keys())}")
 

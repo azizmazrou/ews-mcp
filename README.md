@@ -21,15 +21,31 @@
 
 An MCP server that wraps [exchangelib](https://github.com/ecederstrand/exchangelib) to expose Microsoft Exchange Web Services (EWS) to MCP clients such as Claude Desktop, Open WebUI, or any custom client.
 
-- **46 tools** across email, drafts, attachments, calendar, contacts, directory (GAL), tasks, search, folders, out-of-office, and optional AI helpers
+- **70 tools** — 66 base + 4 optional AI — across email, drafts, attachments, calendar, contacts, directory (GAL), tasks, search, folders, out-of-office, AND an agent-secretary stack (memory, commitments, approvals, rules, voice profile, OOF policy, briefing, meeting prep)
+- **Agent secretary layer** — per-mailbox SQLite memory store, commitment tracker, human-in-the-loop approval queue, declarative rule engine, OOF policy, voice profile, daily briefing, and meeting prep. See [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md)
 - **3 auth modes**: OAuth2 (client credentials), Basic, NTLM
 - **Impersonation / delegation**: every non-AI tool accepts a `target_mailbox` to act on shared, delegated, or other users' mailboxes
-- **Two transports**: `stdio` (default, for Claude Desktop) and `sse` (HTTP server with OpenAPI schema, for Open WebUI and REST clients)
-- **Enterprise middleware**: rate limiter, circuit breaker, structured logging, audit log
+- **Two transports**: `stdio` (default, for Claude Desktop) and `sse` (HTTP server with OpenAPI schema + bearer auth, for Open WebUI and REST clients)
+- **Enterprise middleware**: rate limiter, circuit breaker, structured logging, audit log with PII redaction
 
 ---
 
 ## What's New (since v3.4.0)
+
+### Agent secretary — 24 new tools
+
+Per-mailbox persistent memory + orchestration tools that turn the server from a stateless Exchange client into an **agentic secretary**. Full guide: [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md).
+
+- **Memory** (4): `memory_set` / `memory_get` / `memory_list` / `memory_delete` — ad-hoc agent scratch state (thread snoozes, person notes, prefs). Backed by per-mailbox SQLite with 1 MiB/value, 50 MiB/namespace caps.
+- **Commitments** (4): `track_commitment`, `list_commitments`, `resolve_commitment`, `extract_commitments` (AI extracts promises from a thread).
+- **Approval queue** (5): `submit_for_approval`, `list_pending_approvals`, `approve`, `reject`, `execute_approved_action`. Allow-listed actions, single-use UUID4 tokens, atomic consume.
+- **Voice profile** (2): `build_voice_profile` (samples Sent folder → AI style card), `get_voice_profile`.
+- **Rule engine** (5): `rule_create`, `rule_list`, `rule_delete`, `rule_simulate`, `evaluate_rules_on_message`. Strict allow-lists on match keys and action types — no `eval`.
+- **OOF policy** (3): `configure_oof_policy` (templates + forward rules), `get_oof_policy`, `apply_oof_policy` (creates drafts, never sends).
+- **Briefing** (1): `generate_briefing` — deterministic inbox-delta + meetings + commitments + overdue tasks + VIP activity one-pager.
+- **Meeting prep** (1): `prepare_meeting` — attendees + per-attendee history + stored notes + attachment previews.
+
+Also: `send_email` gains `dry_run: true` for preview-without-send.
 
 ### Drafts workflow
 - `create_draft`, `create_reply_draft`, `create_forward_draft` — build reviewable HTML drafts in the Drafts folder before sending
@@ -86,7 +102,7 @@ manage_folder(action="create", folder_name="Archive")
 manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
 ```
 
-> All **46 tools** (42 base + 4 AI) accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`.
+> The 46 Exchange-facing tools (42 base + 4 AI) accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`. The 24 agent-secretary tools act on the primary authenticated mailbox by design — see [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md#architecture).
 
 ---
 
@@ -212,7 +228,7 @@ python -m src.main
 
 ## All Tools
 
-**Grand total: 46** — 42 base tools (always on, subject to category flags) + 4 optional AI tools.
+**Grand total: 70** — 66 base tools (42 Exchange + 24 agent-secretary, all subject to category flags) + 4 optional AI tools.
 
 ### Email (10)
 
@@ -316,6 +332,66 @@ Enabled per-feature via `enable_ai=true` plus individual flags. Accept `target_m
 | `classify_email` | Priority / sentiment / optional spam classification | `enable_email_classification` |
 | `summarize_email` | AI summary of a message (configurable length) | `enable_email_summarization` |
 | `suggest_replies` | Generate N draft reply variants | `enable_smart_replies` |
+
+### Agent Secretary (24)
+
+Registered when `ENABLE_AGENT=true` (the default). Fully documented in [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md).
+
+**Memory** (4)
+
+| Tool | Description |
+|------|-------------|
+| `memory_set` / `memory_get` / `memory_list` / `memory_delete` | Per-mailbox JSON KV with namespaces, TTL, 1 MiB value cap |
+
+**Commitments** (4)
+
+| Tool | Description |
+|------|-------------|
+| `track_commitment` | Record "I owe X to Y by Z" or "Y owes me X" |
+| `list_commitments` | Open / overdue / done, filter by owner |
+| `resolve_commitment` | Mark done / cancelled with optional note |
+| `extract_commitments` | AI: detect commitments in a message (requires `ENABLE_AI=true`) |
+
+**Approval queue** (5)
+
+| Tool | Description |
+|------|-------------|
+| `submit_for_approval` | Queue a side-effectful action for human review (allow-listed actions only) |
+| `list_pending_approvals` | View pending items |
+| `approve` / `reject` | Decide an approval (atomic, single-use) |
+| `execute_approved_action` | Run the approved action; consumes the approval |
+
+**Voice profile** (2)
+
+| Tool | Description |
+|------|-------------|
+| `build_voice_profile` | Sample Sent folder → AI-generated style card (formality, greetings, signoffs) |
+| `get_voice_profile` | Retrieve the stored profile |
+
+**Rule engine** (5)
+
+| Tool | Description |
+|------|-------------|
+| `rule_create` / `rule_list` / `rule_delete` | Declarative "match → actions" automations with strict allow-lists |
+| `rule_simulate` | Preview which rules would fire against a message |
+| `evaluate_rules_on_message` | Apply matching rules (with `dry_run` flag) |
+
+**OOF policy** (3)
+
+| Tool | Description |
+|------|-------------|
+| `configure_oof_policy` | Templates + forward rules + VIP passthrough |
+| `get_oof_policy` | Retrieve stored policy |
+| `apply_oof_policy` | Evaluate forward rules for a message — creates DRAFTS, never sends |
+
+**Compound** (2)
+
+| Tool | Description |
+|------|-------------|
+| `generate_briefing` | Today/weekly: inbox delta + meetings + commitments + overdue tasks + VIP activity |
+| `prepare_meeting` | Meeting brief: attendees + per-attendee history + notes + attachment previews |
+
+Plus: `send_email` accepts `dry_run: true` for a preview without sending.
 
 ---
 
@@ -562,6 +638,14 @@ All default to `true`. Set to `false` to skip registering a whole category:
 | `ENABLE_TASKS` | Tasks |
 | `ENABLE_FOLDERS` | Folder tools (folders are always loaded, but can be disabled here) |
 | `ENABLE_ATTACHMENTS` | Attachment tools |
+| `ENABLE_AGENT` | Agent-secretary tools (memory, commitments, approvals, rules, voice, OOF policy, briefing, meeting prep). Default `true`. |
+
+#### Agent secretary
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_AGENT` | `true` | Register the 24 agent-secretary tools |
+| `EWS_MEMORY_DIR` | `data/memory` | Jail directory for per-mailbox SQLite memory files |
 
 #### AI (all optional, off by default)
 

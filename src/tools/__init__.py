@@ -12,6 +12,38 @@ from .oof_tools import OofSettingsTool
 from .ai_tools import SemanticSearchEmailsTool, ClassifyEmailTool, SummarizeEmailTool, SuggestRepliesTool
 from .contact_intelligence_tools import FindPersonTool, AnalyzeContactsTool
 
+# Agent-secretary tools (memory, commitments, approvals, rules, voice, OOF
+# policy, briefing, meeting prep).
+from .memory_tools import MemorySetTool, MemoryGetTool, MemoryListTool, MemoryDeleteTool
+from .commitment_tools import (
+    TrackCommitmentTool,
+    ListCommitmentsTool,
+    ResolveCommitmentTool,
+    ExtractCommitmentsTool,
+)
+from .approval_tools import (
+    SubmitForApprovalTool,
+    ListPendingApprovalsTool,
+    ApproveTool,
+    RejectTool,
+    ExecuteApprovedActionTool,
+)
+from .voice_tools import BuildVoiceProfileTool, GetVoiceProfileTool
+from .rule_tools import (
+    RuleCreateTool,
+    RuleListTool,
+    RuleDeleteTool,
+    RuleSimulateTool,
+    EvaluateRulesOnMessageTool,
+)
+from .oof_policy_tools import (
+    ConfigureOOFPolicyTool,
+    GetOOFPolicyTool,
+    ApplyOOFPolicyTool,
+)
+from .briefing_tools import GenerateBriefingTool
+from .meeting_prep_tools import PrepareMeetingTool
+
 __all__ = [
     # Email tools (11)
     "CreateDraftTool",
@@ -69,4 +101,37 @@ __all__ = [
     # Contact Intelligence tools (2)
     "FindPersonTool",
     "AnalyzeContactsTool",
+    # --- Agent-secretary tools ---
+    # Memory (4)
+    "MemorySetTool",
+    "MemoryGetTool",
+    "MemoryListTool",
+    "MemoryDeleteTool",
+    # Commitments (4)
+    "TrackCommitmentTool",
+    "ListCommitmentsTool",
+    "ResolveCommitmentTool",
+    "ExtractCommitmentsTool",
+    # Approvals (5)
+    "SubmitForApprovalTool",
+    "ListPendingApprovalsTool",
+    "ApproveTool",
+    "RejectTool",
+    "ExecuteApprovedActionTool",
+    # Voice profile (2)
+    "BuildVoiceProfileTool",
+    "GetVoiceProfileTool",
+    # Rule engine (5)
+    "RuleCreateTool",
+    "RuleListTool",
+    "RuleDeleteTool",
+    "RuleSimulateTool",
+    "EvaluateRulesOnMessageTool",
+    # OOF policy (3)
+    "ConfigureOOFPolicyTool",
+    "GetOOFPolicyTool",
+    "ApplyOOFPolicyTool",
+    # Compound tools (2)
+    "GenerateBriefingTool",
+    "PrepareMeetingTool",
 ]
