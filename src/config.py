@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     enable_tasks: bool = True
     enable_folders: bool = True
     enable_attachments: bool = True
+    # Agent-secretary features: memory store, commitments, approvals, rules,
+    # voice profile, OOF policy, briefing, meeting prep.
+    enable_agent: bool = True
 
     # Security
     enable_audit_log: bool = True

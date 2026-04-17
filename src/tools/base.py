@@ -60,6 +60,19 @@ class BaseTool(ABC):
             return target_mailbox
         return self.ews_client.config.ews_email
 
+    def get_memory_store(self):
+        """Return the persistent memory store for the primary authenticated mailbox.
+
+        Agentic features (commitments, approvals, rules, voice profile, OOF
+        policy) are intentionally stored against the *primary* mailbox, not
+        the impersonated ``target_mailbox``. The primary mailbox is the
+        operator whose server is running; per-target state would either leak
+        across service-account boundaries or require a per-target-mailbox DB
+        each call, which we don't want yet.
+        """
+        from ..memory import MemoryStore
+        return MemoryStore.for_mailbox(self.ews_client.config.ews_email)
+
     async def safe_execute(self, **kwargs) -> Dict[str, Any]:
         """Execute with error handling, circuit breaker, and logging."""
         start_time = time.time()
