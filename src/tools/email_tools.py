@@ -1578,7 +1578,11 @@ class DeleteEmailTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "delete_email",
-            "description": "Delete an email by ID (moves to trash).",
+            "description": (
+                "Delete an email by ID. Default is soft delete (moves to "
+                "Deleted Items). Set ``permanent`` (or ``hard_delete`` "
+                "alias) true to bypass Trash and remove permanently."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1588,7 +1592,12 @@ class DeleteEmailTool(BaseTool):
                     },
                     "permanent": {
                         "type": "boolean",
-                        "description": "Permanently delete (hard delete)",
+                        "description": "Permanently delete (bypasses Trash). Alias: hard_delete.",
+                        "default": False
+                    },
+                    "hard_delete": {
+                        "type": "boolean",
+                        "description": "Alias for 'permanent'.",
                         "default": False
                     },
                     "target_mailbox": {
@@ -1603,8 +1612,16 @@ class DeleteEmailTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Delete email."""
         message_id = kwargs.get("message_id")
-        permanent = kwargs.get("permanent", False)
+        # Accept both ``permanent`` (canonical) and ``hard_delete`` (alias
+        # matching manage_folder / callers' muscle memory). Either truthy
+        # value triggers a permanent delete.
+        permanent = bool(
+            kwargs.get("permanent", False) or kwargs.get("hard_delete", False)
+        )
         target_mailbox = kwargs.get("target_mailbox")
+
+        if not message_id or not isinstance(message_id, str) or not message_id.strip():
+            raise ValidationError("message_id is required")
 
         try:
             # Get account (primary or impersonated)
@@ -1615,11 +1632,20 @@ class DeleteEmailTool(BaseTool):
             item = find_message_for_account(account, message_id)
 
             if permanent:
-                item.delete()
+                # ``item.delete()`` in exchangelib defaults to
+                # MOVE_TO_DELETED_ITEMS — items end up in Trash, defeating
+                # the caller's "permanent" intent. Pass HARD_DELETE so the
+                # item bypasses both Trash and the recoverable-items dump.
+                try:
+                    from exchangelib import HARD_DELETE
+                    item.delete(delete_type=HARD_DELETE)
+                except ImportError:
+                    # exchangelib < 3 lacks the module-level constant;
+                    # fall back to the string that the EWS API expects.
+                    item.delete(delete_type="HardDelete")
                 action = "permanently deleted"
             else:
-                # Move to trash folder (Deleted Items) so user can recover
-                # Note: soft_delete() makes items recoverable but not visible in Deleted Items
+                # Move to trash folder (Deleted Items) so user can recover.
                 item.move(account.trash)
                 action = "moved to trash"
 
@@ -1628,12 +1654,18 @@ class DeleteEmailTool(BaseTool):
             return format_success_response(
                 f"Email {action}",
                 message_id=message_id,
+                permanent=permanent,
+                hard_delete=permanent,
                 mailbox=mailbox
             )
 
+        except (ValidationError, ToolExecutionError):
+            raise
         except Exception as e:
-            self.logger.error(f"Failed to delete email: {e}")
-            raise ToolExecutionError(f"Failed to delete email: {e}")
+            self.logger.exception(f"Failed to delete email: {type(e).__name__}: {e}")
+            raise ToolExecutionError(
+                f"Failed to delete email: {type(e).__name__}: {e}"
+            )
 
 
 class MoveEmailTool(BaseTool):

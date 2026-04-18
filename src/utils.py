@@ -332,27 +332,39 @@ def safe_json_dumps(obj: Any, **kwargs) -> str:
 def format_error_response(error: Exception, context: str = "") -> Dict[str, Any]:
     """Format error as a short, actionable response.
 
-    Includes ``error_type`` (the exception class name) so the SSE/HTTP
-    adapter can map it to a proper HTTP status (400 for ValidationError,
-    503 for EWSConnectionError, etc.). The field is kept stable across
-    tool results so external clients can dispatch on it.
+    Response shape (stable contract):
+
+    * ``success``: ``False``
+    * ``error``: human message, truncated at 200 chars, always prefixed
+      with the exception class name so operators see *what* broke even
+      when the response gets surfaced in a generic "Internal Server
+      Error" UI (TSK-004 / CAL-006).
+    * ``error_type``: short exception class name. The SSE/HTTP adapter
+      uses this to pick the HTTP status (400 for ValidationError, 503
+      for EWSConnectionError, etc.).
+    * ``error_class``: fully-qualified class name (module.Class), useful
+      for filing bugs against exchangelib or the MCP layer.
     """
     logger = logging.getLogger(__name__)
-    error_msg = str(error)
+    raw = str(error) or ""
+    type_name = type(error).__name__
 
     if context and context != "":
-        error_msg = f"{context}: {error_msg}"
+        prefixed = f"{context}: {type_name}: {raw}" if raw else f"{context}: {type_name}"
+    else:
+        # Don't double-stamp when the caller already prefixed the message.
+        prefixed = raw if raw.startswith(type_name) else f"{type_name}: {raw}" if raw else type_name
 
-    # Truncate very long error messages
-    if len(error_msg) > 200:
-        error_msg = error_msg[:197] + "..."
+    if len(prefixed) > 200:
+        prefixed = prefixed[:197] + "..."
 
-    logger.error(error_msg)
+    logger.error(prefixed)
 
     return {
         "success": False,
-        "error": error_msg,
-        "error_type": type(error).__name__,
+        "error": prefixed,
+        "error_type": type_name,
+        "error_class": f"{type(error).__module__}.{type_name}",
     }
 
 

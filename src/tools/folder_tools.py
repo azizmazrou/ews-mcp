@@ -445,8 +445,12 @@ class ManageFolderTool(BaseTool):
                     },
                     "destination": {
                         "type": "string",
-                        "description": "Target parent folder name or ID (move action)",
+                        "description": "Target parent folder — standard name (move action). Prefer destination_folder_id for custom folders.",
                         "enum": ["root", "inbox", "sent", "drafts", "deleted", "junk", "calendar", "contacts", "tasks"]
+                    },
+                    "destination_folder_id": {
+                        "type": "string",
+                        "description": "Target parent folder id (move action). Same shape as move_email's destination_folder_id."
                     },
                     "permanent": {
                         "type": "boolean",
@@ -657,15 +661,30 @@ class ManageFolderTool(BaseTool):
             raise ToolExecutionError(f"Failed to rename folder: {e}")
 
     async def _move(self, **kwargs) -> Dict[str, Any]:
-        """Move a folder to a new parent."""
+        """Move a folder to a new parent.
+
+        Destination accepted in three forms (in order of preference):
+
+        * ``destination_folder_id`` — same name as ``move_email`` uses
+          (canonical).
+        * ``destination`` — legacy alias for either a standard folder
+          name (``"archive"``) OR a folder id string.
+        * No param is rejected with ValidationError (HTTP 400).
+        """
         folder_id = kwargs.get("folder_id")
+        # Bug #5: accept destination_folder_id so callers can use the same
+        # shape as move_email / copy_email.
+        destination_id = kwargs.get("destination_folder_id")
         destination = kwargs.get("destination")
         target_mailbox = kwargs.get("target_mailbox")
 
         if not folder_id:
-            raise ToolExecutionError("folder_id is required for move action")
-        if not destination:
-            raise ToolExecutionError("destination is required for move action")
+            raise ValidationError("folder_id is required for move action")
+        if not destination and not destination_id:
+            raise ValidationError(
+                "move requires 'destination' (standard folder name) or "
+                "'destination_folder_id' (explicit folder id)"
+            )
 
         try:
             account = self.get_account(target_mailbox)
@@ -673,26 +692,54 @@ class ManageFolderTool(BaseTool):
 
             folder = self._find_folder_by_id(account.root, folder_id)
             if not folder:
-                raise ToolExecutionError(f"Folder not found: {folder_id}")
+                raise ValidationError(f"Folder not found: {folder_id}")
 
             folder_name = safe_get(folder, 'name', 'Unknown')
 
-            folder_map = self._get_folder_map(account)
-            target_parent = folder_map.get(destination.lower())
-            if not target_parent:
-                raise ToolExecutionError(f"Unknown destination folder: {destination}")
+            # Resolve the target parent. First try the explicit id; then
+            # try ``destination`` as a standard name; finally try
+            # ``destination`` as an id (some callers conflate the fields).
+            target_parent = None
+            resolved_destination = None
+            if destination_id:
+                target_parent = self._find_folder_by_id(account.root, destination_id)
+                resolved_destination = destination_id
+            if target_parent is None and destination:
+                folder_map = self._get_folder_map(account)
+                target_parent = folder_map.get(str(destination).lower())
+                if target_parent is not None:
+                    resolved_destination = destination
+                else:
+                    # Fallback: maybe ``destination`` is an id.
+                    target_parent = self._find_folder_by_id(account.root, destination)
+                    if target_parent is not None:
+                        resolved_destination = destination
+
+            if target_parent is None:
+                raise ValidationError(
+                    f"Unknown destination: "
+                    f"{destination_id or destination!r}"
+                )
 
             folder.parent = target_parent
             folder.save()
 
             return format_success_response(
-                f"Folder '{folder_name}' moved to '{destination}'",
+                f"Folder '{folder_name}' moved",
                 folder_id=folder_id,
                 folder_name=folder_name,
-                destination=destination,
-                mailbox=mailbox
+                destination=resolved_destination,
+                destination_folder_id=ews_id_to_str(
+                    safe_get(target_parent, "id", None)
+                ),
+                mailbox=mailbox,
             )
-        except ToolExecutionError:
+        except (ValidationError, ToolExecutionError):
             raise
         except Exception as e:
-            raise ToolExecutionError(f"Failed to move folder: {e}")
+            self.logger.exception(
+                f"manage_folder(action=move) failed: {type(e).__name__}: {e}"
+            )
+            raise ToolExecutionError(
+                f"Failed to move folder: {type(e).__name__}: {e}"
+            )

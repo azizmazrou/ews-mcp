@@ -22,6 +22,32 @@ from ..utils import format_success_response, safe_get, find_message_across_folde
 _DEFAULT_DOWNLOAD_DIR = Path(os.environ.get("EWS_DOWNLOAD_DIR", "downloads"))
 
 
+def _is_traversal_path(name: str) -> bool:
+    """True iff ``name`` contains anything that escapes a single filename.
+
+    Rejects absolute paths, "..", "./", leading slashes, UNC roots, and
+    NUL bytes. Used to make save_path a *safe-or-rejected* field: either
+    it's a simple filename we can honour, or the caller hears about it.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    if "\x00" in name:
+        return True
+    if os.path.isabs(name):
+        return True
+    # Normalise both slash flavours.
+    unified = name.replace("\\", "/")
+    if unified.startswith("/") or unified.startswith("~"):
+        return True
+    parts = [p for p in unified.split("/") if p]
+    for p in parts:
+        if p == "..":
+            return True
+    # "./foo" — the "." element is technically safe, but require a plain
+    # filename with no separators at all for simplicity.
+    return "/" in unified or "\\" in name
+
+
 def _safe_basename(name: str) -> str:
     """Strip directory traversal / path separators from a user-supplied name."""
     if not name:
@@ -32,27 +58,47 @@ def _safe_basename(name: str) -> str:
     return name or "attachment"
 
 
-def resolve_download_path(save_path: str | None, default_name: str) -> Path:
+def resolve_download_path(
+    save_path: Any,
+    default_name: str,
+    *,
+    strict: bool = False,
+) -> Path:
     """Resolve a save_path into a safe, jailed absolute Path.
 
-    - If save_path is None/empty, use default_name inside the jail.
-    - If save_path contains a directory part, only the basename is honoured.
-    - The returned path is guaranteed to live inside the download jail.
+    - If ``save_path`` is None/empty, use ``default_name`` inside the jail.
+    - If ``save_path`` contains directory components or parent refs and
+      ``strict=True``, raise :class:`ValidationError` (HTTP 400).
+    - If ``strict=False`` (legacy mode), only the basename is kept.
+    - The returned path is always inside the jail; symlink tricks that
+      would escape raise :class:`ToolExecutionError`.
     """
     jail = _DEFAULT_DOWNLOAD_DIR.resolve()
     jail.mkdir(parents=True, exist_ok=True)
 
-    filename = _safe_basename(save_path) if save_path else _safe_basename(default_name)
+    if save_path and _is_traversal_path(str(save_path)):
+        if strict:
+            raise ValidationError(
+                f"Invalid save_path {save_path!r}: must be a plain filename "
+                f"with no directory components or '..' refs. Files are "
+                f"written under {jail}"
+            )
+        # Back-compat: strip to basename.
+        save_path = _safe_basename(str(save_path))
+
+    filename = (
+        _safe_basename(str(save_path)) if save_path else _safe_basename(default_name)
+    )
     candidate = (jail / filename).resolve()
 
     # Verify the resolved path is still inside the jail (defence against
     # symlink tricks or unusual basename behaviour).
     try:
         candidate.relative_to(jail)
-    except ValueError:
+    except ValueError as exc:
         raise ToolExecutionError(
             "Invalid save_path: resolved outside the download directory"
-        )
+        ) from exc
 
     return candidate
 
@@ -318,15 +364,24 @@ class DownloadAttachmentTool(BaseTool):
                 )
 
             elif return_as == "file_path":
-                # Save to file, jailed under the configured download directory.
-                # save_path is treated as a basename hint only; directory
-                # components are stripped and "../" is neutralised.
-                file_path = resolve_download_path(save_path, attachment_name)
+                # Save to file, jailed under EWS_DOWNLOAD_DIR.
+                #
+                # ``strict=True`` converts traversal-style save_paths
+                # ("../../etc/passwd", "/tmp/x", "C:\\...", NUL bytes)
+                # into ValidationError -> HTTP 400. Previously the path
+                # was silently reduced to its basename — callers thought
+                # the tool had honoured their request, but it had jailed
+                # it quietly. Bug #6.
+                file_path = resolve_download_path(
+                    save_path, attachment_name, strict=True
+                )
 
                 with open(file_path, 'wb') as f:
                     f.write(content)
 
-                self.logger.info(f"Saved attachment {attachment_name} to {file_path}")
+                self.logger.info(
+                    f"Saved attachment {attachment_name} to {file_path}"
+                )
 
                 return format_success_response(
                     "Attachment saved successfully",
@@ -334,7 +389,11 @@ class DownloadAttachmentTool(BaseTool):
                     attachment_id=attachment_id,
                     name=attachment_name,
                     size=len(content),
-                    content_type=safe_get(attachment, 'content_type', 'application/octet-stream'),
+                    content_type=safe_get(
+                        attachment, 'content_type', 'application/octet-stream'
+                    ),
+                    # Always include file_path in file-mode responses so
+                    # callers don't have to reconstruct it.
                     file_path=str(file_path),
                     mailbox=mailbox
                 )
