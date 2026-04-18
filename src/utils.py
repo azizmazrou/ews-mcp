@@ -381,8 +381,12 @@ EMAIL_DETAIL_FIELDS: tuple = (
 # included — the 200-char ``snippet`` is enough for triage, and full
 # bodies dominated response size in production (13.6 KB envelopes around
 # 148-byte payloads). Callers can opt in via ``fields=["body"]``.
+# ``id`` is retained for one release as a deprecated alias of
+# ``message_id`` (Bug 5); response-level ``meta.deprecations`` informs
+# callers.
 LIST_DEFAULT_FIELDS: tuple = (
-    "message_id", "subject", "from", "received_time",
+    "message_id", "id",
+    "subject", "from", "received_time",
     "is_read", "has_attachments", "snippet",
 )
 
