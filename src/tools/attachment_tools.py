@@ -352,6 +352,9 @@ class DownloadAttachmentTool(BaseTool):
 
                 self.logger.info(f"Downloaded attachment {attachment_name} ({len(content)} bytes)")
 
+                # file_path is always present in the response so callers
+                # can key off a stable field regardless of return_as (null
+                # when no file was written). Bug ATT-010.
                 return format_success_response(
                     "Attachment downloaded successfully",
                     message_id=message_id,
@@ -360,6 +363,8 @@ class DownloadAttachmentTool(BaseTool):
                     size=len(content),
                     content_type=safe_get(attachment, 'content_type', 'application/octet-stream'),
                     content_base64=content_b64,
+                    file_path=None,
+                    saved_path=None,
                     mailbox=mailbox
                 )
 
@@ -392,9 +397,11 @@ class DownloadAttachmentTool(BaseTool):
                     content_type=safe_get(
                         attachment, 'content_type', 'application/octet-stream'
                     ),
-                    # Always include file_path in file-mode responses so
-                    # callers don't have to reconstruct it.
+                    # ``file_path`` is the historical field name; ``saved_path``
+                    # is a more descriptive alias. Both present = no caller
+                    # surprises regardless of which they read (Bug ATT-010).
                     file_path=str(file_path),
+                    saved_path=str(file_path),
                     mailbox=mailbox
                 )
 

@@ -1,6 +1,7 @@
 """Utility functions for EWS MCP Server."""
 
 from datetime import datetime
+from decimal import Decimal as _Decimal
 from typing import Any, Dict, List, Optional, Union
 import html
 import logging
@@ -9,6 +10,67 @@ import json
 import re
 from exchangelib import EWSTimeZone, EWSDateTime, EWSDate
 import pytz
+
+# Cached reference to exchangelib's CalendarEventDetails (used by the
+# JSON encoder). Imported lazily + guarded so the module still works if
+# exchangelib's internal layout shifts.
+try:
+    from exchangelib.properties import CalendarEventDetails as _CalendarEventDetails
+except Exception:  # pragma: no cover - import guard
+    _CalendarEventDetails = None  # type: ignore[assignment]
+
+
+def _calendar_event_details_to_json(obj: Any) -> Optional[Dict[str, Any]]:
+    """Convert an exchangelib ``CalendarEventDetails`` to a plain dict.
+
+    Returns None if ``obj`` is not a CalendarEventDetails (so the caller
+    can fall through to its normal dispatch chain). Kept defensive
+    because some exchangelib versions expose different attribute sets.
+    """
+    if _CalendarEventDetails is None or not isinstance(obj, _CalendarEventDetails):
+        return None
+    # Each field is best-effort — exchangelib populates a subset depending
+    # on the Exchange server's response. ``getattr`` with a default keeps
+    # us resilient across versions.
+    return {
+        "id": getattr(obj, "id", None),
+        "subject": getattr(obj, "subject", None),
+        "location": getattr(obj, "location", None),
+        "is_meeting": bool(getattr(obj, "is_meeting", False)),
+        "is_recurring": bool(getattr(obj, "is_recurring", False)),
+        "is_exception": bool(getattr(obj, "is_exception", False)),
+        "is_reminder_set": bool(getattr(obj, "is_reminder_set", False)),
+        "is_private": bool(getattr(obj, "is_private", False)),
+    }
+
+
+def _ensure_aware_iso(dt: datetime) -> str:
+    """Serialise a datetime to ISO, stamping a tz if it's naive.
+
+    exchangelib sometimes emits naive datetimes for calendar events
+    (the user-side warning ``Returning naive datetime ... on field
+    start``). Without a tz these serialise to strings like
+    ``"2026-04-19T10:00:00"`` which downstream consumers treat as local
+    or UTC arbitrarily. Stamp naive ones with the configured TIMEZONE
+    so the ISO string is unambiguous.
+    """
+    if dt.tzinfo is None:
+        try:
+            tz = pytz.timezone(
+                os.environ.get("TIMEZONE", os.environ.get("TZ", "UTC"))
+            )
+        except Exception:
+            tz = pytz.UTC
+        try:
+            dt = tz.localize(dt)
+        except Exception:
+            # Fallback: attach as UTC if localize fails (e.g. DST
+            # ambiguity). Prefer "stamped with SOMETHING" over naive.
+            dt = dt.replace(tzinfo=pytz.UTC)
+    try:
+        return dt.isoformat()
+    except Exception:
+        return str(dt)
 
 
 def get_timezone():
@@ -246,7 +308,8 @@ def ews_id_to_str(ews_id: Any) -> Optional[str]:
 def make_json_serializable(obj: Any) -> Any:
     """Recursively convert an object to be JSON serializable.
 
-    Handles EWS objects, datetime objects, and nested structures.
+    Handles EWS objects, datetime objects, Decimals, exchangelib
+    CalendarEventDetails, and nested structures.
 
     Args:
         obj: Any object that needs to be JSON serializable
@@ -261,13 +324,30 @@ def make_json_serializable(obj: Any) -> Any:
     if isinstance(obj, (str, int, float, bool)):
         return obj
 
-    # Handle datetime objects
+    # Decimal — exchangelib stores task percent_complete and some other
+    # numeric fields as Decimal. json.dumps doesn't know how to serialise
+    # it, so coerce to float at the boundary. Bug TSK-004.
+    if isinstance(obj, _Decimal):
+        return float(obj)
+
+    # Handle datetime objects. Naive datetimes from Exchange are
+    # stamped with the configured TIMEZONE so downstream ISO-string
+    # comparisons remain consistent ("Z" vs. bare "...+03:00"), not
+    # silently interpreted as UTC by the receiver.
     if isinstance(obj, datetime):
-        return obj.isoformat()
+        return _ensure_aware_iso(obj)
 
     # Handle EWSDateTime and EWSDate
     if isinstance(obj, (EWSDateTime, EWSDate)):
         return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+
+    # exchangelib's FreeBusyView calendar_events list contains
+    # ``CalendarEventDetails`` objects — structured but not a dict, not
+    # a primitive, and without a single ``id`` scalar. Pull out the
+    # concrete fields we know about. (Bug CAL-006 JSON-serialisation.)
+    event_json = _calendar_event_details_to_json(obj)
+    if event_json is not None:
+        return event_json
 
     # Handle lists/tuples
     if isinstance(obj, (list, tuple)):
@@ -309,9 +389,10 @@ class EWSJSONEncoder(json.JSONEncoder):
     def default(self, obj: Any) -> Any:
         """Convert non-serializable objects."""
         result = make_json_serializable(obj)
-        if isinstance(result, (dict, list)):
-            return result
-        if isinstance(result, str):
+        # Pass through any JSON-native primitive so Decimal -> float
+        # doesn't get stringified back to "0.25". dict / list already
+        # go through the normal encoder recursion.
+        if isinstance(result, (dict, list, str, int, float, bool)) or result is None:
             return result
         return str(result)
 
