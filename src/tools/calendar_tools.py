@@ -7,7 +7,7 @@ from exchangelib import CalendarItem, Mailbox, Attendee, EWSTimeZone
 
 from .base import BaseTool
 from ..models import CreateAppointmentRequest, MeetingResponse
-from ..exceptions import ToolExecutionError
+from ..exceptions import ToolExecutionError, ValidationError
 from ..utils import format_success_response, safe_get, parse_datetime_tz_aware, make_tz_aware, format_datetime, ews_id_to_str, attach_inline_files, INLINE_ATTACHMENTS_SCHEMA, get_timezone as get_configured_timezone
 
 
@@ -642,11 +642,35 @@ class CheckAvailabilityTool(BaseTool):
         interval_minutes = kwargs.get("interval_minutes", 30)
         include_self = kwargs.get("include_self", True)
 
+        # Caller errors — raise ValidationError so the SSE adapter maps
+        # these to HTTP 400. Previously a missing/invalid param fell
+        # through to ToolExecutionError which surfaces as 500 (Bug #2).
         if not email_addresses:
-            raise ToolExecutionError("email_addresses is required and cannot be empty")
+            raise ValidationError("email_addresses is required and cannot be empty")
 
         if not start_time_str or not end_time_str:
-            raise ToolExecutionError("start_time and end_time are required")
+            raise ValidationError("start_time and end_time are required")
+
+        # Parse datetimes up front and with explicit error handling so
+        # bad ISO strings don't leak through as opaque 500s.
+        try:
+            start_time = parse_datetime_tz_aware(start_time_str)
+            end_time = parse_datetime_tz_aware(end_time_str)
+            display_start_time = parse_display_datetime(start_time_str)
+        except ValueError as exc:
+            raise ValidationError(
+                f"Invalid datetime format: {exc}. Use ISO 8601 "
+                f"(e.g. '2026-04-18T08:00:00+00:00')."
+            ) from exc
+
+        if not start_time or not end_time:
+            raise ValidationError(
+                "Invalid datetime format. Use ISO 8601 "
+                "(e.g. '2026-04-18T08:00:00+00:00')."
+            )
+
+        if end_time <= start_time:
+            raise ValidationError("end_time must be after start_time")
 
         try:
             target_mailbox = kwargs.get("target_mailbox")
@@ -655,10 +679,10 @@ class CheckAvailabilityTool(BaseTool):
             normalized_emails = []
             seen_emails = set()
             for email in email_addresses:
-                if not email:
+                if not email or not isinstance(email, str):
                     continue
-                normalized = email.lower()
-                if normalized in seen_emails:
+                normalized = email.strip().lower()
+                if not normalized or normalized in seen_emails:
                     continue
                 seen_emails.add(normalized)
                 normalized_emails.append(email)
@@ -668,22 +692,15 @@ class CheckAvailabilityTool(BaseTool):
                 if target_mailbox
                 else safe_get(account, "primary_smtp_address", None)
             )
-            if include_self and current_mailbox:
+            # Guard: ``primary_smtp_address`` can be None on freshly-
+            # constructed accounts or when exchangelib hasn't completed
+            # autodiscover. ``.lower()`` on None would raise AttributeError
+            # and surface as an opaque 500.
+            if include_self and isinstance(current_mailbox, str) and current_mailbox:
                 current_mailbox_normalized = current_mailbox.lower()
                 if current_mailbox_normalized not in seen_emails:
                     seen_emails.add(current_mailbox_normalized)
                     normalized_emails.insert(0, current_mailbox)
-
-            # Parse datetimes
-            start_time = parse_datetime_tz_aware(start_time_str)
-            end_time = parse_datetime_tz_aware(end_time_str)
-            display_start_time = parse_display_datetime(start_time_str)
-
-            if not start_time or not end_time:
-                raise ToolExecutionError("Invalid datetime format. Use ISO 8601 format.")
-
-            if end_time <= start_time:
-                raise ToolExecutionError("end_time must be after start_time")
 
             free_busy_accounts = build_free_busy_accounts(normalized_emails)
             availability_data = list(account.protocol.get_free_busy_info(
@@ -741,12 +758,23 @@ class CheckAvailabilityTool(BaseTool):
 
             self.logger.info(f"Retrieved availability for {len(normalized_emails)} users")
 
+            # Extract tz offset suffix defensively — a naive datetime's
+            # isoformat() has no ``+00:00`` tail, so the old ``[-6:]``
+            # slice returned garbage. Fall back to empty string.
+            response_tz = ""
+            try:
+                iso = display_start_time.isoformat()
+                if "+" in iso[10:] or iso.endswith(("Z",)):
+                    response_tz = iso[-6:] if iso.endswith(("+00:00", "-00:00")) or "+" in iso[-6:] or "-" in iso[-6:] else ""
+            except Exception:
+                response_tz = ""
+
             return format_success_response(
                 f"Availability retrieved for {len(normalized_emails)} user(s)",
                 availability=availability_results,
                 checked_email_addresses=normalized_emails,
                 include_self=include_self,
-                response_timezone=display_start_time.isoformat()[-6:],
+                response_timezone=response_tz,
                 time_range={
                     "start": start_time_str,
                     "end": end_time_str,
@@ -755,10 +783,16 @@ class CheckAvailabilityTool(BaseTool):
                 mailbox=mailbox
             )
 
-        except ToolExecutionError:
+        except (ValidationError, ToolExecutionError):
             raise
         except Exception as e:
-            self.logger.error(f"Failed to check availability: {e}")
+            # Log the full exception with traceback so operators can
+            # diagnose the real upstream cause. Re-raise as
+            # ToolExecutionError (HTTP 500) — this branch is for genuine
+            # server-side failures; caller errors are handled above.
+            self.logger.exception(
+                f"check_availability failed: {type(e).__name__}: {e}"
+            )
             raise ToolExecutionError(f"Failed to check availability: {e}")
 
 
