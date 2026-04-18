@@ -10,11 +10,39 @@ PRIORITY: #1 - Solves GAL 0-results bug
 
 import asyncio
 import logging
-from typing import List, Optional, Any, Dict
+import time
+from typing import List, Optional, Any, Dict, Tuple
 from difflib import SequenceMatcher
 
 from ..core.person import Person, PersonSource
 from ..exceptions import ToolExecutionError
+
+
+# Class-level negative-lookup cache: shared across adapter instances so an
+# agent making many find_person calls in a session doesn't re-scan the GAL
+# for the same missing name. Keyed by lower-cased (mailbox, query) so
+# impersonated search doesn't leak.
+_NEGATIVE_CACHE_TTL_SECONDS = 60
+_NEGATIVE_CACHE: Dict[Tuple[str, str], float] = {}
+_NEGATIVE_CACHE_LOCK = asyncio.Lock()
+
+
+def _is_no_results_error(exc: BaseException) -> bool:
+    """True if ``exc`` is an exchangelib "no matches" error.
+
+    Defined at module level (and resolved lazily) so tests that don't
+    have exchangelib installed still import this module cleanly.
+    """
+    try:
+        from exchangelib.errors import (
+            ErrorNameResolutionNoResults,
+            ErrorNameResolutionMultipleResults,
+        )
+    except Exception:  # pragma: no cover
+        return False
+    return isinstance(
+        exc, (ErrorNameResolutionNoResults, ErrorNameResolutionMultipleResults)
+    )
 
 
 class GALAdapter:
@@ -61,24 +89,41 @@ class GALAdapter:
         """
         self.logger.info(f"🔍 GAL Search v3.0: '{query}' (max_results={max_results})")
 
+        # Fast path: recent negative lookup. Any find_person run for this
+        # query within the TTL returns [] in ~1ms instead of re-hitting the
+        # GAL for 20+ seconds.
+        cache_key = await self._negative_cache_key(query)
+        async with _NEGATIVE_CACHE_LOCK:
+            expires = _NEGATIVE_CACHE.get(cache_key)
+            if expires is not None and expires > time.time():
+                self.logger.info(
+                    "  negative-cache hit for %r (miss ≤ %ds ago)",
+                    query, _NEGATIVE_CACHE_TTL_SECONDS,
+                )
+                return []
+            # Expired — drop it lazily.
+            if expires is not None:
+                _NEGATIVE_CACHE.pop(cache_key, None)
+
         # Results collection
         all_results: Dict[str, Person] = {}  # email -> Person (deduplicate)
 
-        # Strategy 1: Exact match (resolve_names)
-        self.logger.info("  Strategy 1: Exact match (resolve_names)")
-        exact_results = await self._search_exact(query, return_full_data)
+        # Strategy 1 & 2 are independent and slow (each does an EWS round
+        # trip). Run them in parallel; either one's results are fine.
+        self.logger.info("  Strategy 1+2: exact + partial (parallel)")
+        exact_results, partial_results = await asyncio.gather(
+            self._search_exact(query, return_full_data),
+            self._search_partial(query, return_full_data),
+            return_exceptions=False,
+        )
         self._merge_results(all_results, exact_results, "exact")
 
-        # If we found results, we can return early for performance
+        # Short-circuit on exact-match hit.
         if len(all_results) >= max_results:
             self.logger.info(f"  ✅ Found {len(all_results)} results via exact match")
             return list(all_results.values())[:max_results]
 
-        # Strategy 2: Partial match (prefix search)
-        # This strategy is NEW in v3.0 and handles cases like "Ahmed" -> "Ahmed Al-Rashid"
-        if len(all_results) == 0:
-            self.logger.info("  Strategy 2: Partial match (searching GAL directory)")
-            partial_results = await self._search_partial(query, return_full_data)
+        if not all_results:
             self._merge_results(all_results, partial_results, "partial")
 
         if len(all_results) >= max_results:
@@ -109,8 +154,27 @@ class GALAdapter:
             self.logger.info(f"  ✅ GAL Search Complete: {result_count} person(s) found")
         else:
             self.logger.warning(f"  ⚠️ GAL Search Complete: 0 results for '{query}'")
+            # Remember this miss so the next identical call returns
+            # immediately instead of paying the ~30s strategy walk again.
+            async with _NEGATIVE_CACHE_LOCK:
+                _NEGATIVE_CACHE[cache_key] = time.time() + _NEGATIVE_CACHE_TTL_SECONDS
 
         return list(all_results.values())[:max_results]
+
+    async def _negative_cache_key(self, query: str) -> Tuple[str, str]:
+        """Build the (mailbox, query) tuple key used by the negative cache.
+
+        Resolving the primary mailbox requires a sync property access on
+        the exchangelib Account — do it in a thread to keep the search
+        coroutine responsive even on first-time account construction.
+        """
+        def _get_mbx() -> str:
+            try:
+                return str(self.ews_client.account.primary_smtp_address or "").lower()
+            except Exception:
+                return ""
+        mbx = await asyncio.to_thread(_get_mbx)
+        return mbx, (query or "").strip().lower()
 
     async def _search_exact(
         self,
@@ -147,6 +211,10 @@ class GALAdapter:
             return persons
 
         except Exception as e:
+            # "Name not resolved" is the normal no-match path, not an error.
+            if _is_no_results_error(e):
+                self.logger.debug("    resolve_names: no match for this query")
+                return []
             self.logger.warning(f"    Exact search failed: {e}")
             return []
 
@@ -369,26 +437,77 @@ class GALAdapter:
         return_full_data: bool
     ) -> Optional[Person]:
         """
-        Parse resolve_names result into Person object.
+        Parse resolve_names / fuzzy-match results into Person objects.
 
-        Handles both tuple format (mailbox, contact_info) and object format.
+        Handles four shapes:
+
+        * ``(mailbox, contact_info)`` tuple — the exchangelib return type for
+          ``resolve_names(return_full_contact_data=True)``.
+        * An object with a ``.mailbox`` attribute — legacy resolve-name shape.
+        * A raw ``exchangelib.properties.Mailbox`` — returned by the
+          fuzzy-match / GAL-scan strategies. Previously this branch fell
+          through to the "unknown format" warning and was silently
+          discarded (Bug 3).
+        * A resolve-names error (``ErrorNameResolutionNoResults`` etc.) —
+          downgraded to DEBUG because every "no match" path raises one.
         """
         try:
-            # Handle tuple format: (mailbox, contact_info)
+            # 1. Legacy tuple format.
             if isinstance(result, tuple):
                 mailbox = result[0]
                 contact_info = result[1] if len(result) > 1 and return_full_data else None
                 return Person.from_gal_result(mailbox, contact_info)
 
-            # Handle object format (fallback)
-            elif hasattr(result, 'mailbox'):
+            # 2. Object with .mailbox attribute.
+            if hasattr(result, "mailbox") and getattr(result, "mailbox", None) is not None:
                 mailbox = result.mailbox
-                contact_info = getattr(result, 'contact', None) if return_full_data else None
+                contact_info = getattr(result, "contact", None) if return_full_data else None
                 return Person.from_gal_result(mailbox, contact_info)
 
-            else:
-                self.logger.warning(f"Unknown result format: {type(result)}")
+            # 3. Raw Mailbox (the Bug 3 path). exchangelib populates
+            #    ``.email_address`` and ``.name`` directly on the Mailbox.
+            try:
+                from exchangelib.properties import Mailbox
+            except Exception:  # pragma: no cover - import guard
+                Mailbox = None  # type: ignore[assignment]
+            if Mailbox is not None and isinstance(result, Mailbox):
+                if not getattr(result, "email_address", None):
+                    return None
+                return Person.from_gal_result(result, None)
+
+            # 4. Exchange "no matches" errors from resolve_names — expected
+            #    on every miss; don't pollute logs at WARNING.
+            try:
+                from exchangelib.errors import (
+                    ErrorNameResolutionNoResults,
+                    ErrorNameResolutionMultipleResults,
+                )
+            except Exception:  # pragma: no cover
+                ErrorNameResolutionNoResults = None  # type: ignore[assignment]
+                ErrorNameResolutionMultipleResults = None  # type: ignore[assignment]
+            if (
+                ErrorNameResolutionNoResults is not None
+                and isinstance(result, ErrorNameResolutionNoResults)
+            ):
+                self.logger.debug("    resolve_names: no match for this strategy")
                 return None
+
+            # Multiple-results errors carry structured hints; walk into
+            # .candidates if available, otherwise ignore.
+            if (
+                ErrorNameResolutionMultipleResults is not None
+                and isinstance(result, ErrorNameResolutionMultipleResults)
+            ):
+                self.logger.debug("    resolve_names: multiple matches (ambiguous)")
+                return None
+
+            # Last-resort: log at DEBUG with the type so we can add new
+            # branches without the operator noticing today.
+            self.logger.debug(
+                "_parse_resolve_result: unhandled type %s; skipping",
+                type(result).__name__,
+            )
+            return None
 
         except Exception as e:
             self.logger.warning(f"Failed to parse resolve result: {e}")
