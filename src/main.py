@@ -74,6 +74,41 @@ from .tools import (
     GenerateBriefingTool, PrepareMeetingTool,
 )
 
+
+# Errors that indicate the Exchange connection pool simply wasn't
+# ready yet. Used by the embedding warmup's retry loop to distinguish
+# "Exchange not ready" (retry) from "schema problem" (give up).
+_TRANSIENT_ERROR_NAMES = (
+    "ConnectionError",
+    "RemoteDisconnected",
+    "ProtocolError",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "TimeoutError",
+    "SSLError",
+    "MaxRetryError",
+    "ChunkedEncodingError",
+)
+
+
+def _is_transient_error(errors) -> bool:
+    """Heuristic: any of the per-folder errors look retryable?"""
+    for _name, exc in errors:
+        exc_type = type(exc).__name__
+        if exc_type in _TRANSIENT_ERROR_NAMES:
+            return True
+        # Some exchangelib errors wrap the real exception — check the
+        # message too.
+        msg = str(exc)
+        if any(tok in msg for tok in (
+            "Connection aborted", "RemoteDisconnected",
+            "Max retries exceeded", "Connection refused",
+            "timed out",
+        )):
+            return True
+    return False
+
+
 class EWSMCPServer:
     """MCP Server for Exchange Web Services with comprehensive logging."""
 
@@ -500,10 +535,13 @@ class EWSMCPServer:
             return
 
         # Collect texts in a thread so the blocking iteration doesn't
-        # stall the event loop.
-        def _collect() -> list:
+        # stall the event loop. Returns (texts, per_folder_errors)
+        # so the retry loop below can tell "transient connection broke
+        # on all folders" from "some folders are legitimately empty".
+        def _collect() -> tuple[list, list]:
             from .utils import safe_get
             texts: list = []
+            errors: list = []
             account = self.ews_client.account
             folder_map = {
                 "inbox": getattr(account, "inbox", None),
@@ -520,7 +558,7 @@ class EWSMCPServer:
                         folder.all().order_by("-datetime_received")[:per_folder]
                     )
                 except Exception as exc:
-                    self.logger.warning(f"warmup: failed to list {name}: {exc}")
+                    errors.append((name, exc))
                     continue
                 for item in items:
                     subject = safe_get(item, "subject", "") or ""
@@ -529,16 +567,58 @@ class EWSMCPServer:
                     # the cache key is identical and the at-query-time
                     # lookup hits.
                     texts.append(f"{subject} {body[:500]}")
-            return texts
+            return texts, errors
 
-        try:
-            texts = await asyncio.to_thread(_collect)
-        except Exception as exc:
-            self.logger.warning(f"warmup: collection failed: {exc}")
-            return
+        # Retry collection with exponential backoff. The warmup races
+        # container startup against the Exchange connection pool; early
+        # attempts can hit ``RemoteDisconnected`` / ``ConnectionError``
+        # before the pool is ready.
+        attempts = [5, 15, 45]  # seconds between retries (3 tries total)
+        texts: list = []
+        last_errors: list = []
+        for attempt_idx in range(len(attempts) + 1):
+            try:
+                texts, errors = await asyncio.to_thread(_collect)
+            except Exception as exc:
+                texts, errors = [], [("<top-level>", exc)]
+
+            if texts:
+                if errors:
+                    self.logger.info(
+                        "warmup: collected %d texts with %d folder errors: %s",
+                        len(texts), len(errors),
+                        [(n, type(e).__name__) for n, e in errors],
+                    )
+                break
+
+            # Nothing collected — decide whether to retry.
+            last_errors = errors
+            if attempt_idx >= len(attempts):
+                break
+            if errors and _is_transient_error(errors):
+                delay = attempts[attempt_idx]
+                self.logger.info(
+                    "warmup: collection hit transient errors "
+                    "(%s); retrying in %ds (attempt %d/%d)",
+                    [(n, type(e).__name__) for n, e in errors],
+                    delay, attempt_idx + 2, len(attempts) + 1,
+                )
+                try:
+                    await asyncio.sleep(delay)
+                except Exception:
+                    break
+                continue
+            # Non-transient error or truly empty — don't retry.
+            break
 
         if not texts:
-            self.logger.info("warmup: nothing to embed")
+            if last_errors:
+                self.logger.warning(
+                    "warmup: collection failed after retries: %s",
+                    [(n, f"{type(e).__name__}: {e}") for n, e in last_errors],
+                )
+            else:
+                self.logger.info("warmup: nothing to embed")
             return
 
         self.logger.info(
@@ -685,9 +765,8 @@ class EWSMCPServer:
                 # OpenAPI/REST endpoints
                 elif path == "/openapi.json" and method == "GET":
                     # Return OpenAPI schema
-                    import json
                     schema = self.openapi_adapter.generate_openapi_schema()
-                    body = json.dumps(schema, indent=2).encode('utf-8')
+                    body = safe_json_dumps(schema, indent=2).encode('utf-8')
                     await send({
                         "type": "http.response.start",
                         "status": 200,
@@ -719,9 +798,11 @@ class EWSMCPServer:
                     result = await self.openapi_adapter.handle_rest_request(tool_name, body)
                     status = result.pop("status", 200)
 
-                    # Send response
-                    import json
-                    response_body = json.dumps(result).encode('utf-8')
+                    # Send response. Use safe_json_dumps so exchangelib
+                    # types (CalendarEventDetails, Decimal, ItemId, naive
+                    # datetimes) don't crash the serialiser (CAL-006 /
+                    # TSK-004 root cause).
+                    response_body = safe_json_dumps(result).encode('utf-8')
                     await send({
                         "type": "http.response.start",
                         "status": status,
