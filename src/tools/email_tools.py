@@ -870,6 +870,10 @@ class SearchEmailsTool(BaseTool):
                         "type": "string",
                         "description": "Quick mode: subject-OR-body substring. Full-text mode: search text (also accepted as search_query)."
                     },
+                    "search_query": {
+                        "type": "string",
+                        "description": "Legacy alias for 'query' in full_text mode."
+                    },
                     "has_attachments": {
                         "type": "boolean",
                         "description": "Filter by attachment presence"
@@ -1259,14 +1263,23 @@ class SearchEmailsTool(BaseTool):
     async def _search_full_text(self, **kwargs) -> Dict[str, Any]:
         """Full-text search across subject, body, and attachment names."""
         target_mailbox = kwargs.get("target_mailbox")
-        query_text = kwargs.get("query")
+        # Accept both ``query`` (current preferred name) and ``search_query``
+        # (legacy schema name some callers are pinned to). If both are set,
+        # ``query`` wins — that matches the shared-mode semantics used by
+        # _search_quick.
+        query_text = kwargs.get("query") or kwargs.get("search_query")
         search_scope = kwargs.get("search_scope", ["inbox", "sent"])
         max_results = kwargs.get("max_results", 50)
         search_in = kwargs.get("search_in", ["subject", "body"])
         exact_phrase = kwargs.get("exact_phrase", False)
 
         if not query_text:
-            raise ToolExecutionError("query is required for full_text mode")
+            # ValidationError maps to HTTP 400 in the openapi_adapter; raising
+            # ToolExecutionError caused this to surface as HTTP 500 (Bug 2).
+            raise ValidationError(
+                "query is required for full_text mode "
+                "(accepted under 'query' or 'search_query')"
+            )
 
         try:
             account = self.get_account(target_mailbox)
