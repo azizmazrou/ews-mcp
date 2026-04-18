@@ -1632,17 +1632,22 @@ class DeleteEmailTool(BaseTool):
             item = find_message_for_account(account, message_id)
 
             if permanent:
-                # ``item.delete()`` in exchangelib defaults to
-                # MOVE_TO_DELETED_ITEMS — items end up in Trash, defeating
-                # the caller's "permanent" intent. Pass HARD_DELETE so the
-                # item bypasses both Trash and the recoverable-items dump.
+                # ``item.delete()`` in exchangelib defaults to a
+                # MoveToDeletedItems disposal — the item ends up in
+                # Trash, defeating "permanent". The correct API is
+                # ``item.delete(disposal_type=HARD_DELETE)``; the
+                # constant lives in ``exchangelib.items``, not at the
+                # top-level ``exchangelib`` package (the previous fix
+                # imported from the wrong place and also used the
+                # wrong keyword ``delete_type=`` — both produced 500s).
                 try:
-                    from exchangelib import HARD_DELETE
-                    item.delete(delete_type=HARD_DELETE)
+                    from exchangelib.items import HARD_DELETE
+                    item.delete(disposal_type=HARD_DELETE)
                 except ImportError:
-                    # exchangelib < 3 lacks the module-level constant;
-                    # fall back to the string that the EWS API expects.
-                    item.delete(delete_type="HardDelete")
+                    # Fall back to the wire string if the constant
+                    # ever moves again. ``disposal_type="HardDelete"``
+                    # is accepted by exchangelib in all recent versions.
+                    item.delete(disposal_type="HardDelete")
                 action = "permanently deleted"
             else:
                 # Move to trash folder (Deleted Items) so user can recover.
