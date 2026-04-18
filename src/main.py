@@ -410,6 +410,21 @@ class EWSMCPServer:
             # Register tools
             self.register_tools()
 
+            # Bug 4: kick off the semantic-search warmup as a background
+            # task so the server accepts traffic immediately. The warmup
+            # pre-fills the embedding cache from Inbox + Sent top-N so the
+            # first few semantic_search_emails calls don't spend 45-76s
+            # embedding on demand.
+            if (
+                getattr(self.settings, "enable_ai", False)
+                and getattr(self.settings, "enable_semantic_search", False)
+                and getattr(self.settings, "enable_embedding_warmup", True)
+            ):
+                try:
+                    asyncio.create_task(self._run_embedding_warmup())
+                except Exception as exc:
+                    self.logger.warning(f"Failed to schedule embedding warmup: {exc}")
+
             # Log server ready
             self.log_manager.log_activity(
                 level="INFO",
@@ -451,6 +466,99 @@ class EWSMCPServer:
             # Cleanup
             self.ews_client.close()
             self.logger.info("Server stopped")
+
+    async def _run_embedding_warmup(self) -> None:
+        """Background task: pre-embed recent Inbox + Sent items.
+
+        Controlled by env:
+          * EMBEDDING_WARMUP_FOLDERS (default "inbox,sent")
+          * EMBEDDING_WARMUP_PER_FOLDER (default 500)
+          * EMBEDDING_WARMUP_BATCH_SIZE (default 32)
+
+        Silently logs and returns on any failure — the warmup is a
+        best-effort optimisation; the server must still run without it.
+        """
+        try:
+            from .ai import get_embedding_provider, EmbeddingService
+        except Exception as exc:
+            self.logger.warning(f"warmup: AI imports unavailable: {exc}")
+            return
+        try:
+            provider = get_embedding_provider(self.settings)
+        except Exception as exc:
+            self.logger.warning(f"warmup: embedding provider not available: {exc}")
+            return
+        if provider is None:
+            self.logger.info("warmup: no embedding provider configured; skipping")
+            return
+
+        folders_env = os.environ.get("EMBEDDING_WARMUP_FOLDERS", "inbox,sent")
+        per_folder = int(os.environ.get("EMBEDDING_WARMUP_PER_FOLDER", "500"))
+        batch_size = int(os.environ.get("EMBEDDING_WARMUP_BATCH_SIZE", "32"))
+        folder_names = [f.strip().lower() for f in folders_env.split(",") if f.strip()]
+        if not folder_names:
+            return
+
+        # Collect texts in a thread so the blocking iteration doesn't
+        # stall the event loop.
+        def _collect() -> list:
+            from .utils import safe_get
+            texts: list = []
+            account = self.ews_client.account
+            folder_map = {
+                "inbox": getattr(account, "inbox", None),
+                "sent": getattr(account, "sent", None),
+                "drafts": getattr(account, "drafts", None),
+                "archive": getattr(account, "archive", None),
+            }
+            for name in folder_names:
+                folder = folder_map.get(name)
+                if folder is None:
+                    continue
+                try:
+                    items = list(
+                        folder.all().order_by("-datetime_received")[:per_folder]
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"warmup: failed to list {name}: {exc}")
+                    continue
+                for item in items:
+                    subject = safe_get(item, "subject", "") or ""
+                    body = safe_get(item, "text_body", "") or ""
+                    # Match the format used by SemanticSearchEmailsTool so
+                    # the cache key is identical and the at-query-time
+                    # lookup hits.
+                    texts.append(f"{subject} {body[:500]}")
+            return texts
+
+        try:
+            texts = await asyncio.to_thread(_collect)
+        except Exception as exc:
+            self.logger.warning(f"warmup: collection failed: {exc}")
+            return
+
+        if not texts:
+            self.logger.info("warmup: nothing to embed")
+            return
+
+        self.logger.info(
+            "warmup: starting with %d texts across %s (batch_size=%d)",
+            len(texts), folder_names, batch_size,
+        )
+
+        service = EmbeddingService(provider, cache_dir="data/embeddings")
+        try:
+            stats = await service.warmup(
+                texts,
+                batch_size=batch_size,
+                max_items=per_folder * len(folder_names),
+            )
+            self.logger.info(
+                "warmup: finished — %s",
+                ", ".join(f"{k}={v}" for k, v in stats.items()),
+            )
+        except Exception as exc:
+            self.logger.warning(f"warmup: failed: {exc}")
 
     async def run_sse(self):
         """Run the MCP server with SSE (HTTP) transport."""

@@ -262,10 +262,17 @@ async def test_full_text_search_no_results(mock_ews_client):
 
 @pytest.mark.asyncio
 async def test_full_text_search_missing_query(mock_ews_client):
-    """Test full-text search without query."""
+    """Test full-text search without query.
+
+    As of Bug 2, missing query raises ValidationError (mapped to HTTP
+    400 by the SSE adapter) rather than ToolExecutionError (which was
+    mapped to 500).
+    """
+    from src.exceptions import ValidationError
+
     tool = SearchEmailsTool(mock_ews_client)
 
-    with pytest.raises(ToolExecutionError) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         await tool.execute(mode="full_text")
 
-    assert "query is required" in str(exc_info.value).lower() or "query" in str(exc_info.value).lower()
+    assert "query" in str(exc_info.value).lower()

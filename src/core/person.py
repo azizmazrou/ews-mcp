@@ -285,12 +285,14 @@ class Person(BaseModel):
         # Extract name
         name = getattr(mailbox, "name", None) or email
 
-        # Create email address
+        # Create email address. ``Mailbox.routing_type`` is defined on
+        # exchangelib's model but can be ``None``; ``EmailAddress`` requires
+        # a string, so coalesce to the SMTP default.
         email_addr = EmailAddress(
             address=email,
             label="primary",
             is_primary=True,
-            routing_type=getattr(mailbox, "routing_type", "SMTP")
+            routing_type=getattr(mailbox, "routing_type", None) or "SMTP",
         )
 
         # Base person

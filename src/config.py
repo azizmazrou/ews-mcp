@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     ai_max_tokens: int = 4096
     ai_temperature: float = 0.7
     enable_semantic_search: bool = False
+    # On startup, pre-embed recent Inbox + Sent mail in the background so
+    # the first semantic_search_emails call doesn't pay the cold-cache
+    # tax (45-76s observed in production). Disable if the inbox is huge
+    # and you prefer on-demand embedding only.
+    enable_embedding_warmup: bool = True
     enable_email_classification: bool = False
     enable_smart_replies: bool = False
     enable_email_summarization: bool = False

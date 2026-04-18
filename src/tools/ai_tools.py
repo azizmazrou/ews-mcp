@@ -1,9 +1,14 @@
 """AI-powered tools for EWS MCP Server."""
 
-from typing import Any, Dict
+import re
+from typing import Any, Dict, List, Optional
 from .base import BaseTool
 from ..exceptions import EmbeddingError, ToolExecutionError
-from ..utils import format_success_response, safe_get, find_message_for_account
+from ..utils import (
+    format_success_response, safe_get, find_message_for_account,
+    project_fields, strip_body_by_default, LIST_DEFAULT_FIELDS,
+    is_automated_sender, AUTOMATED_SUBJECT_PREFIXES,
+)
 from ..ai import get_ai_provider, get_embedding_provider, EmailClassificationService, EmbeddingService
 
 
@@ -13,6 +18,14 @@ _TARGET_MAILBOX_SCHEMA = {
         "description": "Email address to operate on (requires EWS_IMPERSONATION_ENABLED=true)"
     }
 }
+
+
+def _id_from_doc(doc: Dict[str, Any]) -> str:
+    """Best-effort stable string identifier for a semantic-search hit."""
+    raw = doc.get("id") or doc.get("message_id") or ""
+    if hasattr(raw, "id"):
+        raw = raw.id
+    return str(raw or "")
 
 
 class SemanticSearchEmailsTool(BaseTool):
@@ -49,11 +62,37 @@ class SemanticSearchEmailsTool(BaseTool):
                         "minimum": 0.0,
                         "maximum": 1.0
                     },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Result projection. Default items include "
+                            "message_id, id (deprecated alias), subject, from, "
+                            "received_time, snippet, similarity_score. Pass "
+                            "['body'] to opt into the full message body."
+                        ),
+                    },
+                    "exclude_automated": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Filter out likely-automated senders (no-reply@, "
+                            "notifications@, mailer-daemon, and "
+                            "'Accepted:' / 'Canceled:' / 'Automatic reply:' "
+                            "subjects) before similarity ranking. Set false to "
+                            "include everything."
+                        ),
+                    },
                     **_TARGET_MAILBOX_SCHEMA
                 },
                 "required": ["query"]
             }
         }
+
+    # Per-call cap on how many emails we embed on demand. Anything beyond
+    # this is silently sampled (newest-first). Separate from the warmup
+    # job which populates the cache at startup (Bug 4).
+    _PER_CALL_EMBED_CAP: int = 50
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Execute semantic search."""
@@ -62,6 +101,17 @@ class SemanticSearchEmailsTool(BaseTool):
         max_results = kwargs.get("max_results", 10)
         threshold = kwargs.get("threshold", 0.7)
         target_mailbox = kwargs.get("target_mailbox")
+        # Bug 6: result projection. Includes two cheap Bug-7/Bug-8 fields
+        # (duplicate_count, is_automated) so the agent can reason about
+        # "this was collapsed from N hits" / "this is an automated
+        # sender" without a second round trip.
+        fields = kwargs.get("fields") or [
+            "message_id", "id", "subject", "from", "received_time",
+            "snippet", "similarity_score",
+            "duplicate_count", "is_automated",
+        ]
+        # Bug 8: default ON for semantic search (agent-facing workflow).
+        exclude_automated = bool(kwargs.get("exclude_automated", True))
 
         if not query:
             raise ToolExecutionError("query is required")
@@ -87,20 +137,44 @@ class SemanticSearchEmailsTool(BaseTool):
 
             folder = folder_map.get(folder_name, account.inbox)
 
-            # Fetch recent emails
-            emails = list(folder.all().order_by('-datetime_received')[:100])
+            # Fetch recent emails. Pull more than the per-call cap so that
+            # after exclude_automated filtering we still have useful
+            # candidates, but cap embedding work below.
+            raw_limit = min(200, self._PER_CALL_EMBED_CAP * 3)
+            emails = list(folder.all().order_by('-datetime_received')[:raw_limit])
 
-            # Prepare documents for search
-            documents = []
+            # Prepare documents for search. Apply exclude_automated BEFORE
+            # embedding so we don't pay the embedding cost for noise.
+            documents: List[Dict[str, Any]] = []
+            filtered_out = 0
             for email in emails:
-                text = f"{safe_get(email, 'subject', '')} {safe_get(email, 'text_body', '')[:500]}"
+                subject = safe_get(email, 'subject', '') or ''
+                sender = safe_get(email.sender, 'email_address', '') if hasattr(email, 'sender') else ''
+                if exclude_automated and is_automated_sender(sender, subject):
+                    filtered_out += 1
+                    continue
+                text_body = safe_get(email, 'text_body', '') or ''
+                text = f"{subject} {text_body[:500]}"
                 documents.append({
                     "id": safe_get(email, 'id', ''),
-                    "subject": safe_get(email, 'subject', ''),
-                    "from": safe_get(email.sender, 'email_address', '') if hasattr(email, 'sender') else '',
+                    "subject": subject,
+                    "from": sender,
                     "datetime_received": safe_get(email, 'datetime_received'),
-                    "text": text
+                    "text_body": text_body,
+                    "text": text,
                 })
+
+            # Bug 4: per-call embed cap. Honour newest-first ordering.
+            sampled_partial = False
+            scanned_total = len(documents)
+            if len(documents) > self._PER_CALL_EMBED_CAP:
+                sampled_partial = True
+                documents = documents[: self._PER_CALL_EMBED_CAP]
+                self.logger.info(
+                    "Partial embedding: embedding %d of %d items "
+                    "(set a larger cap with future warmup work).",
+                    self._PER_CALL_EMBED_CAP, scanned_total,
+                )
 
             if not documents:
                 # No mail to rank — don't embed anything. Be explicit so the
@@ -110,6 +184,8 @@ class SemanticSearchEmailsTool(BaseTool):
                     query=query,
                     result_count=0,
                     results=[],
+                    items=[],
+                    filtered_out=filtered_out,
                     mailbox=mailbox,
                     folder=folder_name,
                 )
@@ -124,7 +200,9 @@ class SemanticSearchEmailsTool(BaseTool):
                     query=query,
                     documents=documents,
                     text_key="text",
-                    top_k=max_results,
+                    # Pull extra candidates so dedupe can still surface
+                    # max_results unique hits after collapsing duplicates.
+                    top_k=max_results * 3,
                     threshold=threshold,
                 )
             except EmbeddingError as exc:
@@ -137,25 +215,86 @@ class SemanticSearchEmailsTool(BaseTool):
                     f"Embedding provider error: {exc} | Hint: {hint}"
                 ) from exc
 
-            # Format results
-            formatted_results = []
+            # Bug 7: dedupe by message_id. Keep the highest-scoring hit
+            # per id and track collapsed copies in duplicate_count.
+            seen: Dict[str, Dict[str, Any]] = {}
             for doc, score in results:
-                formatted_results.append({
-                    "id": doc["id"],
-                    "subject": doc["subject"],
-                    "from": doc["from"],
-                    "datetime_received": str(doc["datetime_received"]),
-                    "similarity_score": round(score, 3)
-                })
+                key = _id_from_doc(doc)
+                if not key:
+                    # No stable id — skip rather than duplicate arbitrarily.
+                    continue
+                score_rounded = round(score, 3)
+                existing = seen.get(key)
+                if existing is not None:
+                    existing["duplicate_count"] = existing.get("duplicate_count", 0) + 1
+                    # Only swap-in the new record if it scored higher;
+                    # otherwise the better hit stays. Carry the
+                    # duplicate_count across the swap.
+                    if score_rounded > existing.get("similarity_score", 0):
+                        dup_count = existing["duplicate_count"]
+                        existing = None  # fall through to the builder below
+                    else:
+                        continue
+                sender = doc.get("from") or ""
+                subject = doc.get("subject") or ""
+                from_is_automated = is_automated_sender(sender, subject)
+                text_body = doc.get("text_body") or ""
+                item = {
+                    # Bug 5: canonical key + legacy alias (deprecation
+                    # surfaced via meta in the response envelope).
+                    "message_id": key,
+                    "id": key,
+                    "subject": subject,
+                    "from": sender,
+                    "received_time": str(doc.get("datetime_received") or ""),
+                    "datetime_received": str(doc.get("datetime_received") or ""),
+                    "similarity_score": score_rounded,
+                    "snippet": (text_body or "")[:200],
+                    "is_automated": from_is_automated,
+                    "duplicate_count": dup_count if existing is None and key in seen else 0,
+                }
+                if "body" in fields:
+                    item["body"] = text_body
+                strip_body_by_default(item, keep_body="body" in fields)
+                seen[key] = item
 
-            self.logger.info(f"Semantic search found {len(formatted_results)} results for query: {query[:50]}")
+            formatted_results = list(seen.values())
+            # Sort by score (desc) — dedupe scrambled order.
+            formatted_results.sort(key=lambda i: i.get("similarity_score", 0), reverse=True)
+            formatted_results = formatted_results[:max_results]
+
+            # Apply projection last so per-field filtering happens once.
+            projected = [project_fields(item, fields) for item in formatted_results]
+
+            self.logger.info(
+                "Semantic search: %d unique results (dedupe removed %d) "
+                "for query %r",
+                len(projected),
+                sum(i.get("duplicate_count", 0) for i in formatted_results),
+                query[:50],
+            )
+
+            response_meta = {
+                "deprecations": [
+                    "result.id is deprecated — use result.message_id instead. "
+                    "Aliased for one release."
+                ],
+                "scanned": scanned_total,
+                "filtered_automated": filtered_out if exclude_automated else 0,
+                "sampled_partial": sampled_partial,
+            }
 
             return format_success_response(
-                f"Found {len(formatted_results)} semantically similar emails",
+                f"Found {len(projected)} semantically similar emails",
                 query=query,
-                result_count=len(formatted_results),
-                results=formatted_results,
-                mailbox=mailbox
+                result_count=len(projected),
+                results=projected,
+                # Bug 5: canonical `items` + `count`, kept alongside `results`.
+                items=projected,
+                count=len(projected),
+                total=scanned_total,
+                meta=response_meta,
+                mailbox=mailbox,
             )
 
         except ToolExecutionError:
