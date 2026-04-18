@@ -183,6 +183,91 @@ class EmbeddingService:
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_k]
 
+    async def warmup(
+        self,
+        texts: List[str],
+        *,
+        batch_size: int = 32,
+        max_items: int = 1000,
+        progress_every: int = 100,
+    ) -> Dict[str, int]:
+        """Pre-embed ``texts`` into the cache in small batches.
+
+        Intended for startup so cold semantic_search calls don't spend 45+
+        seconds embedding on demand. Returns counts for observability:
+
+        * ``requested``: input count (after max_items truncation)
+        * ``cache_hits``: already in cache, no network work done
+        * ``embedded``: new embeddings persisted during this call
+        * ``errors``: batches that raised EmbeddingError (these are logged
+          and skipped so a partial outage doesn't abort the warmup)
+        """
+        if not texts:
+            return {"requested": 0, "cache_hits": 0, "embedded": 0, "errors": 0}
+
+        # De-duplicate while preserving order: same subject/body in two
+        # folders shouldn't pay for two embeddings.
+        dedup_seen: set = set()
+        unique_texts: List[str] = []
+        for text in texts:
+            if not text or not isinstance(text, str):
+                continue
+            key = self._get_cache_key(text)
+            if key in dedup_seen:
+                continue
+            dedup_seen.add(key)
+            unique_texts.append(text)
+
+        unique_texts = unique_texts[:max_items]
+        total = len(unique_texts)
+        hits = 0
+        misses: List[str] = []
+        for text in unique_texts:
+            if self._get_cache_key(text) in self.embedding_cache:
+                hits += 1
+            else:
+                misses.append(text)
+
+        embedded = 0
+        errors = 0
+        last_log = 0
+        for start in range(0, len(misses), batch_size):
+            batch = misses[start : start + batch_size]
+            try:
+                responses = await self.provider.embed_batch(batch)
+            except Exception as exc:  # EmbeddingError or transport failure
+                errors += 1
+                self.logger.warning(
+                    "warmup: batch %d-%d failed (%s: %s); continuing",
+                    start, start + len(batch), type(exc).__name__, exc,
+                )
+                continue
+            for text, response in zip(batch, responses):
+                self.embedding_cache[self._get_cache_key(text)] = response.embedding
+                embedded += 1
+            if embedded - last_log >= progress_every:
+                last_log = embedded
+                self.logger.info(
+                    "warmup: embedded %d/%d items (%.0f%%)",
+                    embedded, total, (embedded / max(total, 1)) * 100.0,
+                )
+
+        if embedded:
+            # One atomic write after the whole warmup — O(N) disk writes
+            # are still cheaper than per-miss writes at steady state.
+            self._save_cache()
+
+        self.logger.info(
+            "warmup complete: embedded=%d cache_hits=%d errors=%d total=%d",
+            embedded, hits, errors, total,
+        )
+        return {
+            "requested": total,
+            "cache_hits": hits,
+            "embedded": embedded,
+            "errors": errors,
+        }
+
     async def find_duplicates(
         self,
         documents: List[Dict[str, Any]],
