@@ -117,42 +117,59 @@ def strip_html_document_tags(html: str) -> str:
     return html.strip()
 
 
+_FORWARD_PREFIX_RE = re.compile(
+    r"^(?:fw|fwd|forward)\s*:\s*", re.IGNORECASE
+)
+_REPLY_PREFIX_RE = re.compile(r"^(?:re|rply|reply)\s*:\s*", re.IGNORECASE)
+
+
 def has_forward_prefix(subject: str) -> bool:
-    """Check if subject already has a forward prefix (FW:, Fwd:, etc.)."""
+    """Check if subject already has a forward prefix (FW:, Fwd:, FWD:, Forward:)."""
     if not subject:
         return False
-    # Match common forward prefixes in various languages
-    # English: FW:, Fwd:, Forward:
-    # Also handle with/without space after colon
-    return bool(re.match(r'^(fw|fwd|forward)\s*:', subject, re.IGNORECASE))
+    return bool(_FORWARD_PREFIX_RE.match(subject))
 
 
 def has_reply_prefix(subject: str) -> bool:
-    """Check if subject already has a reply prefix (RE:, Re:, Reply:, etc.)."""
+    """Check if subject already has a reply prefix (RE:, Re:, Reply:)."""
     if not subject:
         return False
-    # Match common reply prefixes
-    # English: RE:, Re:, Reply:
-    # Also handle with/without space after colon
-    return bool(re.match(r'^(re|reply)\s*:', subject, re.IGNORECASE))
+    return bool(_REPLY_PREFIX_RE.match(subject))
 
 
 def add_forward_prefix(subject: str) -> str:
-    """Add FW: prefix if not already present."""
+    """Return ``subject`` prefixed with the canonical ``FW:``.
+
+    Normalises any existing variant — ``Fwd:``, ``FWD:``, ``Forward:``,
+    mixed case, stray whitespace — to the single ``FW: <body>`` form
+    and never stacks ("FW: FW: hello" cannot happen). The C10 fix
+    stripped only ``FW:``; Bug 5 in the follow-up widens the strip to
+    cover Fwd:/FWD:/Forward: too.
+    """
     if not subject:
         return "FW:"
-    if has_forward_prefix(subject):
-        return subject
-    return f"FW: {subject}"
+    # Strip leading whitespace before prefix detection so "  Fwd: x"
+    # still normalises correctly.
+    stripped_input = subject.lstrip()
+    stripped = _FORWARD_PREFIX_RE.sub("", stripped_input, count=1).strip()
+    if not stripped:
+        return "FW:"
+    return f"FW: {stripped}"
 
 
 def add_reply_prefix(subject: str) -> str:
-    """Add RE: prefix if not already present."""
+    """Return ``subject`` prefixed with the canonical ``RE:``.
+
+    Same normalisation approach as :func:`add_forward_prefix`: any
+    variant (Re:, Reply:) is stripped and replaced with ``RE:``.
+    """
     if not subject:
         return "RE:"
-    if has_reply_prefix(subject):
-        return subject
-    return f"RE: {subject}"
+    stripped_input = subject.lstrip()
+    stripped = _REPLY_PREFIX_RE.sub("", stripped_input, count=1).strip()
+    if not stripped:
+        return "RE:"
+    return f"RE: {stripped}"
 
 
 def clean_original_body_for_signature(original_body_html: str) -> str:
@@ -1485,6 +1502,16 @@ class GetEmailDetailsTool(BaseTool):
         message_id = kwargs.get("message_id")
         target_mailbox = kwargs.get("target_mailbox")
         fields = kwargs.get("fields")  # None -> backward-compat full shape
+
+        # Validate up front. Previously a missing or empty message_id fell
+        # through to ``find_message_for_account(account, None)`` which
+        # raised a generic exception and surfaced as HTTP 500. A missing
+        # required field is a caller error, not a server crash, so raise
+        # ValidationError which the openapi_adapter maps to HTTP 400.
+        if not message_id or not isinstance(message_id, str) or not message_id.strip():
+            raise ValidationError(
+                "message_id is required and must be a non-empty string"
+            )
 
         try:
             # Get account (primary or impersonated)

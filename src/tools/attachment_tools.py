@@ -10,7 +10,7 @@ from pathlib import Path
 from exchangelib import Body, HTMLBody, ItemAttachment, Message
 
 from .base import BaseTool
-from ..exceptions import ToolExecutionError
+from ..exceptions import ToolExecutionError, ValidationError
 from ..utils import format_success_response, safe_get, find_message_across_folders, find_message_for_account
 
 
@@ -185,7 +185,11 @@ class DownloadAttachmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "download_attachment",
-            "description": "Download an attachment by name or index.",
+            "description": (
+                "Download an attachment. Provide ``attachment_id`` (from "
+                "list_attachments) OR ``attachment_name`` (exact file name, "
+                "case-insensitive)."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -195,7 +199,17 @@ class DownloadAttachmentTool(BaseTool):
                     },
                     "attachment_id": {
                         "type": "string",
-                        "description": "Attachment ID (from list_attachments)"
+                        "description": "Attachment ID (preferred; from list_attachments)"
+                    },
+                    "attachment_name": {
+                        "type": "string",
+                        "description": (
+                            "Attachment file name (fallback when "
+                            "attachment_id isn't known). Case-insensitive "
+                            "exact match. Errors if multiple attachments "
+                            "share the same name — use attachment_id in "
+                            "that case."
+                        )
                     },
                     "return_as": {
                         "type": "string",
@@ -212,7 +226,10 @@ class DownloadAttachmentTool(BaseTool):
                         "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
-                "required": ["message_id", "attachment_id"]
+                # Only message_id is strictly required; at least one of
+                # attachment_id / attachment_name must be supplied — the
+                # execute path enforces that with a ValidationError.
+                "required": ["message_id"]
             }
         }
 
@@ -220,18 +237,23 @@ class DownloadAttachmentTool(BaseTool):
         """Download an attachment."""
         message_id = kwargs.get("message_id")
         attachment_id = kwargs.get("attachment_id")
+        attachment_name = kwargs.get("attachment_name")
         return_as = kwargs.get("return_as", "base64")
         save_path = kwargs.get("save_path")
         target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
-            raise ToolExecutionError("message_id is required")
+            raise ValidationError("message_id is required")
 
-        if not attachment_id:
-            raise ToolExecutionError("attachment_id is required")
+        if not attachment_id and not attachment_name:
+            raise ValidationError(
+                "Either attachment_id or attachment_name is required"
+            )
 
         if return_as == "file_path" and not save_path:
-            raise ToolExecutionError("save_path is required when return_as is 'file_path'")
+            raise ValidationError(
+                "save_path is required when return_as is 'file_path'"
+            )
 
         try:
             account = self.get_account(target_mailbox)
@@ -240,16 +262,35 @@ class DownloadAttachmentTool(BaseTool):
             # Find message across all folders (including custom subfolders)
             message = find_message_for_account(account, message_id)
 
-            # Find the attachment
+            # Find the attachment. Prefer attachment_id (stable). Fall
+            # back to case-insensitive name match and raise if it's
+            # ambiguous.
             attachment = None
-            if hasattr(message, 'attachments') and message.attachments:
-                for att in message.attachments:
+            attachments = list(
+                getattr(message, "attachments", None) or []
+            )
+            if attachment_id:
+                for att in attachments:
                     if str(extract_attachment_id(att)) == str(attachment_id):
                         attachment = att
                         break
+            if attachment is None and attachment_name:
+                wanted = str(attachment_name).strip().lower()
+                name_matches = [
+                    att for att in attachments
+                    if (safe_get(att, "name", "") or "").strip().lower() == wanted
+                ]
+                if len(name_matches) > 1:
+                    raise ValidationError(
+                        f"Multiple attachments named {attachment_name!r} "
+                        f"on this message; use attachment_id to disambiguate."
+                    )
+                if name_matches:
+                    attachment = name_matches[0]
 
             if not attachment:
-                raise ToolExecutionError(f"Attachment not found: {attachment_id}")
+                ident = attachment_id or attachment_name
+                raise ValidationError(f"Attachment not found: {ident!r}")
 
             # Get attachment content
             content = safe_get(attachment, 'content', b'')
@@ -298,10 +339,10 @@ class DownloadAttachmentTool(BaseTool):
                     mailbox=mailbox
                 )
 
-        except ToolExecutionError:
+        except (ValidationError, ToolExecutionError):
             raise
         except Exception as e:
-            self.logger.error(f"Failed to download attachment: {e}")
+            self.logger.exception(f"Failed to download attachment: {e}")
             raise ToolExecutionError(f"Failed to download attachment: {e}")
 
 

@@ -5,7 +5,7 @@ from typing import Any, Dict
 from exchangelib import Folder
 
 from .base import BaseTool
-from ..exceptions import ToolExecutionError
+from ..exceptions import ToolExecutionError, ValidationError
 from ..utils import format_success_response, safe_get, ews_id_to_str
 
 
@@ -450,7 +450,12 @@ class ManageFolderTool(BaseTool):
                     },
                     "permanent": {
                         "type": "boolean",
-                        "description": "Permanently delete (true) or soft delete (false)",
+                        "description": "Permanently delete (true) or soft delete (false). Alias: hard_delete.",
+                        "default": False
+                    },
+                    "hard_delete": {
+                        "type": "boolean",
+                        "description": "Alias for 'permanent' for callers matching delete_email shape.",
                         "default": False
                     },
                     "target_mailbox": {
@@ -525,42 +530,98 @@ class ManageFolderTool(BaseTool):
             raise ToolExecutionError(f"Failed to create folder: {e}")
 
     async def _delete(self, **kwargs) -> Dict[str, Any]:
-        """Delete a folder."""
+        """Delete a folder.
+
+        Accepts either ``folder_id`` or ``folder_name`` (the latter as a
+        fallback so the tool is consistent with ``_create``). Accepts
+        ``permanent`` and the callers'-common alias ``hard_delete``.
+        """
         folder_id = kwargs.get("folder_id")
-        permanent = kwargs.get("permanent", False)
+        folder_name_input = kwargs.get("folder_name")
+        parent_folder_name = kwargs.get("parent_folder")
+        # ``permanent`` is the canonical param; ``hard_delete`` is an
+        # alias many callers use (matching delete_email). Accept both.
+        permanent = bool(kwargs.get("permanent", kwargs.get("hard_delete", False)))
         target_mailbox = kwargs.get("target_mailbox")
 
-        if not folder_id:
-            raise ToolExecutionError("folder_id is required for delete action")
+        if not folder_id and not folder_name_input:
+            raise ValidationError(
+                "delete requires folder_id (or folder_name as fallback)"
+            )
 
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            folder = self._find_folder_by_id(account.root, folder_id)
-            if not folder:
-                raise ToolExecutionError(f"Folder not found: {folder_id}")
+            folder = None
+            if folder_id:
+                folder = self._find_folder_by_id(account.root, folder_id)
 
-            folder_name = safe_get(folder, 'name', 'Unknown')
+            # Fallback: resolve by name. Useful when a caller pasted a
+            # folder name into the folder_id field (common confusion)
+            # or is using the create-style shape.
+            if folder is None and folder_name_input:
+                try:
+                    from ..utils import resolve_folder_for_account
+                    # resolve_folder_for_account is async in this file.
+                    folder = await resolve_folder_for_account(
+                        account, folder_name_input
+                    )
+                except Exception as resolve_exc:
+                    self.logger.debug(
+                        f"folder name resolve failed for {folder_name_input!r}: {resolve_exc}"
+                    )
+                    folder = None
 
-            if permanent:
-                folder.delete()
-                action = "permanently deleted"
-            else:
-                folder.soft_delete()
-                action = "moved to Deleted Items"
+            if folder is None:
+                # Caller error — not a server crash. Return 400-mapped
+                # ValidationError so the operator sees a clear message.
+                ident = folder_id or folder_name_input
+                raise ValidationError(f"Folder not found: {ident!r}")
+
+            resolved_folder_name = safe_get(folder, 'name', 'Unknown')
+
+            try:
+                if permanent:
+                    folder.delete()
+                    action = "permanently deleted"
+                else:
+                    folder.soft_delete()
+                    action = "moved to Deleted Items"
+            except Exception as del_exc:
+                # Exchange returns an informative error for common cases
+                # ("folder not empty", "system folder cannot be deleted",
+                # "insufficient permissions") — bubble it up verbatim so
+                # the operator sees the real cause instead of a 500.
+                self.logger.warning(
+                    "folder.%s failed for %r: %s: %s",
+                    "delete" if permanent else "soft_delete",
+                    resolved_folder_name, type(del_exc).__name__, del_exc,
+                )
+                raise ToolExecutionError(
+                    f"Failed to delete folder {resolved_folder_name!r}: "
+                    f"{type(del_exc).__name__}: {del_exc}"
+                )
 
             return format_success_response(
-                f"Folder '{folder_name}' {action}",
-                folder_id=folder_id,
-                folder_name=folder_name,
+                f"Folder '{resolved_folder_name}' {action}",
+                folder_id=folder_id or ews_id_to_str(safe_get(folder, 'id', None)),
+                folder_name=resolved_folder_name,
                 permanent=permanent,
-                mailbox=mailbox
+                hard_delete=permanent,
+                mailbox=mailbox,
             )
-        except ToolExecutionError:
+        except (ValidationError, ToolExecutionError):
             raise
         except Exception as e:
-            raise ToolExecutionError(f"Failed to delete folder: {e}")
+            # logger.exception emits the full traceback so operators can
+            # diagnose the real upstream cause.
+            self.logger.exception(
+                f"manage_folder(action=delete) failed: {type(e).__name__}: {e}"
+            )
+            raise ToolExecutionError(
+                f"Failed to delete folder: {type(e).__name__}: {e}"
+            )
 
     async def _rename(self, **kwargs) -> Dict[str, Any]:
         """Rename a folder."""

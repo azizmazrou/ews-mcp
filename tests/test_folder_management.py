@@ -164,11 +164,18 @@ async def test_delete_folder_permanent(mock_ews_client):
 
 @pytest.mark.asyncio
 async def test_delete_folder_not_found(mock_ews_client):
-    """Test deleting non-existent folder."""
+    """Test deleting non-existent folder.
+
+    As of Bug 4 in the follow-up, "folder not found" is a caller error
+    (HTTP 400) rather than a server failure (HTTP 500). The tool now
+    raises ValidationError instead of ToolExecutionError.
+    """
+    from src.exceptions import ValidationError
+
     tool = ManageFolderTool(mock_ews_client)
 
     with patch.object(tool, '_find_folder_by_id', return_value=None):
-        with pytest.raises(ToolExecutionError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await tool.execute(action="delete", folder_id="nonexistent-id")
 
         assert "not found" in str(exc_info.value).lower()

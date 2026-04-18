@@ -16,17 +16,29 @@ class CreateContactTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "create_contact",
-            "description": "Create a new contact.",
+            "description": (
+                "Create a new contact. Provide ``given_name`` + ``surname`` "
+                "(preferred) OR ``full_name`` (split on first space as a "
+                "deprecated alias)."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "given_name": {
                         "type": "string",
-                        "description": "First name"
+                        "description": "First name (preferred)"
                     },
                     "surname": {
                         "type": "string",
-                        "description": "Last name"
+                        "description": "Last name (preferred)"
+                    },
+                    "full_name": {
+                        "type": "string",
+                        "description": (
+                            "Deprecated alias. If supplied and given_name/"
+                            "surname are missing, the string is split on the "
+                            "first space into given_name + surname."
+                        )
                     },
                     "email_address": {
                         "type": "string",
@@ -53,6 +65,10 @@ class CreateContactTool(BaseTool):
                         "description": "Email address to operate on (requires impersonation/delegate access)"
                     }
                 },
+                # full_name is accepted as a deprecated alias that fills in
+                # given_name / surname before validation. The declared
+                # required set stays as the canonical trio so schema-aware
+                # clients keep generating the right shape.
                 "required": ["given_name", "surname", "email_address"]
             }
         }
@@ -60,6 +76,20 @@ class CreateContactTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Create contact."""
         target_mailbox = kwargs.get("target_mailbox")
+
+        # Bug 6: accept ``full_name`` as a deprecated alias. Split on the
+        # first whitespace run so "Alice Al-Rashid" -> given="Alice",
+        # surname="Al-Rashid", and "Alice" -> given="Alice", surname="".
+        full_name = kwargs.pop("full_name", None)
+        if full_name and not kwargs.get("given_name") and not kwargs.get("surname"):
+            import re as _re
+            parts = _re.split(r"\s+", str(full_name).strip(), maxsplit=1)
+            kwargs["given_name"] = parts[0]
+            kwargs["surname"] = parts[1] if len(parts) > 1 else ""
+            self.logger.info(
+                "create_contact: full_name -> given_name=%r surname=%r",
+                kwargs["given_name"], kwargs["surname"],
+            )
 
         # Validate input
         request = self.validate_input(CreateContactRequest, **kwargs)

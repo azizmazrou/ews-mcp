@@ -147,44 +147,79 @@ class GetTasksTool(BaseTool):
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            # Query tasks
-            items = account.tasks.all()
+            # Query tasks. ``account.tasks`` can raise if the folder is
+            # unavailable on this mailbox, so guard narrowly.
+            tasks_folder = getattr(account, "tasks", None)
+            if tasks_folder is None:
+                raise ToolExecutionError(
+                    "Tasks folder is unavailable on this mailbox"
+                )
+            items = tasks_folder.all()
 
             if not include_completed:
                 items = items.filter(is_complete=False)
 
             items = items.order_by('-datetime_created')
 
-            # Format tasks
+            # Format tasks. Wrap each item so one malformed task cannot
+            # sink the entire response — previously a single bad
+            # ``due_date`` or missing attribute produced an opaque HTTP
+            # 500 for the whole call.
             tasks = []
+            skipped = 0
             for item in items[:max_results]:
-                task_data = {
-                    "item_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
-                    "subject": safe_get(item, "subject", "") or "",
-                    "status": safe_get(item, "status", "NotStarted") or "NotStarted",
-                    "percent_complete": safe_get(item, "percent_complete", 0),
-                    "is_complete": safe_get(item, "is_complete", False),
-                    "due_date": safe_get(item, "due_date", None),
-                    "importance": safe_get(item, "importance", "Normal") or "Normal"
-                }
+                try:
+                    due_date = safe_get(item, "due_date", None)
+                    # due_date may be an EWSDate/EWSDateTime, a plain
+                    # date, or a string — coerce defensively.
+                    if due_date is not None and hasattr(due_date, "isoformat"):
+                        due_iso = due_date.isoformat()
+                    elif due_date is not None:
+                        due_iso = str(due_date)
+                    else:
+                        due_iso = None
 
-                # Format due date
-                if task_data["due_date"]:
-                    task_data["due_date"] = task_data["due_date"].isoformat()
+                    task_data = {
+                        "item_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
+                        "subject": safe_get(item, "subject", "") or "",
+                        "status": safe_get(item, "status", "NotStarted") or "NotStarted",
+                        "percent_complete": safe_get(item, "percent_complete", 0),
+                        "is_complete": safe_get(item, "is_complete", False),
+                        "due_date": due_iso,
+                        "importance": safe_get(item, "importance", "Normal") or "Normal",
+                    }
+                    tasks.append(task_data)
+                except Exception as item_exc:
+                    skipped += 1
+                    self.logger.warning(
+                        "Skipped malformed task id=%r: %s: %s",
+                        safe_get(item, "id", None),
+                        type(item_exc).__name__,
+                        item_exc,
+                    )
+                    continue
 
-                tasks.append(task_data)
-
-            self.logger.info(f"Retrieved {len(tasks)} tasks")
+            self.logger.info(
+                f"Retrieved {len(tasks)} tasks (skipped {skipped} malformed)"
+            )
 
             return format_success_response(
                 f"Retrieved {len(tasks)} tasks",
                 tasks=tasks,
-                mailbox=mailbox
+                count=len(tasks),
+                skipped=skipped,
+                mailbox=mailbox,
             )
 
+        except ToolExecutionError:
+            raise
         except Exception as e:
-            self.logger.error(f"Failed to get tasks: {e}")
-            raise ToolExecutionError(f"Failed to get tasks: {e}")
+            # logger.exception emits the traceback so the operator can see
+            # the real upstream cause instead of "Internal Server Error".
+            self.logger.exception(
+                f"get_tasks failed: {type(e).__name__}: {e}"
+            )
+            raise ToolExecutionError(f"Failed to get tasks: {type(e).__name__}: {e}")
 
 
 class UpdateTaskTool(BaseTool):
