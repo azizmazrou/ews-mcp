@@ -101,10 +101,14 @@ class SemanticSearchEmailsTool(BaseTool):
         max_results = kwargs.get("max_results", 10)
         threshold = kwargs.get("threshold", 0.7)
         target_mailbox = kwargs.get("target_mailbox")
-        # Bug 6: result projection.
+        # Bug 6: result projection. Includes two cheap Bug-7/Bug-8 fields
+        # (duplicate_count, is_automated) so the agent can reason about
+        # "this was collapsed from N hits" / "this is an automated
+        # sender" without a second round trip.
         fields = kwargs.get("fields") or [
             "message_id", "id", "subject", "from", "received_time",
             "snippet", "similarity_score",
+            "duplicate_count", "is_automated",
         ]
         # Bug 8: default ON for semantic search (agent-facing workflow).
         exclude_automated = bool(kwargs.get("exclude_automated", True))
@@ -211,37 +215,43 @@ class SemanticSearchEmailsTool(BaseTool):
                     f"Embedding provider error: {exc} | Hint: {hint}"
                 ) from exc
 
-            # Bug 7: dedupe by message_id, keeping the highest-scoring hit
-            # per id. duplicate_count tracks collapsed copies.
+            # Bug 7: dedupe by message_id. Keep the highest-scoring hit
+            # per id and track collapsed copies in duplicate_count.
             seen: Dict[str, Dict[str, Any]] = {}
             for doc, score in results:
                 key = _id_from_doc(doc)
                 if not key:
                     # No stable id — skip rather than duplicate arbitrarily.
                     continue
-                if key in seen:
-                    seen[key]["duplicate_count"] = seen[key].get("duplicate_count", 0) + 1
-                    continue
+                score_rounded = round(score, 3)
+                existing = seen.get(key)
+                if existing is not None:
+                    existing["duplicate_count"] = existing.get("duplicate_count", 0) + 1
+                    # Only swap-in the new record if it scored higher;
+                    # otherwise the better hit stays. Carry the
+                    # duplicate_count across the swap.
+                    if score_rounded > existing.get("similarity_score", 0):
+                        dup_count = existing["duplicate_count"]
+                        existing = None  # fall through to the builder below
+                    else:
+                        continue
                 sender = doc.get("from") or ""
                 subject = doc.get("subject") or ""
-                # Bug 8 defence-in-depth: re-check after embedding, just in
-                # case the caller passed exclude_automated=False but then
-                # wants to identify noise.
                 from_is_automated = is_automated_sender(sender, subject)
                 text_body = doc.get("text_body") or ""
                 item = {
-                    # Bug 5: canonical key + legacy alias + deprecation note
-                    # (surfaced in meta below).
+                    # Bug 5: canonical key + legacy alias (deprecation
+                    # surfaced via meta in the response envelope).
                     "message_id": key,
                     "id": key,
                     "subject": subject,
                     "from": sender,
                     "received_time": str(doc.get("datetime_received") or ""),
                     "datetime_received": str(doc.get("datetime_received") or ""),
-                    "similarity_score": round(score, 3),
+                    "similarity_score": score_rounded,
                     "snippet": (text_body or "")[:200],
                     "is_automated": from_is_automated,
-                    "duplicate_count": 0,
+                    "duplicate_count": dup_count if existing is None and key in seen else 0,
                 }
                 if "body" in fields:
                     item["body"] = text_body
