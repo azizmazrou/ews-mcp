@@ -1,6 +1,30 @@
 """Pydantic models for EWS MCP Server."""
 
+import re
 from pydantic import BaseModel, EmailStr, Field, field_validator
+
+# Bug CON-008: pydantic's ``EmailStr`` uses email-validator, which as of
+# 2.x rejects every reserved TLD from RFC 2606 (.invalid, .test, .example,
+# .localhost). Contacts frequently contain placeholder addresses in
+# training data and tests, so we use a looser regex for this project's
+# contact-model fields. The upstream Exchange server performs its own
+# validation when the item is saved, which is the authoritative check.
+_EMAIL_SYNTAX_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _validate_loose_email(value: str) -> str:
+    """Lenient email-syntax check that allows RFC 2606 reserved TLDs.
+
+    Used by :class:`CreateContactRequest`. Intentionally does NOT call
+    ``email_validator.validate_email`` because that library enforces a
+    special-use-domain denylist we don't want for contact data.
+    """
+    if not isinstance(value, str):
+        raise ValueError("email_address must be a string")
+    stripped = value.strip()
+    if not stripped or not _EMAIL_SYNTAX_RE.match(stripped):
+        raise ValueError(f"email_address {value!r} is not a valid email syntax")
+    return stripped
 from typing import Optional, List, Literal
 from datetime import datetime
 from enum import Enum
@@ -145,14 +169,27 @@ class MeetingResponse(BaseModel):
 
 # Contact Models
 class CreateContactRequest(BaseModel):
-    """Request model for creating contact."""
+    """Request model for creating contact.
+
+    ``email_address`` uses a lenient syntax-only validator (see
+    :func:`_validate_loose_email`) rather than pydantic's ``EmailStr``
+    so RFC 2606 reserved TLDs (``.invalid`` / ``.test`` / ``.example``)
+    and other non-deliverable but syntactically-valid addresses are
+    accepted — Exchange itself performs the authoritative validation
+    when the contact is saved.
+    """
     given_name: str = Field(..., min_length=1, description="First name")
     surname: str = Field(..., min_length=1, description="Last name")
-    email_address: EmailStr = Field(..., description="Email address")
+    email_address: str = Field(..., description="Email address")
     phone_number: Optional[str] = Field(None, description="Phone number")
     company: Optional[str] = Field(None, description="Company name")
     job_title: Optional[str] = Field(None, description="Job title")
     department: Optional[str] = Field(None, description="Department")
+
+    @field_validator("email_address")
+    @classmethod
+    def _email_loose(cls, value: str) -> str:
+        return _validate_loose_email(value)
 
 
 class ContactDetails(BaseModel):

@@ -254,11 +254,18 @@ async def test_move_folder(mock_ews_client):
 
 @pytest.mark.asyncio
 async def test_move_folder_source_not_found(mock_ews_client):
-    """Test moving non-existent folder."""
+    """Test moving non-existent folder.
+
+    As of the folder follow-up fixes, "folder not found" and "unknown
+    destination" are caller errors — raised as ValidationError so the
+    SSE adapter maps them to HTTP 400, not 500.
+    """
+    from src.exceptions import ValidationError
+
     tool = ManageFolderTool(mock_ews_client)
 
     with patch.object(tool, '_find_folder_by_id', return_value=None):
-        with pytest.raises(ToolExecutionError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await tool.execute(
                 action="move",
                 folder_id="nonexistent-id",
@@ -270,7 +277,12 @@ async def test_move_folder_source_not_found(mock_ews_client):
 
 @pytest.mark.asyncio
 async def test_move_folder_destination_not_found(mock_ews_client):
-    """Test moving folder to non-existent destination."""
+    """Test moving folder to non-existent destination.
+
+    Unknown destinations are caller errors -> ValidationError (HTTP 400).
+    """
+    from src.exceptions import ValidationError
+
     tool = ManageFolderTool(mock_ews_client)
 
     # Mock source folder
@@ -278,10 +290,11 @@ async def test_move_folder_destination_not_found(mock_ews_client):
     mock_folder.id = "folder-to-move"
 
     with patch.object(tool, '_find_folder_by_id') as mock_find:
-        # First call returns folder to move, second call returns None (destination not found)
-        mock_find.side_effect = [mock_folder, None]
+        # First call returns folder to move, second call returns None
+        # (destination id also unresolvable).
+        mock_find.side_effect = [mock_folder, None, None]
 
-        with pytest.raises(ToolExecutionError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             await tool.execute(
                 action="move",
                 folder_id="folder-to-move",
