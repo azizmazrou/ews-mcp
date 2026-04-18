@@ -330,7 +330,13 @@ def safe_json_dumps(obj: Any, **kwargs) -> str:
 
 
 def format_error_response(error: Exception, context: str = "") -> Dict[str, Any]:
-    """Format error as a short, actionable response."""
+    """Format error as a short, actionable response.
+
+    Includes ``error_type`` (the exception class name) so the SSE/HTTP
+    adapter can map it to a proper HTTP status (400 for ValidationError,
+    503 for EWSConnectionError, etc.). The field is kept stable across
+    tool results so external clients can dispatch on it.
+    """
     logger = logging.getLogger(__name__)
     error_msg = str(error)
 
@@ -345,7 +351,8 @@ def format_error_response(error: Exception, context: str = "") -> Dict[str, Any]
 
     return {
         "success": False,
-        "error": error_msg
+        "error": error_msg,
+        "error_type": type(error).__name__,
     }
 
 

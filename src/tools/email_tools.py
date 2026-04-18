@@ -26,7 +26,7 @@ import re
 
 from .base import BaseTool
 from ..models import SendEmailRequest, EmailSearchRequest, EmailDetails
-from ..exceptions import ToolExecutionError
+from ..exceptions import ToolExecutionError, ValidationError
 from ..utils import (
     format_success_response, safe_get, truncate_text, parse_datetime_tz_aware,
     find_message_across_folders, find_message_for_account, ews_id_to_str,
@@ -854,9 +854,21 @@ class SearchEmailsTool(BaseTool):
                         "type": "string",
                         "description": "Filter by sender email address"
                     },
+                    "sender": {
+                        "type": "string",
+                        "description": "Alias of from_address"
+                    },
                     "to_address": {
                         "type": "string",
-                        "description": "Filter by recipient email (advanced mode)"
+                        "description": "Filter by recipient email (quick + advanced mode)"
+                    },
+                    "recipient": {
+                        "type": "string",
+                        "description": "Alias of to_address"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Quick mode: subject-OR-body substring. Full-text mode: search text (also accepted as search_query)."
                     },
                     "has_attachments": {
                         "type": "boolean",
@@ -916,10 +928,6 @@ class SearchEmailsTool(BaseTool):
                         "description": "Sort order (advanced mode)",
                         "default": "descending"
                     },
-                    "query": {
-                        "type": "string",
-                        "description": "Full-text search query (full_text mode)"
-                    },
                     "search_in": {
                         "type": "array",
                         "items": {"type": "string", "enum": ["subject", "body", "attachments"]},
@@ -939,8 +947,54 @@ class SearchEmailsTool(BaseTool):
             }
         }
 
+    # Parameter vocabulary accepted across all modes (schema-level).
+    # See _validate_kwargs for the strict check. Quick and advanced modes
+    # share most filters; full_text has its own query/search_in/exact_phrase.
+    _ALLOWED_PARAMS: set = {
+        # Routing
+        "mode", "folder", "target_mailbox", "max_results",
+        # Quick + advanced shared
+        "subject_contains", "from_address", "to_address", "sender",
+        "recipient", "body_contains", "query",
+        "has_attachments", "is_read", "importance",
+        "categories", "keywords",
+        "start_date", "end_date",
+        # Advanced-only
+        "search_scope", "sort_by", "sort_order",
+        # Full-text-only
+        "search_query", "search_in", "exact_phrase",
+    }
+
+    # Anything in this set gates off the "auto-add last 30 days" default
+    # when neither start_date nor end_date was supplied (see _search_quick).
+    _QUICK_FILTER_KEYS: tuple = (
+        "subject_contains", "from_address", "sender", "to_address", "recipient",
+        "body_contains", "query", "has_attachments", "is_read", "importance",
+    )
+
+    def _validate_kwargs(self, kwargs: Dict[str, Any]) -> None:
+        """Reject unknown params with a 400 (ValidationError) + suggestion.
+
+        Previously unknown params were silently ignored, which let the
+        ``query`` / ``sender`` filters disappear into the default "last 30
+        days" fallback without any error signal for the caller.
+        """
+        from difflib import get_close_matches
+
+        unknown = [k for k in kwargs.keys() if k not in self._ALLOWED_PARAMS]
+        if not unknown:
+            return
+        first = unknown[0]
+        suggestions = get_close_matches(first, sorted(self._ALLOWED_PARAMS), n=1)
+        hint = f"; did you mean {suggestions[0]!r}?" if suggestions else ""
+        raise ValidationError(
+            f"unknown param {first!r}{hint}. "
+            f"Accepted params: {', '.join(sorted(self._ALLOWED_PARAMS))}."
+        )
+
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Route to appropriate search mode."""
+        self._validate_kwargs(kwargs)
         mode = kwargs.get("mode", "quick")
 
         if mode == "advanced":
@@ -951,25 +1005,45 @@ class SearchEmailsTool(BaseTool):
             return await self._search_quick(**kwargs)
 
     async def _search_quick(self, **kwargs) -> Dict[str, Any]:
-        """Quick search: filter by subject, sender, date, read status, attachments."""
+        """Quick search: filter by subject, sender, date, read status, attachments.
+
+        Accepts a union of filter keys. ``query`` matches subject OR body.
+        ``sender`` is a synonym for ``from_address`` (and ``recipient`` for
+        ``to_address``) — the schema previously advertised both spellings
+        but only the ``*_address`` forms were wired up.
+        """
         from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
         from exchangelib.errors import ErrorTimeoutExpired
+        from exchangelib import Q
         import socket
 
         target_mailbox = kwargs.get("target_mailbox")
+
+        # Normalise aliases so the rest of the function only has to check
+        # one canonical key per concept.
+        from_address = kwargs.get("from_address") or kwargs.get("sender")
+        to_address = kwargs.get("to_address") or kwargs.get("recipient")
+        subject_contains = kwargs.get("subject_contains")
+        body_contains = kwargs.get("body_contains")
+        free_text = kwargs.get("query")
 
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            # Auto-add date range to prevent timeouts in large mailboxes
+            # Auto-add date range ONLY when *no* filter was supplied. The
+            # Bug 1 regression was that this check only considered four
+            # filter keys; query/sender/body_contains/etc. used to fall
+            # through the default and get replaced by "last 30 days",
+            # silently discarding the caller's intent.
             if not kwargs.get("start_date") and not kwargs.get("end_date"):
-                has_filters = (
-                    kwargs.get("subject_contains") or
-                    kwargs.get("from_address") or
-                    kwargs.get("has_attachments") is not None or
-                    kwargs.get("is_read") is not None
-                )
+                has_filters = any([
+                    subject_contains, from_address, to_address,
+                    body_contains, free_text,
+                    kwargs.get("has_attachments") is not None,
+                    kwargs.get("is_read") is not None,
+                    kwargs.get("importance"),
+                ])
 
                 if not has_filters:
                     from datetime import timedelta
@@ -977,7 +1051,8 @@ class SearchEmailsTool(BaseTool):
                     auto_start_date = datetime.now() - timedelta(days=default_days_back)
                     kwargs["start_date"] = auto_start_date.isoformat()
                     self.logger.info(
-                        f"No filters or date range provided. Limiting to last {default_days_back} days."
+                        "search_emails quick: no filters and no date range; "
+                        f"auto-limiting to last {default_days_back} days"
                     )
 
             folder_name = kwargs.get("folder", "inbox")
@@ -985,14 +1060,25 @@ class SearchEmailsTool(BaseTool):
 
             query = folder.all()
 
-            if kwargs.get("subject_contains"):
-                query = query.filter(subject__contains=kwargs["subject_contains"])
-            if kwargs.get("from_address"):
-                query = query.filter(sender=kwargs["from_address"])
+            if subject_contains:
+                query = query.filter(subject__contains=subject_contains)
+            if body_contains:
+                query = query.filter(body__contains=body_contains)
+            # `query` is a free-text parameter: subject OR body substring.
+            if free_text:
+                query = query.filter(
+                    Q(subject__contains=free_text) | Q(body__contains=free_text)
+                )
+            if from_address:
+                query = query.filter(sender=from_address)
+            if to_address:
+                query = query.filter(to_recipients__contains=to_address)
             if kwargs.get("has_attachments") is not None:
                 query = query.filter(has_attachments=kwargs["has_attachments"])
             if kwargs.get("is_read") is not None:
                 query = query.filter(is_read=kwargs["is_read"])
+            if kwargs.get("importance"):
+                query = query.filter(importance=kwargs["importance"])
             if kwargs.get("start_date"):
                 start = parse_datetime_tz_aware(kwargs["start_date"])
                 query = query.filter(datetime_received__gte=start)
