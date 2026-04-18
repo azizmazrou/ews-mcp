@@ -11,7 +11,11 @@ from exchangelib.queryset import Q
 
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
-from ..utils import format_success_response, safe_get, truncate_text, parse_datetime_tz_aware, find_message_across_folders, ews_id_to_str, format_datetime
+from ..utils import (
+    format_success_response, safe_get, truncate_text, parse_datetime_tz_aware,
+    find_message_across_folders, ews_id_to_str, format_datetime,
+    project_fields, strip_body_by_default, LIST_DEFAULT_FIELDS,
+)
 
 
 class SearchByConversationTool(BaseTool):
@@ -53,6 +57,16 @@ class SearchByConversationTool(BaseTool):
                         "type": "boolean",
                         "description": "Include deleted items folder",
                         "default": False
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Result projection. Default items include "
+                            "message_id, subject, from, received_time, "
+                            "is_read, has_attachments, snippet. Include "
+                            "'body' to opt into the full message text."
+                        ),
                     }
                 },
                 "required": []
@@ -113,6 +127,11 @@ class SearchByConversationTool(BaseTool):
             if not folders_to_search:
                 raise ToolExecutionError("No valid folders to search")
 
+            # Field projection (Bug 6). Default to the list-default keys
+            # (no body). Caller can opt into body via fields=["body"].
+            fields = kwargs.get("fields") or list(LIST_DEFAULT_FIELDS)
+            wants_body = "body" in fields
+
             # Search for emails with this conversation ID
             all_results = []
             for folder in folders_to_search:
@@ -120,25 +139,38 @@ class SearchByConversationTool(BaseTool):
                     items = folder.filter(conversation_id=conversation_id).order_by('-datetime_received')[:max_results]
 
                     for item in items:
+                        text_body = safe_get(item, 'text_body', '') or ''
                         result = {
+                            "message_id": ews_id_to_str(safe_get(item, 'id', None)) or '',
                             "id": ews_id_to_str(safe_get(item, 'id', None)) or '',
                             "subject": safe_get(item, 'subject', ''),
                             "from": safe_get(safe_get(item, 'sender', {}), 'email_address', ''),
                             "to": [r.email_address for r in safe_get(item, 'to_recipients', []) if hasattr(r, 'email_address')],
+                            "received_time": format_datetime(safe_get(item, 'datetime_received', datetime.now())),
                             "received": format_datetime(safe_get(item, 'datetime_received', datetime.now())),
                             "conversation_id": safe_get(item, 'conversation_id', ''),
                             "is_read": safe_get(item, 'is_read', False),
+                            "has_attachments": safe_get(item, 'has_attachments', False),
                             "importance": safe_get(item, 'importance', 'Normal'),
-                            "folder": safe_get(folder, 'name', 'Unknown')
+                            "folder": safe_get(folder, 'name', 'Unknown'),
+                            "snippet": truncate_text(text_body, 200),
                         }
-                        all_results.append(result)
+                        if wants_body:
+                            result["body"] = text_body
+                        strip_body_by_default(result, keep_body=wants_body)
+                        all_results.append(project_fields(result, fields))
 
                 except Exception as e:
                     self.logger.warning(f"Error searching folder {safe_get(folder, 'name', 'Unknown')}: {e}")
                     continue
 
-            # Sort by received date
-            all_results.sort(key=lambda x: x['received'], reverse=True)
+            # Sort by received date. Projection may have stripped both
+            # ``received`` and ``received_time`` from individual items, so
+            # fall back to empty string gracefully.
+            all_results.sort(
+                key=lambda x: x.get("received_time") or x.get("received") or "",
+                reverse=True,
+            )
             all_results = all_results[:max_results]
 
             self.logger.info(f"Found {len(all_results)} emails in conversation {conversation_id}")
@@ -146,9 +178,17 @@ class SearchByConversationTool(BaseTool):
             return format_success_response(
                 f"Found {len(all_results)} emails in conversation",
                 results=all_results,
+                # Bug 5: canonical items/count/total alongside legacy shape.
+                items=all_results,
+                count=len(all_results),
+                total=len(all_results),
                 conversation_id=conversation_id,
                 total_results=len(all_results),
                 searched_folders=search_scope,
+                meta={"deprecations": [
+                    "result.id is kept as an alias for result.message_id "
+                    "for one release; prefer message_id."
+                ]},
                 mailbox=mailbox
             )
 

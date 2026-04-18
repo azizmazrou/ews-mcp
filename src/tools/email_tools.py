@@ -32,6 +32,7 @@ from ..utils import (
     find_message_across_folders, find_message_for_account, ews_id_to_str,
     attach_inline_files, INLINE_ATTACHMENTS_SCHEMA,
     escape_html, format_body_for_html, sanitize_html,
+    project_fields, ensure_snippet, strip_body_by_default, LIST_DEFAULT_FIELDS,
 )
 from .folder_tools import find_folder_by_id, get_standard_folder_map
 
@@ -874,6 +875,16 @@ class SearchEmailsTool(BaseTool):
                         "type": "string",
                         "description": "Legacy alias for 'query' in full_text mode."
                     },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Result projection. Returned items include only the "
+                            "named fields. Default: message_id, subject, from, "
+                            "received_time, is_read, has_attachments, snippet. "
+                            "Include 'body' / 'body_html' to opt into heavy fields."
+                        ),
+                    },
                     "has_attachments": {
                         "type": "boolean",
                         "description": "Filter by attachment presence"
@@ -967,6 +978,8 @@ class SearchEmailsTool(BaseTool):
         "search_scope", "sort_by", "sort_order",
         # Full-text-only
         "search_query", "search_in", "exact_phrase",
+        # Projection
+        "fields",
     }
 
     # Anything in this set gates off the "auto-add last 30 days" default
@@ -1093,6 +1106,13 @@ class SearchEmailsTool(BaseTool):
             query = query.order_by('-datetime_received')
             max_results = kwargs.get("max_results", 50)
 
+            # Field projection: if the caller supplied ``fields=[...]``,
+            # the response items will be restricted to that set. When
+            # omitted, we use the list-default (no raw body; snippet only).
+            fields = kwargs.get("fields") or list(LIST_DEFAULT_FIELDS)
+            wants_body = "body" in fields
+            wants_body_html = "body_html" in fields
+
             @retry(
                 stop=stop_after_attempt(2),
                 wait=wait_exponential(multiplier=2, min=4, max=10),
@@ -1117,9 +1137,20 @@ class SearchEmailsTool(BaseTool):
                         "received_time": safe_get(item, "datetime_received", datetime.now()).isoformat(),
                         "is_read": safe_get(item, "is_read", False),
                         "has_attachments": safe_get(item, "has_attachments", False),
-                        "preview": truncate_text(text_body, 200)
+                        "preview": truncate_text(text_body, 200),
+                        # Heavy fields only included when caller asked for them.
                     }
-                    results.append(email_data)
+                    if wants_body:
+                        email_data["body"] = text_body
+                    if wants_body_html:
+                        email_data["body_html"] = str(safe_get(item, "body", "") or "")
+
+                    # Ensure every list item has a ``snippet`` (200 chars) even
+                    # when ``body`` wasn't pulled — older callers may look for
+                    # ``preview``, newer ones for ``snippet``; keep both.
+                    email_data["snippet"] = email_data["preview"]
+                    strip_body_by_default(email_data, keep_body=(wants_body or wants_body_html))
+                    results.append(project_fields(email_data, fields))
                 return results
 
             emails = execute_query()
@@ -1127,6 +1158,11 @@ class SearchEmailsTool(BaseTool):
             return format_success_response(
                 f"Found {len(emails)} matching emails",
                 emails=emails,
+                # Bug 5: canonical keys (items + count + total) alongside
+                # the legacy shape (emails + total_count).
+                items=emails,
+                count=len(emails),
+                total=len(emails),
                 total_count=len(emails),
                 mailbox=mailbox
             )
@@ -1210,6 +1246,9 @@ class SearchEmailsTool(BaseTool):
                 combined_filter &= q_filter
 
             all_results = []
+            # Field projection (Bug 6). Default: no body.
+            fields = kwargs.get("fields") or list(LIST_DEFAULT_FIELDS)
+            wants_body = "body" in fields
             for folder in folders:
                 try:
                     query = folder.filter(combined_filter)
@@ -1220,7 +1259,8 @@ class SearchEmailsTool(BaseTool):
 
                     results_per_folder = max_results // len(folders) if len(folders) > 1 else max_results
                     for email in query[:results_per_folder]:
-                        all_results.append({
+                        text_body = safe_get(email, 'text_body', '') or ''
+                        item = {
                             "message_id": ews_id_to_str(safe_get(email, 'id', '')),
                             "subject": safe_get(email, 'subject', ''),
                             "from": safe_get(email, 'sender', {}).email_address if hasattr(safe_get(email, 'sender', {}), 'email_address') else '',
@@ -1230,9 +1270,14 @@ class SearchEmailsTool(BaseTool):
                             "has_attachments": safe_get(email, 'has_attachments', False),
                             "importance": safe_get(email, 'importance', 'Normal'),
                             "categories": safe_get(email, 'categories', []),
-                            "body_preview": truncate_text(safe_get(email, 'text_body', ''), 200),
-                            "folder": folder.name
-                        })
+                            "snippet": truncate_text(text_body, 200),
+                            "body_preview": truncate_text(text_body, 200),
+                            "folder": folder.name,
+                        }
+                        if wants_body:
+                            item["body"] = text_body
+                        strip_body_by_default(item, keep_body=wants_body)
+                        all_results.append(project_fields(item, fields))
                 except Exception as e:
                     self.logger.warning(f"Error searching folder {folder.name}: {e}")
                     continue
@@ -1249,7 +1294,10 @@ class SearchEmailsTool(BaseTool):
             return format_success_response(
                 f"Found {len(all_results)} result(s)",
                 results=all_results,
+                # Bug 5: canonical items/count/total alongside legacy `results`.
+                items=all_results,
                 count=len(all_results),
+                total=len(all_results),
                 folders_searched=search_scope,
                 mailbox=mailbox
             )
@@ -1272,6 +1320,8 @@ class SearchEmailsTool(BaseTool):
         max_results = kwargs.get("max_results", 50)
         search_in = kwargs.get("search_in", ["subject", "body"])
         exact_phrase = kwargs.get("exact_phrase", False)
+        # Field projection (Bug 6). Default: list-default keys, no body.
+        fields = kwargs.get("fields") or list(LIST_DEFAULT_FIELDS)
 
         if not query_text:
             # ValidationError maps to HTTP 400 in the openapi_adapter; raising
@@ -1338,32 +1388,54 @@ class SearchEmailsTool(BaseTool):
                             if exact_phrase and search_query not in item_text and not attachment_match:
                                 continue
 
+                            full_text = safe_get(item, 'text_body', '') or ''
+                            # Canonical keys; keep legacy ``id`` + ``received``
+                            # for the one-release deprecation window (Bug 5).
                             result = {
+                                "message_id": ews_id_to_str(safe_get(item, 'id', None)) or '',
                                 "id": ews_id_to_str(safe_get(item, 'id', None)) or '',
                                 "subject": safe_get(item, 'subject', ''),
                                 "from": safe_get(safe_get(item, 'sender', {}), 'email_address', ''),
                                 "to": [r.email_address for r in safe_get(item, 'to_recipients', []) if hasattr(r, 'email_address')],
+                                "received_time": safe_get(item, 'datetime_received', '').isoformat() if safe_get(item, 'datetime_received') else None,
                                 "received": safe_get(item, 'datetime_received', '').isoformat() if safe_get(item, 'datetime_received') else None,
                                 "is_read": safe_get(item, 'is_read', False),
                                 "has_attachments": safe_get(item, 'has_attachments', False),
                                 "folder": safe_get(folder, 'name', 'Unknown'),
-                                "preview": safe_get(item, 'text_body', '')[:200] if "body" in search_in else ""
+                                "snippet": truncate_text(full_text, 200),
+                                "preview": truncate_text(full_text, 200),
                             }
-                            all_results.append(result)
+                            if "body" in fields:
+                                result["body"] = full_text
+                            strip_body_by_default(result, keep_body="body" in fields)
+                            all_results.append(project_fields(result, fields))
 
                 except Exception as e:
                     self.logger.warning(f"Error searching folder {safe_get(folder, 'name', 'Unknown')}: {e}")
                     continue
 
-            all_results.sort(key=lambda x: x.get('received', ''), reverse=True)
+            # Sort defensively — projection may strip both received_time
+            # and received; fall back to whichever is present.
+            all_results.sort(
+                key=lambda x: x.get("received_time") or x.get("received") or "",
+                reverse=True,
+            )
             all_results = all_results[:max_results]
 
             return format_success_response(
                 f"Found {len(all_results)} emails matching '{query_text}'",
                 results=all_results,
+                # Bug 5: canonical items/count/total alongside legacy shape.
+                items=all_results,
+                count=len(all_results),
+                total=len(all_results),
                 query=query_text,
                 total_results=len(all_results),
                 searched_folders=search_scope,
+                meta={"deprecations": [
+                    "result.id is kept as an alias for result.message_id "
+                    "for one release; prefer message_id."
+                ]},
                 mailbox=mailbox
             )
 
@@ -1391,7 +1463,18 @@ class GetEmailDetailsTool(BaseTool):
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to access (requires impersonation/delegate access)"
-                    }
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional field projection. When supplied, the "
+                            "response 'email' object contains only these "
+                            "fields. Default (no fields param): the full email "
+                            "shape is returned unchanged for backward "
+                            "compatibility."
+                        ),
+                    },
                 },
                 "required": ["message_id"]
             }
@@ -1401,6 +1484,7 @@ class GetEmailDetailsTool(BaseTool):
         """Get email details."""
         message_id = kwargs.get("message_id")
         target_mailbox = kwargs.get("target_mailbox")
+        fields = kwargs.get("fields")  # None -> backward-compat full shape
 
         try:
             # Get account (primary or impersonated)
@@ -1440,8 +1524,15 @@ class GetEmailDetailsTool(BaseTool):
                 "is_read": safe_get(item, "is_read", False),
                 "has_attachments": safe_get(item, "has_attachments", False),
                 "importance": safe_get(item, "importance", "Normal") or "Normal",
-                "attachments": attachment_names
+                "attachments": attachment_names,
             }
+
+            # Projection: when fields=[...] is provided, return only those
+            # keys inside the ``email`` object. Default (no fields) keeps
+            # the full shape for backward-compat with existing callers —
+            # this is one of the non-negotiable invariants.
+            if fields:
+                email_details = project_fields(email_details, fields)
 
             return format_success_response(
                 "Email details retrieved",

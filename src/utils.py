@@ -366,6 +366,137 @@ def format_success_response(message: str, **kwargs) -> Dict[str, Any]:
     return response
 
 
+# Canonical email-detail field set. Tools that expose a ``fields=`` param
+# cross-reference against this when validating the caller's projection.
+EMAIL_DETAIL_FIELDS: tuple = (
+    "message_id", "id", "subject", "from", "to", "cc", "bcc",
+    "body", "body_html", "snippet", "preview",
+    "received_time", "sent_time", "received", "sent",
+    "is_read", "has_attachments", "importance", "attachments",
+    "folder", "conversation_id", "thread_id",
+    "similarity_score",
+)
+
+# Default projection for list endpoints. Body is intentionally *not*
+# included — the 200-char ``snippet`` is enough for triage, and full
+# bodies dominated response size in production (13.6 KB envelopes around
+# 148-byte payloads). Callers can opt in via ``fields=["body"]``.
+LIST_DEFAULT_FIELDS: tuple = (
+    "message_id", "subject", "from", "received_time",
+    "is_read", "has_attachments", "snippet",
+)
+
+
+# Bug 8: pattern list used by is_automated_sender() below and the
+# exclude_automated param on SemanticSearchEmailsTool. These are
+# deliberately broad — most automated senders identify themselves with
+# predictable local parts. ``re.IGNORECASE`` applied per-check.
+AUTOMATED_SENDER_PATTERNS: tuple = (
+    r"^no[-_]?reply",
+    r"^notifications?@",
+    r"^admin@",
+    r"^noreply@",
+    r"^mailer[-_]?daemon",
+    r"^postmaster@",
+    r"@notify\.",
+    r"@mailgun\.",
+    r"@sendgrid\.",
+    r"@amazonses\.",
+    r"^support@.*cloud\.com",
+)
+
+# Subject prefixes that usually mark automated / auto-generated mail
+# (meeting invites, bounces, OOO replies, etc.). Match after stripping
+# whitespace; case-insensitive.
+AUTOMATED_SUBJECT_PREFIXES: tuple = (
+    "accepted:", "canceled:", "cancelled:", "declined:",
+    "tentative:", "automatic reply:", "out of office:",
+    "undeliverable:", "delivery failure:", "delivery status notification",
+)
+
+
+def is_automated_sender(
+    from_address: Any,
+    subject: Any = None,
+    *,
+    sender_patterns: Any = None,
+    subject_prefixes: Any = None,
+) -> bool:
+    """Return True when the (from, subject) pair looks machine-generated.
+
+    ``from_address`` or ``subject`` may be None. The check is best-effort —
+    used only for soft filtering of noisy hits, never for security.
+    """
+    if from_address is None and subject is None:
+        return False
+    patterns = sender_patterns or AUTOMATED_SENDER_PATTERNS
+    prefixes = subject_prefixes or AUTOMATED_SUBJECT_PREFIXES
+    addr = str(from_address or "").strip().lower()
+    if addr:
+        for pat in patterns:
+            if re.search(pat, addr, re.IGNORECASE):
+                return True
+    subj = str(subject or "").strip().lower()
+    if subj:
+        for prefix in prefixes:
+            if subj.startswith(prefix):
+                return True
+    return False
+
+
+def project_fields(item: Dict[str, Any], fields: Optional[List[str]]) -> Dict[str, Any]:
+    """Return a copy of ``item`` containing only the requested ``fields``.
+
+    When ``fields`` is ``None``, the item is returned unchanged (caller
+    is responsible for providing a sensible default). Unknown fields are
+    silently ignored so new output fields can ship without breaking old
+    callers.
+
+    Use for list-endpoint items and for ``get_email_details`` projection.
+    """
+    if not fields:
+        return item
+    allowed = set(fields)
+    projected: Dict[str, Any] = {}
+    for key in allowed:
+        if key in item:
+            projected[key] = item[key]
+    return projected
+
+
+def ensure_snippet(item: Dict[str, Any], *, body_key: str = "body", snippet_key: str = "snippet",
+                   max_chars: int = 200) -> Dict[str, Any]:
+    """Guarantee an ``item`` has a short ``snippet`` derived from the body.
+
+    Mutates and returns ``item``. If ``snippet`` is already present, it
+    is left alone. If ``body_key`` is present and non-empty, the snippet
+    is set to a truncated view. Used by list endpoints so the default
+    response shape never ships a raw body field.
+    """
+    if snippet_key not in item:
+        body = item.get(body_key) or item.get("text_body") or item.get("preview") or ""
+        if body:
+            item[snippet_key] = truncate_text(str(body), max_chars)
+        else:
+            item[snippet_key] = ""
+    return item
+
+
+def strip_body_by_default(
+    item: Dict[str, Any], *, keep_body: bool, body_keys: tuple = ("body", "body_html"),
+) -> Dict[str, Any]:
+    """Remove heavyweight body fields unless the caller opted in.
+
+    Used by list endpoints. ``keep_body=True`` is the opt-in signal
+    (typically ``"body" in fields``).
+    """
+    if keep_body:
+        return item
+    for key in body_keys:
+        item.pop(key, None)
+    return item
+
+
 def find_message_for_account(account, message_id):
     """
     Search for a message across multiple folders for a specific account.
