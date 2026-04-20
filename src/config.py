@@ -2,7 +2,47 @@
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, model_validator
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
+
+
+def _make_int_clamp(logger) -> Callable[..., int]:
+    """Factory for an int clamp-with-warn helper.
+
+    Returns a function ``(env_name, value, low, high, default)`` that:
+
+    * Returns ``value`` unchanged when it's inside ``[low, high]``.
+    * Returns the clamped bound (and logs a WARNING) when it's outside.
+    * Returns ``default`` (with a WARNING) when ``value`` is non-numeric
+      (zero, negative, or a type that would spin-loop a background task).
+
+    Used by :meth:`Settings.validate_auth_credentials` to tame the
+    transport-resilience knobs.
+    """
+
+    def _clamp(env_name: str, value: int, low: int, high: int, default: int) -> int:
+        try:
+            ival = int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "%s=%r is not an integer; using default %d", env_name, value, default,
+            )
+            return default
+        if ival < low:
+            logger.warning(
+                "%s=%d is below minimum %d; clamping up. Very small intervals "
+                "risk spinning the event loop.",
+                env_name, ival, low,
+            )
+            return low
+        if ival > high:
+            logger.warning(
+                "%s=%d exceeds maximum %d; clamping down.",
+                env_name, ival, high,
+            )
+            return high
+        return ival
+
+    return _clamp
 
 
 class Settings(BaseSettings):
@@ -96,6 +136,45 @@ class Settings(BaseSettings):
     ai_model: Optional[str] = None  # e.g., "gpt-4", "claude-3-5-sonnet-20241022"
     ai_embedding_model: Optional[str] = None  # e.g., "text-embedding-3-small"
     ai_base_url: Optional[str] = None  # For local models or custom endpoints
+
+    # --- Long-lived SSE / transport resilience ---------------------------
+    # Keep the SSE byte stream alive across long tool executions so upstream
+    # proxies (nginx, HAProxy, cloud LBs) don't reap it as idle. Values are
+    # clamped in a validator below; out-of-range settings log a warning but
+    # do not crash startup.
+    sse_keepalive_enabled: bool = Field(
+        default=True,
+        description="Emit SSE comment frames to keep the stream alive through proxies.",
+    )
+    sse_keepalive_interval_seconds: int = Field(
+        default=15,
+        description="Seconds between SSE comment frames (clamped to [5, 60]).",
+    )
+    http_keep_alive_timeout_seconds: int = Field(
+        default=300,
+        description="Uvicorn HTTP keep-alive timeout in seconds (clamped to [30, 900]).",
+    )
+    tcp_keepalive_enabled: bool = Field(
+        default=True,
+        description="Set SO_KEEPALIVE (and TCP_KEEPIDLE on Linux) on accepted sockets.",
+    )
+    tcp_keepalive_idle_seconds: int = Field(
+        default=60,
+        description="Linux TCP_KEEPIDLE (time before first keepalive probe). Clamped to [30, 600].",
+    )
+
+    # Optional MCP progress notifications for long-running tool calls.
+    # Distinct from SSE keepalive: those keep the byte stream alive for
+    # the proxy; these keep the MCP *session* alive for client-side
+    # session watchdogs. Both can run at once.
+    progress_notification_enabled: bool = Field(
+        default=True,
+        description="Periodically send notifications/progress while a tool call is in flight.",
+    )
+    progress_notification_interval_seconds: int = Field(
+        default=10,
+        description="Seconds between progress notifications (clamped to [5, 60]).",
+    )
     ai_max_tokens: int = 4096
     ai_temperature: float = 0.7
     enable_semantic_search: bool = False
@@ -135,10 +214,12 @@ class Settings(BaseSettings):
                     "auth-enforcing reverse proxy."
                 )
 
+        # Shared logger for both AI validation + transport clamping.
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+
         # Validate AI settings
         if self.enable_ai:
-            import logging as _logging
-            _log = _logging.getLogger(__name__)
             if not self.ai_api_key and self.ai_provider != "local":
                 raise ValueError(f"AI enabled but ai_api_key not provided for {self.ai_provider}")
             if not self.ai_model:
@@ -182,6 +263,33 @@ class Settings(BaseSettings):
                     "'model not found' — update AI_EMBEDDING_MODEL.",
                     self.ai_embedding_model,
                 )
+
+        # Clamp the transport-resilience knobs. Out-of-range values are
+        # accepted with a warning (never a crash) because the dev's typo
+        # shouldn't take the server offline — the clamped value is still
+        # safe. Zero or negative intervals would spin-loop the keepalive
+        # task and DoS the event loop, so we clamp them firmly.
+        _clamp_int = _make_int_clamp(_log)
+        self.sse_keepalive_interval_seconds = _clamp_int(
+            "SSE_KEEPALIVE_INTERVAL",
+            self.sse_keepalive_interval_seconds,
+            low=5, high=60, default=15,
+        )
+        self.http_keep_alive_timeout_seconds = _clamp_int(
+            "HTTP_KEEP_ALIVE_TIMEOUT",
+            self.http_keep_alive_timeout_seconds,
+            low=30, high=900, default=300,
+        )
+        self.tcp_keepalive_idle_seconds = _clamp_int(
+            "TCP_KEEPALIVE_IDLE",
+            self.tcp_keepalive_idle_seconds,
+            low=30, high=600, default=60,
+        )
+        self.progress_notification_interval_seconds = _clamp_int(
+            "PROGRESS_NOTIFICATION_INTERVAL",
+            self.progress_notification_interval_seconds,
+            low=5, high=60, default=10,
+        )
 
         return self
 
@@ -231,7 +339,9 @@ def get_settings() -> Settings:
     """Get or create settings instance (lazy loading)."""
     global _settings
     if _settings is None:
-        _settings = Settings()
+        # Pydantic reads required fields from env vars at runtime; mypy
+        # can't model that, so silence the "missing argument" error.
+        _settings = Settings()  # type: ignore[call-arg]
     return _settings
 
 
