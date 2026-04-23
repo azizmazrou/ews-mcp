@@ -218,7 +218,13 @@ async def test_search_by_conversation_default_no_body(mock_ews_client):
     )
 
     tool = SearchByConversationTool(mock_ews_client)
-    result = await tool.execute(conversation_id="AAQk-1")
+    # Issue 3 default is include_all_folders=True; restrict to inbox so the
+    # single mocked folder is actually iterated.
+    result = await tool.execute(
+        conversation_id="AAQk-1",
+        include_all_folders=False,
+        search_scope=["inbox"],
+    )
     assert result["success"] is True
     for item in result["items"]:
         assert "body" not in item
