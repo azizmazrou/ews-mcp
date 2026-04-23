@@ -86,7 +86,11 @@ async def test_search_emails_items_have_message_id(mock_ews_client):
 
 @pytest.mark.asyncio
 async def test_search_emails_response_carries_items_count_total(mock_ews_client):
-    """Envelope exposes canonical ``items`` + ``count`` + ``total``."""
+    """Envelope exposes canonical ``items`` + ``count`` + ``total_available``.
+
+    Issue 4 dropped the legacy ``results``/``total``/``total_results`` /
+    ``total_count`` triplet — callers must use the new names.
+    """
     from src.tools.email_tools import SearchEmailsTool
 
     tool = SearchEmailsTool(mock_ews_client)
@@ -98,10 +102,11 @@ async def test_search_emails_response_carries_items_count_total(mock_ews_client)
 
     assert "items" in result
     assert result["count"] == 2
-    assert result["total"] == 2
-    # Legacy keys preserved.
-    assert "emails" in result
-    assert result["total_count"] == 2
+    # Issue 4: the legacy ``results`` / ``total`` / ``total_results`` /
+    # ``total_count`` aliases are gone — callers read ``items`` + ``count``
+    # (and ``total_available`` when the server reports a grand total).
+    for legacy in ("results", "total", "total_results", "total_count"):
+        assert legacy not in result, legacy
 
 
 @pytest.mark.asyncio
@@ -115,12 +120,16 @@ async def test_search_by_conversation_items_have_message_id(mock_ews_client):
     )
 
     tool = SearchByConversationTool(mock_ews_client)
-    result = await tool.execute(conversation_id="AAQk-1")
+    # Issue 3 default is include_all_folders=True; restrict to inbox so the
+    # single mocked folder is actually iterated.
+    result = await tool.execute(
+        conversation_id="AAQk-1",
+        include_all_folders=False,
+        search_scope=["inbox"],
+    )
     assert result["success"] is True
     for item in result["items"]:
         assert "message_id" in item
-        # Keep ``id`` as alias for one release.
-        assert item.get("id") == item.get("message_id")
 
 
 @pytest.mark.asyncio

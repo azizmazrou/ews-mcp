@@ -27,7 +27,11 @@ async def test_advanced_search_tool(mock_ews_client):
 
     mock_query = MagicMock()
     mock_query.filter.return_value = mock_query
-    mock_query.order_by.return_value = [mock_email]
+    # Issue 2: advanced search narrows the projection via query.only(...);
+    # keep the chain returning the same query so the eventual slice does.
+    mock_query.only.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.count.return_value = 1
     mock_query.__getitem__ = lambda self, key: [mock_email]
 
     mock_ews_client.account.inbox.filter.return_value = mock_query
@@ -45,8 +49,8 @@ async def test_advanced_search_tool(mock_ews_client):
     )
 
     assert result["success"] is True
-    assert len(result["results"]) > 0
-    assert result["results"][0]["subject"] == "Important Meeting"
+    assert len(result["items"]) > 0
+    assert result["items"][0]["subject"] == "Important Meeting"
 
 
 @pytest.mark.asyncio
@@ -56,7 +60,9 @@ async def test_advanced_search_with_date_range(mock_ews_client):
 
     mock_query = MagicMock()
     mock_query.filter.return_value = mock_query
-    mock_query.order_by.return_value = []
+    mock_query.only.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.count.return_value = 0
     mock_query.__getitem__ = lambda self, key: []
 
     mock_ews_client.account.inbox.filter.return_value = mock_query
@@ -71,7 +77,7 @@ async def test_advanced_search_with_date_range(mock_ews_client):
     )
 
     assert result["success"] is True
-    assert "results" in result
+    assert "items" in result
 
 
 @pytest.mark.asyncio
@@ -107,12 +113,16 @@ async def test_advanced_search_multiple_folders(mock_ews_client):
 
     mock_inbox_query = MagicMock()
     mock_inbox_query.filter.return_value = mock_inbox_query
-    mock_inbox_query.order_by.return_value = [mock_inbox_email]
+    mock_inbox_query.only.return_value = mock_inbox_query
+    mock_inbox_query.order_by.return_value = mock_inbox_query
+    mock_inbox_query.count.return_value = 1
     mock_inbox_query.__getitem__ = lambda self, key: [mock_inbox_email]
 
     mock_sent_query = MagicMock()
     mock_sent_query.filter.return_value = mock_sent_query
-    mock_sent_query.order_by.return_value = [mock_sent_email]
+    mock_sent_query.only.return_value = mock_sent_query
+    mock_sent_query.order_by.return_value = mock_sent_query
+    mock_sent_query.count.return_value = 1
     mock_sent_query.__getitem__ = lambda self, key: [mock_sent_email]
 
     mock_ews_client.account.inbox.filter.return_value = mock_inbox_query
@@ -126,7 +136,7 @@ async def test_advanced_search_multiple_folders(mock_ews_client):
     )
 
     assert result["success"] is True
-    assert len(result["results"]) == 2
+    assert len(result["items"]) == 2
 
 
 @pytest.mark.asyncio
