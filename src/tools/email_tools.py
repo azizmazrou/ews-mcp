@@ -1966,6 +1966,216 @@ class GetEmailDetailsTool(BaseTool):
             raise ToolExecutionError(f"Failed to get email details: {e}")
 
 
+class GetEmailsBulkTool(BaseTool):
+    """Fetch multiple messages in a single EWS round-trip (Issue 5).
+
+    Motivation: clients wanting a weekly-report view had to call
+    ``get_email_details`` N times for N messages — O(N) HTTP requests at
+    ~1s each. ``account.fetch`` issues a single ``GetItem`` batch so 50
+    messages come back in one network hop.
+    """
+
+    # Hard ceiling: the EWS server rejects very large GetItem batches,
+    # and callers who need >100 items should page explicitly.
+    _MAX_MESSAGES_HARD_CAP = 100
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "get_emails_bulk",
+            "description": (
+                "Fetch multiple emails by ID in one EWS round-trip. "
+                "Uses exchangelib's account.fetch() batch API so N "
+                "messages cost one HTTP call, not N."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Message IDs to fetch (from search_emails / list_attachments)",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Projection, same vocabulary as get_email_details. "
+                            "Default: full email shape. Use ['message_id', "
+                            "'subject', 'from', 'received_time', 'snippet'] "
+                            "for a light one."
+                        ),
+                    },
+                    "max_messages": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_MESSAGES_HARD_CAP,
+                        "default": 50,
+                        "description": (
+                            "Cap on input list size. Default 50, hard cap "
+                            f"{_MAX_MESSAGES_HARD_CAP}. Use paging for larger sets."
+                        ),
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)",
+                    },
+                },
+                "required": ["message_ids"],
+            },
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        from exchangelib import Message
+
+        message_ids = kwargs.get("message_ids") or []
+        if not isinstance(message_ids, list) or not message_ids:
+            raise ValidationError("message_ids must be a non-empty list")
+        # Dedupe while preserving order. Strings only.
+        seen: set = set()
+        clean_ids: List[str] = []
+        for raw in message_ids:
+            if not isinstance(raw, str):
+                raise ValidationError(
+                    f"message_ids must be strings, got {type(raw).__name__}"
+                )
+            if raw in seen:
+                continue
+            seen.add(raw)
+            clean_ids.append(raw)
+
+        max_messages = int(kwargs.get("max_messages", 50))
+        if max_messages < 1:
+            raise ValidationError("max_messages must be >= 1")
+        if max_messages > self._MAX_MESSAGES_HARD_CAP:
+            max_messages = self._MAX_MESSAGES_HARD_CAP
+        if len(clean_ids) > max_messages:
+            raise ValidationError(
+                f"received {len(clean_ids)} ids but max_messages={max_messages}. "
+                f"Reduce the list or split into pages."
+            )
+
+        target_mailbox = kwargs.get("target_mailbox")
+        fields = kwargs.get("fields")  # None = full shape
+        account = self.get_account(target_mailbox)
+        mailbox = self.get_mailbox_info(target_mailbox)
+
+        # Single GetItem batch — O(1) round trips regardless of N.
+        start_time = datetime.now()
+        try:
+            fetched = list(account.fetch([Message(id=mid) for mid in clean_ids]))
+        except Exception as exc:
+            self.logger.exception(
+                "get_emails_bulk: batch fetch failed: %s: %s",
+                type(exc).__name__, exc,
+            )
+            raise ToolExecutionError(
+                f"Bulk fetch failed: {type(exc).__name__}: {exc}"
+            )
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+
+        items: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        # exchangelib returns items in input order; pair by index so we
+        # can surface per-id errors correctly.
+        for requested_id, fetched_item in zip(clean_ids, fetched):
+            if isinstance(fetched_item, BaseException):
+                errors.append({
+                    "message_id": requested_id,
+                    "error_code": (
+                        "NOT_FOUND"
+                        if "ErrorItemNotFound" in type(fetched_item).__name__
+                        else "FETCH_ERROR"
+                    ),
+                    "error_message": f"{type(fetched_item).__name__}: {fetched_item}",
+                })
+                continue
+            item_dict = self._message_to_dict(fetched_item, fields=fields)
+            items.append(item_dict)
+
+        # If exchangelib returned a shorter list than we asked for
+        # (shouldn't happen with account.fetch, but be defensive), mark
+        # the missing ids.
+        if len(fetched) < len(clean_ids):
+            missing = clean_ids[len(fetched):]
+            for mid in missing:
+                errors.append({
+                    "message_id": mid,
+                    "error_code": "NOT_FOUND",
+                    "error_message": "no response entry for id",
+                })
+
+        ews_call_log(
+            self.logger, "GetItem",
+            duration_ms=duration_ms,
+            result_count=len(items),
+            outcome="ok" if not errors else "partial",
+            extra_fields={
+                "tool": "get_emails_bulk",
+                "requested": len(clean_ids),
+                "errors": len(errors),
+            },
+        )
+
+        return format_success_response(
+            f"Fetched {len(items)} of {len(clean_ids)} message(s)",
+            items=items,
+            count=len(items),
+            requested=len(clean_ids),
+            errors=errors,
+            mailbox=mailbox,
+        )
+
+    @staticmethod
+    def _message_to_dict(
+        message: Any, *, fields: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        """Render an exchangelib Message to the canonical email dict.
+
+        Shape matches ``GetEmailDetailsTool`` so callers can swap in
+        this batch tool without changing their downstream parser.
+        """
+        sender = safe_get(message, "sender", None)
+        from_email = getattr(sender, "email_address", "") or ""
+
+        to_recipients = safe_get(message, "to_recipients", []) or []
+        to_emails = [
+            r.email_address for r in to_recipients
+            if hasattr(r, "email_address") and r.email_address
+        ]
+        cc_recipients = safe_get(message, "cc_recipients", []) or []
+        cc_emails = [
+            r.email_address for r in cc_recipients
+            if hasattr(r, "email_address") and r.email_address
+        ]
+        attachments = safe_get(message, "attachments", []) or []
+        attachment_names = [
+            att.name for att in attachments if hasattr(att, "name") and att.name
+        ]
+
+        received = safe_get(message, "datetime_received", None)
+        sent = safe_get(message, "datetime_sent", None)
+
+        email_details = {
+            "message_id": ews_id_to_str(safe_get(message, "id", None)) or "unknown",
+            "subject": safe_get(message, "subject", "") or "",
+            "from": from_email,
+            "to": to_emails,
+            "cc": cc_emails,
+            "body": safe_get(message, "text_body", "") or "",
+            "body_html": str(safe_get(message, "body", "") or ""),
+            "received_time": received.isoformat() if received and hasattr(received, "isoformat") else None,
+            "sent_time": sent.isoformat() if sent and hasattr(sent, "isoformat") else None,
+            "is_read": safe_get(message, "is_read", False),
+            "has_attachments": safe_get(message, "has_attachments", False),
+            "importance": safe_get(message, "importance", "Normal") or "Normal",
+            "attachments": attachment_names,
+        }
+        email_details["snippet"] = truncate_text(email_details["body"], 200)
+        if fields:
+            return project_fields(email_details, fields)
+        return email_details
+
+
 class DeleteEmailTool(BaseTool):
     """Tool for deleting emails."""
 
