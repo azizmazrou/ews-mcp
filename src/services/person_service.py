@@ -41,6 +41,41 @@ class PersonService:
         self.gal_adapter = GALAdapter(ews_client)
         self.cache = get_cache()
         self.logger = logging.getLogger(__name__)
+        # Populated by _search_email_history on TIMEOUT / THROTTLED /
+        # AUTH_EXPIRED / CONNECTION so the tool layer can attach an
+        # ``error_code`` to its response without having to re-classify.
+        self._last_error_code: Optional[str] = None
+        self._last_error_message: Optional[str] = None
+
+    @staticmethod
+    def _email_history_timeout_s() -> int:
+        """Default 10s. Configurable via EWS_EMAIL_HISTORY_TIMEOUT."""
+        import os as _os
+        try:
+            return max(1, min(120, int(_os.environ.get(
+                "EWS_EMAIL_HISTORY_TIMEOUT", "10"
+            ))))
+        except (TypeError, ValueError):
+            return 10
+
+    @staticmethod
+    def _classify_email_history_error(exc: BaseException) -> str:
+        """Return a short error_code tag for the response envelope.
+
+        Values: TIMEOUT, THROTTLED, AUTH_EXPIRED, GAL_UNAVAILABLE.
+        The default is GAL_UNAVAILABLE because the most common cause of
+        an unclassified failure here is EWS/GAL refusing the connection.
+        """
+        name = type(exc).__name__
+        msg = str(exc)
+        if name == "ErrorServerBusy" or "ServerBusy" in msg or "throttl" in msg.lower():
+            return "THROTTLED"
+        if name in ("ErrorAccessDenied", "UnauthorizedError", "Unauthorized") \
+                or "401" in msg or "Unauthorized" in msg:
+            return "AUTH_EXPIRED"
+        if "timed out" in msg.lower() or "Timeout" in name:
+            return "TIMEOUT"
+        return "GAL_UNAVAILABLE"
 
     async def find_person(
         self,
@@ -387,8 +422,13 @@ class PersonService:
                         datetime_received__gte=start_date
                     ).order_by('-datetime_received').only('sender', 'datetime_received')
 
+                # Eagerly materialise a bounded slice inside this thread
+                # so exchangelib's auto-pagination happens under the
+                # wait_for timeout — not after it (Issue 1).
+                items = list(inbox_items[:MAX_ITEMS])
+
                 items_scanned = 0
-                for item in inbox_items:
+                for item in items:
                     items_scanned += 1
                     if items_scanned > MAX_ITEMS:
                         break
@@ -435,8 +475,11 @@ class PersonService:
                     datetime_sent__gte=start_date
                 ).order_by('-datetime_sent').only('to_recipients', 'datetime_sent')
 
+                # Eagerly materialise — same reason as _scan_inbox above.
+                items = list(sent_query_result[:MAX_ITEMS])
+
                 items_scanned = 0
-                for item in sent_query_result:
+                for item in items:
                     items_scanned += 1
                     if items_scanned > MAX_ITEMS:
                         break
@@ -477,11 +520,43 @@ class PersonService:
                                     contacts[email]["first_contact"] = sent_time
                 return contacts
 
-            # Run inbox and sent scans concurrently
-            inbox_contacts, sent_contacts = await asyncio.gather(
-                asyncio.to_thread(_scan_inbox),
-                asyncio.to_thread(_scan_sent)
-            )
+            # Run inbox and sent scans concurrently, each bounded by
+            # ``EWS_EMAIL_HISTORY_TIMEOUT`` so a slow Exchange server
+            # can't pin us past the MCP 30s protocol timeout. Prior
+            # behaviour had no deadline and could block for 240s
+            # (reported pre-v1.27.0).
+            timeout_s = self._email_history_timeout_s()
+            try:
+                inbox_contacts, sent_contacts = await asyncio.wait_for(
+                    asyncio.gather(
+                        asyncio.to_thread(_scan_inbox),
+                        asyncio.to_thread(_scan_sent),
+                    ),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    "_search_email_history timed out after %ds "
+                    "(query=%r, days_back=%d, MAX_ITEMS=%d)",
+                    timeout_s, query, days_back, MAX_ITEMS,
+                )
+                # Surface a structured "empty with error_code" rather
+                # than raising — callers that fan out from source="all"
+                # still want GAL/contacts/domain results.
+                self._last_error_code = "TIMEOUT"
+                self._last_error_message = (
+                    f"email_history scan timed out after {timeout_s}s"
+                )
+                return []
+            except Exception as exc:
+                code = self._classify_email_history_error(exc)
+                self.logger.warning(
+                    "_search_email_history %s: %s: %s",
+                    code, type(exc).__name__, exc,
+                )
+                self._last_error_code = code
+                self._last_error_message = f"{type(exc).__name__}: {exc}"
+                return []
 
             # Merge results
             contacts: Dict[str, Dict[str, Any]] = {}

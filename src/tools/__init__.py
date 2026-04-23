@@ -1,6 +1,6 @@
 """MCP Tools for EWS operations."""
 
-from .email_tools import SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool, DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool, ReplyEmailTool, ForwardEmailTool
+from .email_tools import SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool, GetEmailsBulkTool, DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool, ReplyEmailTool, ForwardEmailTool
 from .email_tools_draft import CreateDraftTool, CreateReplyDraftTool, CreateForwardDraftTool
 from .calendar_tools import CreateAppointmentTool, GetCalendarTool, UpdateAppointmentTool, DeleteAppointmentTool, RespondToMeetingTool, CheckAvailabilityTool, FindMeetingTimesTool
 from .contact_tools import CreateContactTool, UpdateContactTool, DeleteContactTool
@@ -53,6 +53,7 @@ __all__ = [
     "ReadEmailsTool",
     "SearchEmailsTool",
     "GetEmailDetailsTool",
+    "GetEmailsBulkTool",
     "DeleteEmailTool",
     "MoveEmailTool",
     "UpdateEmailTool",

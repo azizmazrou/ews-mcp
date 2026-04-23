@@ -40,9 +40,9 @@ async def test_full_text_accepts_search_query_alias(tool, mock_ews_client):
         search_query="Hishmat",
         search_scope=["inbox"],
     )
-    # With no emails the tool returns success + 0 results.
+    # With no emails the tool returns success + 0 items.
     assert result["success"] is True
-    assert "results" in result or "total_count" in result, result
+    assert "items" in result, result
 
 
 @pytest.mark.asyncio

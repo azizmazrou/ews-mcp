@@ -459,6 +459,53 @@ def format_success_response(message: str, **kwargs) -> Dict[str, Any]:
     return response
 
 
+def ews_call_log(
+    logger: logging.Logger,
+    operation: str,
+    *,
+    duration_ms: Optional[int] = None,
+    result_count: Optional[int] = None,
+    total_available: Optional[int] = None,
+    page_offset: Optional[int] = None,
+    folder: Optional[str] = None,
+    outcome: str = "ok",
+    error_type: Optional[str] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Emit a single structured line describing one EWS operation.
+
+    Motivation: the search, bulk-fetch, and find_person paths all make
+    EWS round-trips that are invisible in the current logs — when a
+    query returns 8 items for a 15-month window but 33 for a 1-day
+    window, we want to see the call pattern and the upstream totals
+    without re-deploying in DEBUG. This helper writes one INFO-level
+    line per call with a stable key set so it can be grep/awk'd in
+    production logs.
+
+    Never logs secrets or bodies. ``extra_fields`` is intended for
+    small non-sensitive metadata (e.g. ``{"filter": "conv_id"}``); any
+    caller passing a credential here is misusing the API.
+    """
+    payload: Dict[str, Any] = {"operation": operation, "outcome": outcome}
+    if duration_ms is not None:
+        payload["duration_ms"] = int(duration_ms)
+    if result_count is not None:
+        payload["result_count"] = int(result_count)
+    if total_available is not None:
+        payload["total_available"] = int(total_available)
+    if page_offset is not None:
+        payload["page_offset"] = int(page_offset)
+    if folder:
+        payload["folder"] = str(folder)[:120]
+    if error_type:
+        payload["error_type"] = str(error_type)
+    if extra_fields:
+        # Keep the extras compact so a single line stays grep-friendly.
+        for k, v in list(extra_fields.items())[:8]:
+            payload[str(k)[:32]] = v if isinstance(v, (int, float, bool)) else str(v)[:80]
+    logger.info("ews_call %s", payload)
+
+
 # Canonical email-detail field set. Tools that expose a ``fields=`` param
 # cross-reference against this when validating the caller's projection.
 EMAIL_DETAIL_FIELDS: tuple = (

@@ -1,6 +1,63 @@
 # Changelog
 
-## Unreleased — Bug 1 (find_meeting_times) + Bug 2 (embedding error surfacing)
+## Unreleased — Tool reliability round (Issues 1–5)
+
+Five defects reported against the live MCP deployment were fixed in this
+round. Each has its own commit / branch so revert risk is surgical:
+
+- **Issue 1** (`find_person` 30s timeout when `source=email_history`).
+  The inbox scan now runs under an `asyncio.wait_for` deadline (default
+  10s, configurable via `EWS_EMAIL_HISTORY_TIMEOUT` — clamped to
+  `[1, 120]`). On timeout / auth / throttling the response carries a
+  structured `error_code ∈ {TIMEOUT, THROTTLED, AUTH_EXPIRED, GAL_UNAVAILABLE}`
+  so the caller can retry or degrade gracefully instead of hitting the
+  30s MCP protocol timeout.
+
+- **Issue 2** (`search_emails` silently truncated results). Paginated
+  fetch now walks the underlying `QuerySet` in explicit 50-item chunks
+  and narrows the `except Exception` at the iteration boundary so the
+  real exception surfaces instead of being swallowed. `total_available`
+  reports the server's `count()`; `next_offset` is set when there are
+  more items behind the page. A new `.only(*db_fields)` projection skips
+  fields the caller didn't ask for.
+
+- **Issue 3** (`search_by_conversation` missed archive / subfolders).
+  Default behaviour walks every mail folder under `account.msg_folder_root`
+  (IPF.Note / IPF.Message classes only — calendar/contacts/tasks are
+  skipped). Callers wanting the old behaviour pass
+  `include_all_folders=false` + `search_scope=["inbox", ...]`. The
+  response advertises `searched_folders` and `skipped_folders` with
+  classified error codes so operators can tell what got missed.
+
+- **Issue 4 — BREAKING CHANGE: legacy search envelope keys dropped.**
+  The `search_emails` / `search_by_conversation` response envelope no
+  longer emits `results`, `total`, `total_results`, or `total_count`.
+  Callers must read `items` + `count` + `total_available` (and
+  `next_offset` when the page is not the last). Migration: every
+  response that used to ship `{"results": [...], "total": N}` now ships
+  `{"items": [...], "count": N}`. `total_available` is populated on a
+  best-effort basis from `QuerySet.count()`; absent when the server
+  refuses to cheap-count.
+
+- **Issue 5 — new tool `get_emails_bulk`.** Batch-fetches up to 50
+  messages (hard cap 100) in a single `GetItem` round-trip via
+  `exchangelib.Account.fetch([Message(id=x), ...])`. Per-id failures
+  are surfaced in `errors[]` with `error_code="NOT_FOUND"` or
+  `"FETCH_ERROR"`; whole-batch failures raise `ToolExecutionError`.
+
+New shared observability helper `src/utils.py::ews_call_log(operation, ...)`
+emits a structured `ews_call` log line on every EWS round-trip with
+stable keys (`operation`, `duration_ms`, `result_count`, `total_available`,
+`page_offset`, `folder`, `outcome`, `error_type`) so dashboards can build
+SLOs on tool latency without parsing free-text log messages.
+
+Regression coverage landed in `tests/test_find_person_timeout.py` (4),
+`tests/test_search_emails_pagination.py` (6), `tests/test_search_by_conversation.py` (7),
+and `tests/test_get_emails_bulk.py` (9). Existing tests that asserted on
+the dropped legacy keys were migrated to `items` / `count` /
+`total_available`.
+
+## Previous — Bug 1 (find_meeting_times) + Bug 2 (embedding error surfacing)
 
 Two operator-reported regressions from the v3.4 security/reliability release
 are fixed here.
