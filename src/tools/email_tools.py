@@ -2008,11 +2008,11 @@ class GetEmailsBulkTool(BaseTool):
                     "max_messages": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": _MAX_MESSAGES_HARD_CAP,
+                        "maximum": self._MAX_MESSAGES_HARD_CAP,
                         "default": 50,
                         "description": (
                             "Cap on input list size. Default 50, hard cap "
-                            f"{_MAX_MESSAGES_HARD_CAP}. Use paging for larger sets."
+                            f"{self._MAX_MESSAGES_HARD_CAP}. Use paging for larger sets."
                         ),
                     },
                     "target_mailbox": {
