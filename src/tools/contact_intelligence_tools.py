@@ -162,18 +162,34 @@ class FindPersonTool(BaseTool):
 
                 formatted_results.append(result)
 
+            response: Dict[str, Any] = {
+                "query": query,
+                "source": source,
+                "total_results": len(formatted_results),
+                "unified_results": formatted_results,
+                "mailbox": mailbox,
+            }
+            # If the email_history scan raised TIMEOUT / THROTTLED /
+            # AUTH_EXPIRED / GAL_UNAVAILABLE, surface it. success stays
+            # true so "all" and "domain" fan-outs still ship the
+            # results they DID get from other sources (Issue 1).
+            error_code = getattr(person_service, "_last_error_code", None)
+            if error_code:
+                response["error_code"] = error_code
+                response["error_message"] = getattr(
+                    person_service, "_last_error_message", None,
+                )
+
             return format_success_response(
                 f"Found {len(formatted_results)} contact(s) for '{query}'",
-                query=query,
-                source=source,
-                total_results=len(formatted_results),
-                unified_results=formatted_results,
-                mailbox=mailbox
+                **response,
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to search for person: {e}")
-            raise ToolExecutionError(f"Failed to search for person: {e}")
+            self.logger.exception(f"Failed to search for person: {e}")
+            raise ToolExecutionError(
+                f"Failed to search for person: {type(e).__name__}: {e}"
+            )
 
     async def _list_contacts(self, max_results: int, target_mailbox) -> Dict[str, Any]:
         """List all personal contacts (replaces get_contacts tool)."""

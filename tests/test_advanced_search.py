@@ -98,19 +98,27 @@ async def test_search_by_conversation_no_results(mock_ews_client):
     mock_query.filter.return_value.order_by.return_value = []
     mock_ews_client.account.inbox.all.return_value = mock_query
 
-    result = await tool.execute(conversation_id="nonexistent-conversation")
+    result = await tool.execute(
+        conversation_id="nonexistent-conversation",
+        include_all_folders=False,
+        search_scope=["inbox"],
+    )
 
     assert result["success"] is True
-    assert result["total_results"] == 0
-    assert len(result["results"]) == 0
+    assert result["count"] == 0
+    assert len(result["items"]) == 0
 
 
 @pytest.mark.asyncio
 async def test_search_by_conversation_missing_ids(mock_ews_client):
     """Test searching conversation without IDs."""
+    from src.exceptions import ValidationError
+
     tool = SearchByConversationTool(mock_ews_client)
 
-    with pytest.raises(ToolExecutionError) as exc_info:
+    # Issue 3 refactor: missing required identifier is a ValidationError
+    # (mapped to HTTP 400) rather than a generic ToolExecutionError.
+    with pytest.raises(ValidationError) as exc_info:
         await tool.execute(search_scope=["inbox"])
 
     assert "conversation_id or message_id" in str(exc_info.value)
@@ -256,8 +264,8 @@ async def test_full_text_search_no_results(mock_ews_client):
     )
 
     assert result["success"] is True
-    assert result["total_results"] == 0
-    assert len(result["results"]) == 0
+    assert result["count"] == 0
+    assert len(result["items"]) == 0
 
 
 @pytest.mark.asyncio

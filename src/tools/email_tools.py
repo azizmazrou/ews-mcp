@@ -1,7 +1,9 @@
 """Email operation tools for EWS MCP Server."""
 
+import logging
 import os
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from exchangelib import Message, Mailbox, FileAttachment, HTMLBody, Body, Folder, ExtendedProperty
 from exchangelib.queryset import Q
@@ -33,8 +35,259 @@ from ..utils import (
     attach_inline_files, INLINE_ATTACHMENTS_SCHEMA,
     escape_html, format_body_for_html, sanitize_html,
     project_fields, ensure_snippet, strip_body_by_default, LIST_DEFAULT_FIELDS,
+    ews_call_log,
 )
 from .folder_tools import find_folder_by_id, get_standard_folder_map
+
+
+# ---------------------------------------------------------------------------
+# Search pagination + field-projection helpers (Issue 2)
+# ---------------------------------------------------------------------------
+#
+# Prior behaviour iterated ``folder.filter(...)[:max_results]`` with a bare
+# ``except Exception`` around the for-loop. exchangelib's auto-pagination
+# can raise mid-stream (throttling, transient EWS errors) and the old
+# handler silently logged + continued, so the response looked successful
+# but carried only the items delivered before the failure — hence the
+# reported "wider window returns FEWER results than a subset" symptom.
+#
+# These helpers make the pagination explicit, bounded, and classifiable:
+#   * ``_db_fields_for`` maps the public ``fields=[...]`` projection to
+#     exchangelib DB field names so ``.only(*db_fields)`` can shrink the
+#     EWS payload rather than just trimming it client-side.
+#   * ``_query_total`` calls ``query.count()`` once so the response can
+#     expose ``total_available`` (EWS ``TotalItemsInView``).
+#   * ``_paginate_query`` materialises the result in explicit chunks,
+#     narrowly classifies exchangelib errors, and returns a
+#     ``FolderQueryOutcome`` so the caller can carry the diagnosis into
+#     the response + structured log.
+# ---------------------------------------------------------------------------
+
+
+# Public-field -> tuple of exchangelib DB fields. Unknown public names
+# map to () — in that case we skip .only() rather than crash.
+_DB_FIELDS_BY_PUBLIC: Dict[str, tuple] = {
+    "id": ("id",),
+    "message_id": ("id",),
+    "subject": ("subject",),
+    "from": ("sender",),
+    "sender": ("sender",),
+    "to": ("to_recipients",),
+    "cc": ("cc_recipients",),
+    "bcc": ("bcc_recipients",),
+    "received_time": ("datetime_received",),
+    "received": ("datetime_received",),
+    "datetime_received": ("datetime_received",),
+    "sent_time": ("datetime_sent",),
+    "sent": ("datetime_sent",),
+    "datetime_sent": ("datetime_sent",),
+    "is_read": ("is_read",),
+    "has_attachments": ("has_attachments",),
+    "importance": ("importance",),
+    "categories": ("categories",),
+    # Snippet/preview/body all derive from text_body + body; include both
+    # so exchangelib fetches the HTML body too when callers ask for body.
+    "snippet": ("text_body",),
+    "preview": ("text_body",),
+    "body_preview": ("text_body",),
+    "body": ("text_body", "body"),
+    "body_html": ("body",),
+    "conversation_id": ("conversation_id",),
+    "thread_id": ("conversation_id",),
+}
+
+
+def _db_fields_for(public_fields: Optional[List[str]]) -> tuple:
+    """Map public field names to the exchangelib DB-field tuple.
+
+    Returns an empty tuple when the public list is empty, None, or
+    contains any name we don't recognise — in that case the caller
+    should skip ``.only()`` to avoid stripping a field exchangelib
+    would otherwise have fetched opportunistically.
+    """
+    if not public_fields:
+        return ()
+    out: list = []
+    seen: set = set()
+    for name in public_fields:
+        mapped = _DB_FIELDS_BY_PUBLIC.get(str(name).lower())
+        if not mapped:
+            # Unknown public field (e.g. "folder" which is synthesized) —
+            # skip. Callers get the current permissive behaviour.
+            continue
+        for db_name in mapped:
+            if db_name not in seen:
+                seen.add(db_name)
+                out.append(db_name)
+    # Always include id — the tool uses it for the message_id field.
+    if "id" not in seen:
+        out.insert(0, "id")
+    return tuple(out)
+
+
+# Exchangelib error classifications. We prefer exchangelib.errors.*
+# when present; fall back to a str(exception) heuristic to stay robust
+# if the library renames a class.
+_TRANSIENT_EWS_ERROR_NAMES = frozenset({
+    "ErrorServerBusy", "ErrorTimeoutExpired", "ErrorConnectionFailed",
+    "ErrorInternalServerError", "ErrorInternalServerTransientError",
+    "ErrorMailboxStoreUnavailable", "ErrorMessageSizeExceeded",
+    "TransportError", "RateLimitError",
+})
+_AUTH_EWS_ERROR_NAMES = frozenset({
+    "ErrorAccessDenied", "ErrorAccessDeniedForSendingEmail",
+    "UnauthorizedError", "Unauthorized",
+})
+_CONNECTION_EWS_ERROR_NAMES = frozenset({
+    "ConnectionError", "RemoteDisconnected", "SSLError",
+    "MaxRetryError", "ChunkedEncodingError",
+})
+
+
+def _classify_ews_error(exc: BaseException) -> str:
+    """Return a short tag describing an exception: ``TIMEOUT``,
+    ``THROTTLED``, ``AUTH_EXPIRED``, ``CONNECTION``, or ``UNKNOWN``.
+
+    Used to build error_code fields in tool responses and to decide
+    whether a mid-iteration exception should abort the query with an
+    explicit error vs. log and continue.
+    """
+    name = type(exc).__name__
+    msg = str(exc)
+    if name == "ErrorServerBusy" or "throttl" in msg.lower() or "ServerBusy" in msg:
+        return "THROTTLED"
+    if name in _TRANSIENT_EWS_ERROR_NAMES or "timed out" in msg.lower():
+        return "TIMEOUT"
+    if name in _AUTH_EWS_ERROR_NAMES or "401" in msg or "Unauthorized" in msg:
+        return "AUTH_EXPIRED"
+    if name in _CONNECTION_EWS_ERROR_NAMES or "Connection aborted" in msg:
+        return "CONNECTION"
+    return "UNKNOWN"
+
+
+@dataclass
+class FolderQueryOutcome:
+    """Result of ``_paginate_query`` for a single folder.
+
+    ``items`` is what we actually collected (possibly partial if an
+    error fired mid-iteration). ``error_code`` / ``error_message`` are
+    populated on failure and passed into the response so the caller can
+    tell a full-but-empty result from a truncated one.
+    """
+    items: List[Any] = field(default_factory=list)
+    total_available: Optional[int] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+def _query_total(query: Any, logger: logging.Logger, folder_label: str) -> Optional[int]:
+    """Return ``query.count()`` or None when the call fails.
+
+    Not every exchangelib queryset supports ``.count()`` cheaply —
+    treating a failure as "unknown" is strictly better than refusing
+    to ship items.
+    """
+    count_method = getattr(query, "count", None)
+    if count_method is None:
+        return None
+    try:
+        return int(count_method())
+    except Exception as exc:
+        logger.debug(
+            "query.count() failed for %s: %s: %s",
+            folder_label, type(exc).__name__, exc,
+        )
+        return None
+
+
+def _paginate_query(
+    query: Any,
+    *,
+    max_results: int,
+    offset: int,
+    chunk_size: int,
+    logger: logging.Logger,
+    folder_label: str,
+) -> FolderQueryOutcome:
+    """Materialise the query in explicit chunks, capturing partial-failure.
+
+    * Walks ``query[o:o+chunk_size]`` slices in a for-loop, building up
+      to ``max_results`` items.
+    * Unwraps any mid-iteration exception into a classified error_code
+      on the outcome — prior code swallowed these and returned partial
+      results as "success".
+    * Also calls ``_query_total`` once up front so the response can
+      advertise ``total_available``.
+    """
+    outcome = FolderQueryOutcome()
+    outcome.total_available = _query_total(query, logger, folder_label)
+    target_offset = max(0, int(offset))
+    remaining = max(0, int(max_results))
+    cursor = target_offset
+    chunk_size = max(1, min(chunk_size, 250))
+    while remaining > 0:
+        want = min(chunk_size, remaining)
+        try:
+            batch = list(query[cursor:cursor + want])
+        except Exception as exc:
+            code = _classify_ews_error(exc)
+            # Log full type at WARNING so ops can catch the real cause
+            # (the Issue 2 diagnostic the bug report wanted to run live).
+            logger.warning(
+                "paginate %s offset=%d chunk=%d raised %s: %s",
+                folder_label, cursor, want, type(exc).__name__, exc,
+            )
+            outcome.error_code = code
+            outcome.error_message = f"{type(exc).__name__}: {exc}"
+            return outcome
+        if not batch:
+            break
+        outcome.items.extend(batch)
+        cursor += len(batch)
+        remaining -= len(batch)
+        # Short batch => queryset exhausted (fewer items than requested).
+        if len(batch) < want:
+            break
+    return outcome
+
+
+def _build_list_item(
+    email: Any,
+    *,
+    fields: List[str],
+    folder_name: str,
+) -> Dict[str, Any]:
+    """Build the canonical list-endpoint item dict for one Message.
+
+    Pulled out of the three search paths so they share one shape.
+    """
+    sender = safe_get(email, "sender", None)
+    from_email = ""
+    if sender and hasattr(sender, "email_address"):
+        from_email = sender.email_address or ""
+    text_body = safe_get(email, "text_body", "") or ""
+    received = safe_get(email, "datetime_received", None)
+    received_iso = received.isoformat() if received and hasattr(received, "isoformat") else None
+    item = {
+        "message_id": ews_id_to_str(safe_get(email, "id", None)) or "",
+        "subject": safe_get(email, "subject", "") or "",
+        "from": from_email,
+        "to": [
+            r.email_address for r in (safe_get(email, "to_recipients", []) or [])
+            if hasattr(r, "email_address")
+        ],
+        "received_time": received_iso,
+        "is_read": safe_get(email, "is_read", False),
+        "has_attachments": safe_get(email, "has_attachments", False),
+        "importance": safe_get(email, "importance", "Normal"),
+        "categories": safe_get(email, "categories", []) or [],
+        "snippet": truncate_text(text_body, 200),
+        "folder": folder_name,
+    }
+    if "body" in fields:
+        item["body"] = text_body
+    strip_body_by_default(item, keep_body="body" in fields)
+    return project_fields(item, fields)
 
 
 def extract_body_html(message) -> str:
@@ -902,6 +1155,15 @@ class SearchEmailsTool(BaseTool):
                             "Include 'body' / 'body_html' to opt into heavy fields."
                         ),
                     },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": (
+                            "Skip this many matches before returning results. "
+                            "Pair with the response's ``next_offset`` for paging."
+                        ),
+                    },
                     "has_attachments": {
                         "type": "boolean",
                         "description": "Filter by attachment presence"
@@ -984,7 +1246,7 @@ class SearchEmailsTool(BaseTool):
     # share most filters; full_text has its own query/search_in/exact_phrase.
     _ALLOWED_PARAMS: set = {
         # Routing
-        "mode", "folder", "target_mailbox", "max_results",
+        "mode", "folder", "target_mailbox", "max_results", "offset",
         # Quick + advanced shared
         "subject_contains", "from_address", "to_address", "sender",
         "recipient", "body_contains", "query",
@@ -1122,66 +1384,68 @@ class SearchEmailsTool(BaseTool):
 
             query = query.order_by('-datetime_received')
             max_results = kwargs.get("max_results", 50)
+            offset = max(0, int(kwargs.get("offset", 0)))
 
             # Field projection: if the caller supplied ``fields=[...]``,
             # the response items will be restricted to that set. When
             # omitted, we use the list-default (no raw body; snippet only).
             fields = kwargs.get("fields") or list(LIST_DEFAULT_FIELDS)
-            wants_body = "body" in fields
-            wants_body_html = "body_html" in fields
+            only_fields = _db_fields_for(fields)
+            if only_fields:
+                try:
+                    query = query.only(*only_fields)
+                except Exception as only_exc:
+                    self.logger.debug(
+                        "query.only(%s) rejected: %s", only_fields, only_exc,
+                    )
 
-            @retry(
-                stop=stop_after_attempt(2),
-                wait=wait_exponential(multiplier=2, min=4, max=10),
-                retry=retry_if_exception_type((ErrorTimeoutExpired, socket.timeout))
+            folder_label = safe_get(folder, "name", "inbox")
+            start_time = datetime.now()
+            outcome = _paginate_query(
+                query,
+                max_results=max_results,
+                offset=offset,
+                chunk_size=50,
+                logger=self.logger,
+                folder_label=folder_label,
             )
-            def execute_query():
-                results = []
-                for item in query[:max_results]:
-                    sender = safe_get(item, "sender", None)
-                    from_email = ""
-                    if sender and hasattr(sender, "email_address"):
-                        from_email = sender.email_address or ""
 
-                    text_body = safe_get(item, "text_body", "") or ""
-                    email_data = {
-                        "message_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
-                        "subject": safe_get(item, "subject", "") or "",
-                        "from": from_email,
-                        "to": [r.email_address for r in (safe_get(item, "to_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
-                        "cc": [r.email_address for r in (safe_get(item, "cc_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
-                        "bcc": [r.email_address for r in (safe_get(item, "bcc_recipients", []) or []) if r and hasattr(r, "email_address") and r.email_address],
-                        "received_time": safe_get(item, "datetime_received", datetime.now()).isoformat(),
-                        "is_read": safe_get(item, "is_read", False),
-                        "has_attachments": safe_get(item, "has_attachments", False),
-                        "preview": truncate_text(text_body, 200),
-                        # Heavy fields only included when caller asked for them.
-                    }
-                    if wants_body:
-                        email_data["body"] = text_body
-                    if wants_body_html:
-                        email_data["body_html"] = str(safe_get(item, "body", "") or "")
+            emails: List[Dict[str, Any]] = [
+                _build_list_item(e, fields=fields, folder_name=folder_label)
+                for e in outcome.items
+            ]
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            ews_call_log(
+                self.logger, "FindItem",
+                duration_ms=duration_ms,
+                result_count=len(emails),
+                total_available=outcome.total_available,
+                page_offset=offset,
+                folder=folder_label,
+                outcome="ok" if outcome.error_code is None else outcome.error_code,
+                extra_fields={"tool": "search_emails.quick"},
+            )
 
-                    # Ensure every list item has a ``snippet`` (200 chars) even
-                    # when ``body`` wasn't pulled — older callers may look for
-                    # ``preview``, newer ones for ``snippet``; keep both.
-                    email_data["snippet"] = email_data["preview"]
-                    strip_body_by_default(email_data, keep_body=(wants_body or wants_body_html))
-                    results.append(project_fields(email_data, fields))
-                return results
-
-            emails = execute_query()
+            response: Dict[str, Any] = {
+                "items": emails,
+                "count": len(emails),
+                "total_available": outcome.total_available,
+                "mailbox": mailbox,
+            }
+            if (
+                outcome.total_available is not None
+                and len(emails) + offset < outcome.total_available
+            ):
+                response["next_offset"] = offset + len(emails)
+            if outcome.error_code:
+                response["meta"] = {
+                    "error_code": outcome.error_code,
+                    "error_message": outcome.error_message,
+                }
 
             return format_success_response(
                 f"Found {len(emails)} matching emails",
-                emails=emails,
-                # Bug 5: canonical keys (items + count + total) alongside
-                # the legacy shape (emails + total_count).
-                items=emails,
-                count=len(emails),
-                total=len(emails),
-                total_count=len(emails),
-                mailbox=mailbox
+                **response,
             )
 
         except (ErrorTimeoutExpired, socket.timeout) as e:
@@ -1262,68 +1526,147 @@ class SearchEmailsTool(BaseTool):
             for q_filter in q_filters[1:]:
                 combined_filter &= q_filter
 
-            all_results = []
             # Field projection (Bug 6). Default: no body.
             fields = kwargs.get("fields") or list(LIST_DEFAULT_FIELDS)
-            wants_body = "body" in fields
+            offset = max(0, int(kwargs.get("offset", 0)))
+            only_fields = _db_fields_for(fields)
+
+            all_results: List[Dict[str, Any]] = []
+            per_folder_errors: List[Dict[str, Any]] = []
+            total_available_sum: Optional[int] = 0
+            some_total_unknown = False
+
+            per_folder_budget = (
+                max_results // len(folders) if len(folders) > 1 else max_results
+            )
+            start_time = datetime.now()
+
             for folder in folders:
+                folder_name = safe_get(folder, "name", "Unknown")
                 try:
                     query = folder.filter(combined_filter)
+                    if only_fields:
+                        try:
+                            query = query.only(*only_fields)
+                        except Exception as only_exc:
+                            # .only() can reject unknown fields on older
+                            # exchangelib versions — fall back to full
+                            # projection rather than fail the search.
+                            self.logger.debug(
+                                "query.only(%s) rejected on %s: %s",
+                                only_fields, folder_name, only_exc,
+                            )
                     sort_field = sort_by
                     if sort_order == "descending" and not sort_field.startswith('-'):
                         sort_field = f"-{sort_field}"
                     query = query.order_by(sort_field)
-
-                    results_per_folder = max_results // len(folders) if len(folders) > 1 else max_results
-                    for email in query[:results_per_folder]:
-                        text_body = safe_get(email, 'text_body', '') or ''
-                        item = {
-                            "message_id": ews_id_to_str(safe_get(email, 'id', '')),
-                            "subject": safe_get(email, 'subject', ''),
-                            "from": safe_get(email, 'sender', {}).email_address if hasattr(safe_get(email, 'sender', {}), 'email_address') else '',
-                            "to": [r.email_address for r in safe_get(email, 'to_recipients', []) if hasattr(r, 'email_address')],
-                            "received_time": safe_get(email, 'datetime_received', '').isoformat() if safe_get(email, 'datetime_received') else None,
-                            "is_read": safe_get(email, 'is_read', False),
-                            "has_attachments": safe_get(email, 'has_attachments', False),
-                            "importance": safe_get(email, 'importance', 'Normal'),
-                            "categories": safe_get(email, 'categories', []),
-                            "snippet": truncate_text(text_body, 200),
-                            "body_preview": truncate_text(text_body, 200),
-                            "folder": folder.name,
-                        }
-                        if wants_body:
-                            item["body"] = text_body
-                        strip_body_by_default(item, keep_body=wants_body)
-                        all_results.append(project_fields(item, fields))
-                except Exception as e:
-                    self.logger.warning(f"Error searching folder {folder.name}: {e}")
+                except Exception as setup_exc:
+                    # Filter/sort setup itself failed — classify and carry.
+                    per_folder_errors.append({
+                        "folder": folder_name,
+                        "error_code": _classify_ews_error(setup_exc),
+                        "error_message": f"{type(setup_exc).__name__}: {setup_exc}",
+                    })
+                    self.logger.warning(
+                        "advanced-search setup on %s failed: %s: %s",
+                        folder_name, type(setup_exc).__name__, setup_exc,
+                    )
+                    some_total_unknown = True
                     continue
+
+                outcome = _paginate_query(
+                    query,
+                    max_results=per_folder_budget,
+                    offset=offset,
+                    chunk_size=50,
+                    logger=self.logger,
+                    folder_label=folder_name,
+                )
+                ews_call_log(
+                    self.logger, "FindItem",
+                    result_count=len(outcome.items),
+                    total_available=outcome.total_available,
+                    page_offset=offset,
+                    folder=folder_name,
+                    outcome="ok" if outcome.error_code is None else outcome.error_code,
+                    error_type=(
+                        outcome.error_message.split(":", 1)[0]
+                        if outcome.error_message else None
+                    ),
+                    extra_fields={"tool": "search_emails.advanced"},
+                )
+
+                if outcome.total_available is None:
+                    some_total_unknown = True
+                elif total_available_sum is not None:
+                    total_available_sum += outcome.total_available
+
+                if outcome.error_code:
+                    per_folder_errors.append({
+                        "folder": folder_name,
+                        "error_code": outcome.error_code,
+                        "error_message": outcome.error_message,
+                    })
+
+                for email in outcome.items:
+                    all_results.append(
+                        _build_list_item(email, fields=fields, folder_name=folder_name)
+                    )
 
             if len(folders) > 1:
                 reverse = (sort_order == "descending")
                 if sort_by == "datetime_received":
-                    all_results.sort(key=lambda x: x.get("received_time", ""), reverse=reverse)
+                    all_results.sort(key=lambda x: x.get("received_time") or "", reverse=reverse)
                 elif sort_by == "subject":
-                    all_results.sort(key=lambda x: x.get("subject", ""), reverse=reverse)
+                    all_results.sort(key=lambda x: x.get("subject") or "", reverse=reverse)
 
             all_results = all_results[:max_results]
 
+            # total_available is a sum across folders when every folder
+            # reported a count; None if at least one was unknown.
+            total_available: Optional[int] = (
+                None if some_total_unknown else total_available_sum
+            )
+
+            meta: Dict[str, Any] = {}
+            if per_folder_errors:
+                meta["per_folder_errors"] = per_folder_errors
+
+            response: Dict[str, Any] = {
+                "items": all_results,
+                "count": len(all_results),
+                "total_available": total_available,
+                "folders_searched": search_scope,
+                "mailbox": mailbox,
+            }
+            if total_available is not None and len(all_results) + offset < total_available:
+                response["next_offset"] = offset + len(all_results)
+            if meta:
+                response["meta"] = meta
+
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            ews_call_log(
+                self.logger, "search_emails.advanced_total",
+                duration_ms=duration_ms,
+                result_count=len(all_results),
+                total_available=total_available,
+                page_offset=offset,
+                outcome="ok" if not per_folder_errors else "partial",
+                extra_fields={"folders": len(folders)},
+            )
+
             return format_success_response(
                 f"Found {len(all_results)} result(s)",
-                results=all_results,
-                # Bug 5: canonical items/count/total alongside legacy `results`.
-                items=all_results,
-                count=len(all_results),
-                total=len(all_results),
-                folders_searched=search_scope,
-                mailbox=mailbox
+                **response,
             )
 
         except ToolExecutionError:
             raise
         except Exception as e:
-            self.logger.error(f"Failed to perform advanced search: {e}")
-            raise ToolExecutionError(f"Failed to perform advanced search: {e}")
+            self.logger.exception(f"Failed to perform advanced search: {e}")
+            raise ToolExecutionError(
+                f"Failed to perform advanced search: {type(e).__name__}: {e}"
+            )
 
     async def _search_full_text(self, **kwargs) -> Dict[str, Any]:
         """Full-text search across subject, body, and attachment names."""
@@ -1371,8 +1714,16 @@ class SearchEmailsTool(BaseTool):
             if not folders_to_search:
                 raise ToolExecutionError("No valid folders to search")
 
-            all_results = []
+            only_fields = _db_fields_for(fields)
+            offset = max(0, int(kwargs.get("offset", 0)))
+            all_results: List[Dict[str, Any]] = []
+            per_folder_errors: List[Dict[str, Any]] = []
+            total_available_sum: Optional[int] = 0
+            some_total_unknown = False
+            start_time = datetime.now()
+
             for folder in folders_to_search:
+                folder_name = safe_get(folder, "name", "Unknown")
                 try:
                     q_filters = []
                     if "subject" in search_in:
@@ -1380,87 +1731,130 @@ class SearchEmailsTool(BaseTool):
                     if "body" in search_in:
                         q_filters.append(Q(body__contains=query_text))
 
-                    if q_filters:
-                        combined_filter = q_filters[0]
-                        for f in q_filters[1:]:
-                            combined_filter |= f
+                    if not q_filters:
+                        continue
 
-                        items = folder.filter(combined_filter).order_by('-datetime_received')[:max_results]
+                    combined_filter = q_filters[0]
+                    for f in q_filters[1:]:
+                        combined_filter |= f
 
-                        for item in items:
-                            item_text = ""
-                            if "subject" in search_in:
-                                item_text += safe_get(item, 'subject', '').lower() + " "
-                            if "body" in search_in:
-                                item_text += safe_get(item, 'text_body', '').lower() + " "
-
-                            attachment_match = False
-                            if "attachments" in search_in and hasattr(item, 'attachments') and item.attachments:
-                                for att in item.attachments:
-                                    att_name = safe_get(att, 'name', '').lower()
-                                    if search_query in att_name:
-                                        attachment_match = True
-                                        break
-
-                            if exact_phrase and search_query not in item_text and not attachment_match:
-                                continue
-
-                            full_text = safe_get(item, 'text_body', '') or ''
-                            # Canonical keys; keep legacy ``id`` + ``received``
-                            # for the one-release deprecation window (Bug 5).
-                            result = {
-                                "message_id": ews_id_to_str(safe_get(item, 'id', None)) or '',
-                                "id": ews_id_to_str(safe_get(item, 'id', None)) or '',
-                                "subject": safe_get(item, 'subject', ''),
-                                "from": safe_get(safe_get(item, 'sender', {}), 'email_address', ''),
-                                "to": [r.email_address for r in safe_get(item, 'to_recipients', []) if hasattr(r, 'email_address')],
-                                "received_time": safe_get(item, 'datetime_received', '').isoformat() if safe_get(item, 'datetime_received') else None,
-                                "received": safe_get(item, 'datetime_received', '').isoformat() if safe_get(item, 'datetime_received') else None,
-                                "is_read": safe_get(item, 'is_read', False),
-                                "has_attachments": safe_get(item, 'has_attachments', False),
-                                "folder": safe_get(folder, 'name', 'Unknown'),
-                                "snippet": truncate_text(full_text, 200),
-                                "preview": truncate_text(full_text, 200),
-                            }
-                            if "body" in fields:
-                                result["body"] = full_text
-                            strip_body_by_default(result, keep_body="body" in fields)
-                            all_results.append(project_fields(result, fields))
-
-                except Exception as e:
-                    self.logger.warning(f"Error searching folder {safe_get(folder, 'name', 'Unknown')}: {e}")
+                    query = folder.filter(combined_filter).order_by('-datetime_received')
+                    if only_fields:
+                        try:
+                            query = query.only(*only_fields)
+                        except Exception as only_exc:
+                            self.logger.debug(
+                                "query.only(%s) rejected on %s: %s",
+                                only_fields, folder_name, only_exc,
+                            )
+                except Exception as setup_exc:
+                    per_folder_errors.append({
+                        "folder": folder_name,
+                        "error_code": _classify_ews_error(setup_exc),
+                        "error_message": f"{type(setup_exc).__name__}: {setup_exc}",
+                    })
+                    self.logger.warning(
+                        "full-text setup on %s failed: %s: %s",
+                        folder_name, type(setup_exc).__name__, setup_exc,
+                    )
+                    some_total_unknown = True
                     continue
 
-            # Sort defensively — projection may strip both received_time
-            # and received; fall back to whichever is present.
+                outcome = _paginate_query(
+                    query,
+                    max_results=max_results,
+                    offset=offset,
+                    chunk_size=50,
+                    logger=self.logger,
+                    folder_label=folder_name,
+                )
+                ews_call_log(
+                    self.logger, "FindItem",
+                    result_count=len(outcome.items),
+                    total_available=outcome.total_available,
+                    page_offset=offset,
+                    folder=folder_name,
+                    outcome="ok" if outcome.error_code is None else outcome.error_code,
+                    extra_fields={"tool": "search_emails.full_text"},
+                )
+                if outcome.total_available is None:
+                    some_total_unknown = True
+                elif total_available_sum is not None:
+                    total_available_sum += outcome.total_available
+                if outcome.error_code:
+                    per_folder_errors.append({
+                        "folder": folder_name,
+                        "error_code": outcome.error_code,
+                        "error_message": outcome.error_message,
+                    })
+
+                for item in outcome.items:
+                    # Exact-phrase post-filter stays client-side: the
+                    # EWS ``__contains`` filter already narrowed us.
+                    item_text = ""
+                    if "subject" in search_in:
+                        item_text += (safe_get(item, "subject", "") or "").lower() + " "
+                    if "body" in search_in:
+                        item_text += (safe_get(item, "text_body", "") or "").lower() + " "
+                    attachment_match = False
+                    if "attachments" in search_in and hasattr(item, "attachments") and item.attachments:
+                        for att in item.attachments:
+                            att_name = (safe_get(att, "name", "") or "").lower()
+                            if search_query in att_name:
+                                attachment_match = True
+                                break
+                    if exact_phrase and search_query not in item_text and not attachment_match:
+                        continue
+                    all_results.append(
+                        _build_list_item(item, fields=fields, folder_name=folder_name)
+                    )
+
             all_results.sort(
-                key=lambda x: x.get("received_time") or x.get("received") or "",
+                key=lambda x: x.get("received_time") or "",
                 reverse=True,
             )
             all_results = all_results[:max_results]
 
+            total_available: Optional[int] = (
+                None if some_total_unknown else total_available_sum
+            )
+
+            response: Dict[str, Any] = {
+                "items": all_results,
+                "count": len(all_results),
+                "total_available": total_available,
+                "query": query_text,
+                "searched_folders": search_scope,
+                "mailbox": mailbox,
+            }
+            if total_available is not None and len(all_results) + offset < total_available:
+                response["next_offset"] = offset + len(all_results)
+            if per_folder_errors:
+                response["meta"] = {"per_folder_errors": per_folder_errors}
+
+            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+            ews_call_log(
+                self.logger, "search_emails.full_text_total",
+                duration_ms=duration_ms,
+                result_count=len(all_results),
+                total_available=total_available,
+                page_offset=offset,
+                outcome="ok" if not per_folder_errors else "partial",
+                extra_fields={"folders": len(folders_to_search)},
+            )
+
             return format_success_response(
                 f"Found {len(all_results)} emails matching '{query_text}'",
-                results=all_results,
-                # Bug 5: canonical items/count/total alongside legacy shape.
-                items=all_results,
-                count=len(all_results),
-                total=len(all_results),
-                query=query_text,
-                total_results=len(all_results),
-                searched_folders=search_scope,
-                meta={"deprecations": [
-                    "result.id is kept as an alias for result.message_id "
-                    "for one release; prefer message_id."
-                ]},
-                mailbox=mailbox
+                **response,
             )
 
         except ToolExecutionError:
             raise
         except Exception as e:
-            self.logger.error(f"Failed to perform full-text search: {e}")
-            raise ToolExecutionError(f"Failed to perform full-text search: {e}")
+            self.logger.exception(f"Failed to perform full-text search: {e}")
+            raise ToolExecutionError(
+                f"Failed to perform full-text search: {type(e).__name__}: {e}"
+            )
 
 
 class GetEmailDetailsTool(BaseTool):
@@ -1570,6 +1964,216 @@ class GetEmailDetailsTool(BaseTool):
         except Exception as e:
             self.logger.error(f"Failed to get email details: {e}")
             raise ToolExecutionError(f"Failed to get email details: {e}")
+
+
+class GetEmailsBulkTool(BaseTool):
+    """Fetch multiple messages in a single EWS round-trip (Issue 5).
+
+    Motivation: clients wanting a weekly-report view had to call
+    ``get_email_details`` N times for N messages — O(N) HTTP requests at
+    ~1s each. ``account.fetch`` issues a single ``GetItem`` batch so 50
+    messages come back in one network hop.
+    """
+
+    # Hard ceiling: the EWS server rejects very large GetItem batches,
+    # and callers who need >100 items should page explicitly.
+    _MAX_MESSAGES_HARD_CAP = 100
+
+    def get_schema(self) -> Dict[str, Any]:
+        return {
+            "name": "get_emails_bulk",
+            "description": (
+                "Fetch multiple emails by ID in one EWS round-trip. "
+                "Uses exchangelib's account.fetch() batch API so N "
+                "messages cost one HTTP call, not N."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Message IDs to fetch (from search_emails / list_attachments)",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Projection, same vocabulary as get_email_details. "
+                            "Default: full email shape. Use ['message_id', "
+                            "'subject', 'from', 'received_time', 'snippet'] "
+                            "for a light one."
+                        ),
+                    },
+                    "max_messages": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": _MAX_MESSAGES_HARD_CAP,
+                        "default": 50,
+                        "description": (
+                            "Cap on input list size. Default 50, hard cap "
+                            f"{_MAX_MESSAGES_HARD_CAP}. Use paging for larger sets."
+                        ),
+                    },
+                    "target_mailbox": {
+                        "type": "string",
+                        "description": "Email address to operate on (requires impersonation/delegate access)",
+                    },
+                },
+                "required": ["message_ids"],
+            },
+        }
+
+    async def execute(self, **kwargs) -> Dict[str, Any]:
+        from exchangelib import Message
+
+        message_ids = kwargs.get("message_ids") or []
+        if not isinstance(message_ids, list) or not message_ids:
+            raise ValidationError("message_ids must be a non-empty list")
+        # Dedupe while preserving order. Strings only.
+        seen: set = set()
+        clean_ids: List[str] = []
+        for raw in message_ids:
+            if not isinstance(raw, str):
+                raise ValidationError(
+                    f"message_ids must be strings, got {type(raw).__name__}"
+                )
+            if raw in seen:
+                continue
+            seen.add(raw)
+            clean_ids.append(raw)
+
+        max_messages = int(kwargs.get("max_messages", 50))
+        if max_messages < 1:
+            raise ValidationError("max_messages must be >= 1")
+        if max_messages > self._MAX_MESSAGES_HARD_CAP:
+            max_messages = self._MAX_MESSAGES_HARD_CAP
+        if len(clean_ids) > max_messages:
+            raise ValidationError(
+                f"received {len(clean_ids)} ids but max_messages={max_messages}. "
+                f"Reduce the list or split into pages."
+            )
+
+        target_mailbox = kwargs.get("target_mailbox")
+        fields = kwargs.get("fields")  # None = full shape
+        account = self.get_account(target_mailbox)
+        mailbox = self.get_mailbox_info(target_mailbox)
+
+        # Single GetItem batch — O(1) round trips regardless of N.
+        start_time = datetime.now()
+        try:
+            fetched = list(account.fetch([Message(id=mid) for mid in clean_ids]))
+        except Exception as exc:
+            self.logger.exception(
+                "get_emails_bulk: batch fetch failed: %s: %s",
+                type(exc).__name__, exc,
+            )
+            raise ToolExecutionError(
+                f"Bulk fetch failed: {type(exc).__name__}: {exc}"
+            )
+        duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+
+        items: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        # exchangelib returns items in input order; pair by index so we
+        # can surface per-id errors correctly.
+        for requested_id, fetched_item in zip(clean_ids, fetched):
+            if isinstance(fetched_item, BaseException):
+                errors.append({
+                    "message_id": requested_id,
+                    "error_code": (
+                        "NOT_FOUND"
+                        if "ErrorItemNotFound" in type(fetched_item).__name__
+                        else "FETCH_ERROR"
+                    ),
+                    "error_message": f"{type(fetched_item).__name__}: {fetched_item}",
+                })
+                continue
+            item_dict = self._message_to_dict(fetched_item, fields=fields)
+            items.append(item_dict)
+
+        # If exchangelib returned a shorter list than we asked for
+        # (shouldn't happen with account.fetch, but be defensive), mark
+        # the missing ids.
+        if len(fetched) < len(clean_ids):
+            missing = clean_ids[len(fetched):]
+            for mid in missing:
+                errors.append({
+                    "message_id": mid,
+                    "error_code": "NOT_FOUND",
+                    "error_message": "no response entry for id",
+                })
+
+        ews_call_log(
+            self.logger, "GetItem",
+            duration_ms=duration_ms,
+            result_count=len(items),
+            outcome="ok" if not errors else "partial",
+            extra_fields={
+                "tool": "get_emails_bulk",
+                "requested": len(clean_ids),
+                "errors": len(errors),
+            },
+        )
+
+        return format_success_response(
+            f"Fetched {len(items)} of {len(clean_ids)} message(s)",
+            items=items,
+            count=len(items),
+            requested=len(clean_ids),
+            errors=errors,
+            mailbox=mailbox,
+        )
+
+    @staticmethod
+    def _message_to_dict(
+        message: Any, *, fields: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        """Render an exchangelib Message to the canonical email dict.
+
+        Shape matches ``GetEmailDetailsTool`` so callers can swap in
+        this batch tool without changing their downstream parser.
+        """
+        sender = safe_get(message, "sender", None)
+        from_email = getattr(sender, "email_address", "") or ""
+
+        to_recipients = safe_get(message, "to_recipients", []) or []
+        to_emails = [
+            r.email_address for r in to_recipients
+            if hasattr(r, "email_address") and r.email_address
+        ]
+        cc_recipients = safe_get(message, "cc_recipients", []) or []
+        cc_emails = [
+            r.email_address for r in cc_recipients
+            if hasattr(r, "email_address") and r.email_address
+        ]
+        attachments = safe_get(message, "attachments", []) or []
+        attachment_names = [
+            att.name for att in attachments if hasattr(att, "name") and att.name
+        ]
+
+        received = safe_get(message, "datetime_received", None)
+        sent = safe_get(message, "datetime_sent", None)
+
+        email_details = {
+            "message_id": ews_id_to_str(safe_get(message, "id", None)) or "unknown",
+            "subject": safe_get(message, "subject", "") or "",
+            "from": from_email,
+            "to": to_emails,
+            "cc": cc_emails,
+            "body": safe_get(message, "text_body", "") or "",
+            "body_html": str(safe_get(message, "body", "") or ""),
+            "received_time": received.isoformat() if received and hasattr(received, "isoformat") else None,
+            "sent_time": sent.isoformat() if sent and hasattr(sent, "isoformat") else None,
+            "is_read": safe_get(message, "is_read", False),
+            "has_attachments": safe_get(message, "has_attachments", False),
+            "importance": safe_get(message, "importance", "Normal") or "Normal",
+            "attachments": attachment_names,
+        }
+        email_details["snippet"] = truncate_text(email_details["body"], 200)
+        if fields:
+            return project_fields(email_details, fields)
+        return email_details
 
 
 class DeleteEmailTool(BaseTool):

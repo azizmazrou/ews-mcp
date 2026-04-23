@@ -31,7 +31,7 @@ from .utils import safe_json_dumps
 # Import all tool classes (67 total: 63 base + 4 optional AI)
 from .tools import (
     CreateDraftTool, CreateReplyDraftTool, CreateForwardDraftTool,
-    SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool,
+    SendEmailTool, ReadEmailsTool, SearchEmailsTool, GetEmailDetailsTool, GetEmailsBulkTool,
     DeleteEmailTool, MoveEmailTool, UpdateEmailTool, CopyEmailTool,
     ReplyEmailTool, ForwardEmailTool,
     # Calendar tools (7)
@@ -670,6 +670,7 @@ class EWSMCPServer:
                 ReadEmailsTool,
                 SearchEmailsTool,
                 GetEmailDetailsTool,
+                GetEmailsBulkTool,
                 DeleteEmailTool,
                 MoveEmailTool,
                 UpdateEmailTool,
@@ -677,7 +678,7 @@ class EWSMCPServer:
                 ReplyEmailTool,
                 ForwardEmailTool
             ])
-            self.logger.info("Email tools enabled (13 tools)")
+            self.logger.info("Email tools enabled (14 tools)")
 
         # Attachment tools (7 tools)
         if self.settings.enable_email:
