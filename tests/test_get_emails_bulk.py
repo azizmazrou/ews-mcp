@@ -36,6 +36,21 @@ def _fake_msg(i: int, *, subject: str | None = None):
 # ---------------------------------------------------------------------------
 
 
+def test_issue5_get_schema_builds_without_nameerror(mock_ews_client):
+    """Regression: the schema used ``_MAX_MESSAGES_HARD_CAP`` as a bare
+    name inside a method, which crashed ``register_tools`` at server
+    startup with NameError. Every tool's ``get_schema`` must return a
+    plain dict without raising — that's how the MCP server discovers
+    them on boot."""
+    from src.tools.email_tools import GetEmailsBulkTool
+
+    tool = GetEmailsBulkTool(mock_ews_client)
+    schema = tool.get_schema()
+    assert schema["name"] == "get_emails_bulk"
+    props = schema["inputSchema"]["properties"]
+    assert props["max_messages"]["maximum"] == 100
+
+
 @pytest.mark.asyncio
 async def test_issue5_batch_fetch_returns_all_requested(mock_ews_client):
     """10 ids -> 1 account.fetch() call -> 10 items back."""
