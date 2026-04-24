@@ -214,15 +214,79 @@ TIMEZONE=UTC
 EOF
 ```
 
-### Option 3: Local Development
+### Option 3: Native install (no Docker)
+
+Use this path when Docker is unavailable (locked-down laptops, corporate VDI without
+virtualization), when you want a smaller runtime footprint, or when you plan to iterate
+on the code locally. The server is a plain Python process — no container runtime needed.
+
+**Prerequisites:**
+
+- Python **3.11+** (see `python_requires` in `setup.py`). Check with `python3 --version`.
+- `pip` and `venv` (shipped with CPython 3.11+).
+- Build headers for a few C extensions pulled in by `lxml` / `cryptography`. On Debian /
+  Ubuntu: `sudo apt install build-essential libxml2-dev libxslt1-dev libffi-dev libssl-dev`.
+  On macOS, Xcode Command Line Tools (`xcode-select --install`) is enough. On Windows,
+  the prebuilt wheels usually cover everything — no compiler required.
 
 ```bash
+# 1. Clone
 git clone https://github.com/azizmazrou/ews-mcp.git
 cd ews-mcp
+
+# 2. Create an isolated virtual environment (strongly recommended —
+#    keeps the 30+ runtime deps out of your system Python)
+python3 -m venv venv
+source venv/bin/activate          # Linux / macOS
+# venv\Scripts\activate           # Windows PowerShell
+
+# 3. Install runtime dependencies
 pip install -r requirements.txt
-cp .env.example .env  # Configure your credentials
+
+# 4. (Optional) Install the package itself — registers the `ews-mcp-server`
+#    console script on PATH (via the entry_point in setup.py). Useful for
+#    Claude Desktop configs that prefer a single bare command.
+pip install -e .
+
+# 5. Configure
+cp .env.example .env
+# Edit .env: at minimum EWS_SERVER_URL, EWS_EMAIL, EWS_AUTH_TYPE and matching credentials.
+# See "Configuration" below for the full reference.
+
+# 6. Run — stdio transport (default; this is what MCP clients like Claude Desktop expect)
 python -m src.main
+#   …or equivalently:
+./run.sh
+#   …or, if you ran `pip install -e .` in step 4:
+ews-mcp-server
+
+# 7. Run — SSE transport (HTTP clients; requires MCP_API_KEY when binding non-loopback)
+MCP_TRANSPORT=sse MCP_API_KEY=$(openssl rand -hex 32) python -m src.main
 ```
+
+**Windows / Claude Desktop MSIX note.** The MSIX launcher chdirs to a random directory
+before spawning Python, which breaks `python -m src.main` (the `src` package is no longer
+discoverable). Use `run_server.py` as the entrypoint — it pins `cwd` and `sys.path` to its
+own directory, so it works regardless of where the launcher decides to start:
+
+```cmd
+C:\path\to\ews-mcp\venv\Scripts\python.exe C:\path\to\ews-mcp\run_server.py
+```
+
+**Logs.** Native runs write to `./logs/ews-mcp.log` (rotating, 10 MB × 5 files),
+resolved relative to the process CWD. If that directory is not writable the server
+transparently falls back to `/tmp/ews_mcp_logs`. All Python logging goes to stderr —
+stdout stays clean for the JSON-RPC protocol.
+
+**Docker vs native — which to pick:**
+
+| Aspect | Docker | Native |
+|---|---|---|
+| Footprint | ~500 MB image + daemon overhead | ~50 MB venv |
+| Startup | container boot + entrypoint | sub-second `python -m src.main` |
+| Isolation | full | per-venv |
+| Update | `docker pull` | `git pull && pip install -r requirements.txt` |
+| Best for | production, k8s, multiple environments | dev loops, restricted machines, no-Docker setups |
 
 ---
 
@@ -546,6 +610,8 @@ Add to your Claude Desktop config:
 **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 **Linux**: `~/.config/Claude/claude_desktop_config.json`
 
+### Docker launcher
+
 ```json
 {
   "mcpServers": {
@@ -560,6 +626,60 @@ Add to your Claude Desktop config:
   }
 }
 ```
+
+### Native launcher (no Docker)
+
+Point `command` at the Python interpreter from your venv (step 2 of "Option 3" above) and
+pass `run_server.py` as the script — it pins `cwd` so this works on every platform,
+including Windows MSIX where the launcher's working directory is unpredictable.
+
+```json
+{
+  "mcpServers": {
+    "ews": {
+      "command": "/absolute/path/to/ews-mcp/venv/bin/python",
+      "args": ["/absolute/path/to/ews-mcp/run_server.py"],
+      "env": {
+        "EWS_SERVER_URL": "mail.company.com",
+        "EWS_EMAIL": "user@company.com",
+        "EWS_AUTH_TYPE": "basic",
+        "EWS_USERNAME": "user@company.com",
+        "EWS_PASSWORD": "your-password",
+        "TIMEZONE": "UTC"
+      }
+    }
+  }
+}
+```
+
+Prefer keeping credentials out of the JSON config? Load them from a `.env` file instead —
+the server auto-reads `.env` from its project root on startup (via `python-dotenv`), so
+you can drop the entire `env` block:
+
+```json
+{
+  "mcpServers": {
+    "ews": {
+      "command": "/absolute/path/to/ews-mcp/venv/bin/python",
+      "args": ["/absolute/path/to/ews-mcp/run_server.py"]
+    }
+  }
+}
+```
+
+If you ran `pip install -e .`, the entry-point shim works too:
+
+```json
+{
+  "mcpServers": {
+    "ews": {
+      "command": "/absolute/path/to/ews-mcp/venv/bin/ews-mcp-server"
+    }
+  }
+}
+```
+
+Absolute paths are required — Claude Desktop does not expand `~` or resolve relative paths.
 
 ---
 
