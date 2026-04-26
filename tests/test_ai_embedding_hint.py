@@ -32,8 +32,14 @@ from src.tools.ai_tools import _embedding_error_hint
 )
 def test_unreachable_hint_points_at_docker_networking(msg):
     hint = _embedding_error_hint(msg)
+    # Both options must surface so the operator can pick whichever fits
+    # their topology. The recommended path is the shared external network
+    # (Docker DNS) — that's what docker-compose-ghcr.yml is wired for.
+    assert "claude-shared" in hint, hint
+    assert "http://ollama:11434" in hint, hint
+    # The fallback must still be discoverable for operators who can't
+    # create a shared network (managed Docker, single-stack deployments).
     assert "host.docker.internal" in hint, hint
-    assert "extra_hosts" in hint, hint
     assert "AI_BASE_URL" in hint, hint
 
 
@@ -44,6 +50,7 @@ def test_read_timeout_is_not_classified_as_unreachable():
     whose routing is fine but whose Ollama is just under-provisioned."""
     hint = _embedding_error_hint("ReadTimeout: timeout")
     assert "host.docker.internal" not in hint
+    assert "claude-shared" not in hint
     assert "AI_EMBEDDING_MODEL" in hint
 
 

@@ -48,11 +48,16 @@ def _embedding_error_hint(exc_msg: str) -> str:
     if is_unreachable:
         return (
             "AI_BASE_URL host is not reachable from this process. "
-            "If running in a Docker bridge network, the host's LAN IP is "
-            "NOT routable from inside the container — use "
-            "AI_BASE_URL=http://host.docker.internal:11434/v1 "
-            "(and ensure the container has "
-            "extra_hosts: 'host.docker.internal:host-gateway'). "
+            "If running in Docker, the host's LAN IP is NOT routable from "
+            "inside a bridge network. Two options: "
+            "(1) RECOMMENDED — attach both ews-mcp and the Ollama "
+            "container to a shared external network "
+            "(`docker network create claude-shared`, then declare it as "
+            "external in both compose files), and set "
+            "AI_BASE_URL=http://ollama:11434/v1 (Docker DNS); "
+            "(2) FALLBACK — add `extra_hosts: "
+            "'host.docker.internal:host-gateway'` to the ews-mcp service "
+            "and set AI_BASE_URL=http://host.docker.internal:11434/v1. "
             "If running with network_mode: host or bare-metal, use "
             "http://localhost:11434/v1."
         )
