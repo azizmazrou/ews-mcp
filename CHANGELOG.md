@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — Reply/forward thread no longer accumulates `&amp;` entities
+
+**Bug**: long email threads would show cascading ampersands between contact
+names — `John Smith &amp;lt;john@x.com&amp;gt;` after one reply,
+`&amp;amp;lt;` after two, and so on. Visible in Outlook / OWA / any HTML mail
+client as literal `&` characters where the angle brackets should be.
+
+**Cause**: `format_forward_header()` was returning recipient strings with
+`&lt;` / `&gt;` already in place. The reply and forward callers
+(`ReplyEmailTool`, `ForwardEmailTool`) then ran the same value through
+`escape_html()` again, turning every `&` into `&amp;`. Each subsequent
+reply quoted the previous body, so the entities compounded on every cycle.
+
+**Fix**: `format_forward_header()` now returns plain text with literal `<`
+and `>`. The single `escape_html()` at the call site is correct and produces
+exactly one level of HTML entities. Regression coverage added in
+`tests/test_reply_forward_escape.py`.
+
 ## Unreleased — Test-suite green-up (real bugs surfaced)
 
 Local test suite was 18-failing on a fresh checkout. Triage found 16 test-side
