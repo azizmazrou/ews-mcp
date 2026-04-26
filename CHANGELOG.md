@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — `delete_email(permanent=True)` no longer 500s
+
+**Bug**: every `delete_email` / `manage_email` call with `permanent=True` (or
+`hard_delete=True`) returned `500 ToolExecutionError: Failed to delete email:
+TypeError: Item.delete() got an unexpected keyword argument 'disposal_type'`
+on the live NAS. Soft-delete (move-to-trash) was unaffected.
+
+**Cause**: the source called `item.delete(disposal_type=HARD_DELETE)` with a
+fallback to `item.delete(disposal_type="HardDelete")`. Neither kwarg exists
+on `exchangelib.items.Item.delete()` in 5.x — its signature is
+`delete(send_meeting_cancellations, affected_task_occurrences, suppress_read_receipts)`
+and it already invokes `_delete(delete_type=HARD_DELETE)` internally. The
+unit tests passed because `MagicMock().delete(disposal_type=...)` silently
+records any kwarg, so the divergence between the mock and the real signature
+was never caught.
+
+**Fix**: call the bare `item.delete()` — already a HARD_DELETE in 5.x.
+Added a guard test that pins `inspect.signature(Item.delete).parameters` so
+we'd notice if the API ever grows that kwarg back. Surfaced during a live
+NAS smoke test of the reply/forward double-escape fix.
+
 ## Unreleased — Reply/forward thread no longer accumulates `&amp;` entities
 
 **Bug**: long email threads would show cascading ampersands between contact
