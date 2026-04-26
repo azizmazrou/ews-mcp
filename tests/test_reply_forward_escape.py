@@ -119,3 +119,123 @@ def test_format_forward_header_with_ampersand_in_name_does_not_compound():
     h = format_forward_header(msg)
     assert h["to"] == "Smith & Sons Ltd <smith@example.com>"
     assert "&amp;" not in h["to"]
+
+
+# ----------------------------------------------------------------------
+# Integration tests — drive the full draft creation flow end-to-end and
+# inspect the HTML body that would be saved to the Drafts folder. These
+# catch the regression at the layer the user actually sees.
+# ----------------------------------------------------------------------
+
+from datetime import datetime
+from unittest.mock import patch
+
+import pytest
+
+from src.tools.email_tools_draft import CreateReplyDraftTool, CreateForwardDraftTool
+
+
+def _make_original(*, body_html: str = "<p>Original</p>"):
+    """Build a mock 'original message' that the draft tools will quote from."""
+    original = MagicMock()
+    original.subject = "Q4 plan"
+    original.sender.name = "John Smith"
+    original.sender.email_address = "john@example.com"
+    original.to_recipients = [_mailbox("Alice", "alice@example.com")]
+    original.cc_recipients = [_mailbox("Bob", "bob@example.com")]
+    original.datetime_sent = datetime(2026, 1, 1, 10, 0, 0)
+    original.body = MagicMock()
+    original.body.body = body_html
+    original.attachments = []
+    return original
+
+
+async def _capture_draft_body(tool, *, original, **execute_kwargs) -> str:
+    """Run a draft tool against a mocked original and return the HTML body
+    string that the tool tried to save to Drafts."""
+    with patch("src.tools.email_tools_draft.find_message_for_account",
+               return_value=original):
+        with patch("src.tools.email_tools_draft.Message") as mock_message:
+            mock_msg = MagicMock()
+            mock_msg.id = "draft-id"
+            mock_message.return_value = mock_msg
+
+            await tool.execute(**execute_kwargs)
+
+            body_arg = mock_message.call_args.kwargs["body"]
+            return str(body_arg)
+
+
+@pytest.mark.asyncio
+async def test_create_reply_draft_body_has_single_escape_only(mock_ews_client):
+    """Drive CreateReplyDraftTool end-to-end and verify the saved body has
+    exactly one level of HTML entities — &lt; present, &amp;lt; absent."""
+    mock_ews_client.account.primary_smtp_address = "me@example.com"
+    tool = CreateReplyDraftTool(mock_ews_client)
+    original = _make_original()
+
+    body = await _capture_draft_body(
+        tool, original=original, message_id="orig-id", body="Reply text"
+    )
+
+    # The header line "From: John Smith <john@example.com>" should appear in
+    # the draft as "From: John Smith &lt;john@example.com&gt;" — single pass.
+    assert "&lt;john@example.com&gt;" in body
+    assert "&amp;lt;" not in body, (
+        "&amp;lt; means the helper output got escaped twice — "
+        "this is the visible thread bug."
+    )
+    assert "&amp;gt;" not in body
+    assert "&amp;amp;" not in body
+
+
+@pytest.mark.asyncio
+async def test_create_forward_draft_body_has_single_escape_only(mock_ews_client):
+    """Same single-escape invariant for CreateForwardDraftTool."""
+    tool = CreateForwardDraftTool(mock_ews_client)
+    original = _make_original()
+
+    body = await _capture_draft_body(
+        tool, original=original,
+        message_id="orig-id",
+        to=["target@example.com"],
+        body="FYI",
+    )
+
+    assert "&lt;john@example.com&gt;" in body
+    assert "&amp;lt;" not in body
+    assert "&amp;gt;" not in body
+    assert "&amp;amp;" not in body
+
+
+@pytest.mark.asyncio
+async def test_two_reply_cycles_do_not_compound_ampersands(mock_ews_client):
+    """The original symptom: each reply quotes the previous body, so any
+    double-escape compounds (`&lt;` → `&amp;lt;` → `&amp;amp;lt;`...).
+    Simulate a 2-cycle reply chain and verify the entities never compound."""
+    mock_ews_client.account.primary_smtp_address = "me@example.com"
+    tool = CreateReplyDraftTool(mock_ews_client)
+
+    cycle1_original = _make_original()
+    cycle1_body = await _capture_draft_body(
+        tool, original=cycle1_original,
+        message_id="orig-id", body="First reply",
+    )
+    assert "&lt;" in cycle1_body
+    assert "&amp;lt;" not in cycle1_body
+
+    # Cycle 2: the previous reply's HTML body becomes the new "original" body.
+    cycle2_original = _make_original(body_html=cycle1_body)
+    cycle2_body = await _capture_draft_body(
+        tool, original=cycle2_original,
+        message_id="cycle2-id", body="Second reply",
+    )
+
+    assert "&lt;" in cycle2_body
+    assert "&amp;lt;" not in cycle2_body, (
+        "After two reply cycles, &amp;lt; would mean the quoted body got "
+        "escaped a second time — the exact compounding the user reported."
+    )
+    assert "&amp;amp;" not in cycle2_body
+    assert cycle2_body.count("&amp;lt;") == 0
+    assert cycle2_body.count("&amp;gt;") == 0
