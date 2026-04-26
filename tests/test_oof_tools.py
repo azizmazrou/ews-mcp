@@ -17,9 +17,7 @@ async def test_set_oof_enabled(mock_ews_client):
     mock_oof = MagicMock()
     mock_ews_client.account.oof_settings = mock_oof
 
-    with patch('src.tools.oof_tools.OofSettings') as mock_oof_settings, \
-         patch('src.tools.oof_tools.OofReply') as mock_oof_reply:
-
+    with patch('exchangelib.OofSettings') as mock_oof_settings:
         mock_oof_instance = MagicMock()
         mock_oof_settings.return_value = mock_oof_instance
 
@@ -48,9 +46,7 @@ async def test_set_oof_scheduled(mock_ews_client):
     mock_oof = MagicMock()
     mock_ews_client.account.oof_settings = mock_oof
 
-    with patch('src.tools.oof_tools.OofSettings') as mock_oof_settings, \
-         patch('src.tools.oof_tools.OofReply') as mock_oof_reply:
-
+    with patch('exchangelib.OofSettings') as mock_oof_settings:
         mock_oof_instance = MagicMock()
         mock_oof_settings.return_value = mock_oof_instance
 
@@ -80,7 +76,7 @@ async def test_set_oof_disabled(mock_ews_client):
     mock_oof = MagicMock()
     mock_ews_client.account.oof_settings = mock_oof
 
-    with patch('src.tools.oof_tools.OofSettings') as mock_oof_settings:
+    with patch('exchangelib.OofSettings') as mock_oof_settings:
         mock_oof_instance = MagicMock()
         mock_oof_settings.return_value = mock_oof_instance
 
@@ -111,7 +107,7 @@ async def test_set_oof_invalid_time_range(mock_ews_client):
     """Test OOF with end time before start time."""
     tool = OofSettingsTool(mock_ews_client)
 
-    with patch('src.tools.oof_tools.OofSettings'):
+    with patch('exchangelib.OofSettings'):
         with pytest.raises(ToolExecutionError) as exc_info:
             await tool.execute(
                 action="set",

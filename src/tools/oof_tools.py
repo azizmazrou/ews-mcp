@@ -152,7 +152,7 @@ class OofSettingsTool(BaseTool):
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            from exchangelib import OofSettings, OofReply
+            from exchangelib import OofSettings
 
             start_time = parse_datetime_tz_aware(start_time_str) if start_time_str else None
             end_time = parse_datetime_tz_aware(end_time_str) if end_time_str else None
@@ -164,10 +164,13 @@ class OofSettingsTool(BaseTool):
             oof.state = state
             oof.external_audience = external_audience
 
+            # OofSettings.internal_reply / external_reply are MessageField(value_cls=str) in
+            # exchangelib >= 5.x — assign plain strings. The legacy OofReply wrapper class was
+            # removed; importing it raises ImportError on every set call.
             if internal_reply:
-                oof.internal_reply = OofReply(message=internal_reply, lang='en')
+                oof.internal_reply = internal_reply
             if external_reply:
-                oof.external_reply = OofReply(message=external_reply, lang='en')
+                oof.external_reply = external_reply
             if start_time and end_time:
                 oof.start = start_time
                 oof.end = end_time
