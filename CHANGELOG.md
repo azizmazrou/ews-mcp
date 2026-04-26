@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — AI / semantic_search reachable from Docker bridge networks
+
+**Bug**: every `semantic_search_emails` call against the production NAS
+returned `ToolExecutionError: Embedding provider error: Embedding endpoint
+unreachable at http://&lt;HOST_LAN_IP&gt;:11434/v1/embeddings: ConnectError: All
+connection attempts failed`. The hint pointed at `AI_EMBEDDING_MODEL`, which
+sent the operator on a wrong-trail debug — Ollama was healthy and the model
+was correct.
+
+**Cause**: two issues stacked.
+1. *Networking*: the production container runs on a Docker bridge network
+   (`mcp-network`). From inside the bridge, the host's LAN IP
+   (`&lt;HOST_LAN_IP&gt;`) is NOT routable — bridge containers can only reach the
+   host via the bridge gateway. `AI_BASE_URL=http://&lt;HOST_LAN_IP&gt;:11434/v1`
+   silently failed at TCP-connect time.
+2. *Diagnostic*: `_embedding_error_hint` always returned the same model-name
+   hint regardless of whether the underlying error was an HTTP 404 (wrong
+   model) or a `ConnectError` (unreachable host).
+
+**Fix**:
+- Added `extra_hosts: "host.docker.internal:host-gateway"` to
+  `docker-compose-ghcr.yml` so the host gateway is reachable from inside
+  the bridge as `host.docker.internal`.
+- Updated `.env.ai.example` with concrete `AI_BASE_URL` choices per
+  deployment topology (bare-metal vs. bridge vs. host networking vs. LAN).
+  Strong warning against using the host's LAN IP from inside a bridge.
+- Refactored the hint dispatcher into `_embedding_error_hint(exc_msg)` —
+  branches on the underlying error and returns a *networking* hint
+  (host.docker.internal + extra_hosts) when the error is connect-style,
+  otherwise the *model-name* hint. New regression test
+  `tests/test_ai_embedding_hint.py` pins the dispatch.
+
+**Operator action**: re-pull and recreate the container with the new
+compose file, then set `AI_BASE_URL=http://host.docker.internal:11434/v1`.
+
 ## Unreleased — `delete_email(permanent=True)` no longer 500s
 
 **Bug**: every `delete_email` / `manage_email` call with `permanent=True` (or
