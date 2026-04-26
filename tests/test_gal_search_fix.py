@@ -30,6 +30,19 @@ def mock_ews_client():
     return client
 
 
+@pytest.fixture(autouse=True)
+def _reset_person_cache():
+    """The GAL cache (used by PersonService) is a module-level singleton.
+    Without clearing it, an earlier test's cached "User" query bleeds into
+    later tests and bypasses the mocks set up here — which is exactly what
+    caused test_max_results_limit to pass alone but fail in the full suite.
+    """
+    from src.adapters.cache_adapter import get_cache
+    get_cache().clear()
+    yield
+    get_cache().clear()
+
+
 @pytest.fixture
 def find_person_tool(mock_ews_client):
     """Create FindPersonTool instance with mocked client."""

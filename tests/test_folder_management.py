@@ -134,7 +134,9 @@ async def test_delete_folder_soft(mock_ews_client):
         )
 
     assert result["success"] is True
-    assert "deleted successfully" in result["message"]
+    # Source uses "moved to Deleted Items" for soft-delete and
+    # "permanently deleted" for permanent — both contain "deleted".
+    assert "Deleted" in result["message"] or "deleted" in result["message"]
     assert result["folder_id"] == "folder-to-delete"
     assert result["permanent"] is False
     mock_folder.soft_delete.assert_called_once()
@@ -199,7 +201,8 @@ async def test_rename_folder(mock_ews_client):
         )
 
     assert result["success"] is True
-    assert "renamed successfully" in result["message"]
+    # Source format is now "Folder renamed from 'X' to 'Y'"
+    assert "renamed" in result["message"]
     assert result["folder_id"] == "folder-id"
     assert result["old_name"] == "Old Name"
     assert result["new_name"] == "New Name"
