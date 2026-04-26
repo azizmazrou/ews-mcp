@@ -415,10 +415,12 @@ async def test_update_email_not_found(mock_ews_client):
     """Test updating email that doesn't exist."""
     tool = UpdateEmailTool(mock_ews_client)
 
-    # Mock all folders to raise exception (message not found)
-    mock_ews_client.account.inbox.get.side_effect = Exception("Not found")
-    mock_ews_client.account.sent.get.side_effect = Exception("Not found")
-    mock_ews_client.account.drafts.get.side_effect = Exception("Not found")
+    # find_message_for_account walks inbox/sent/drafts/trash/junk + subfolders +
+    # root.walk(). Stub them all so the helper never finds a "match".
+    for f in ("inbox", "sent", "drafts", "trash", "junk"):
+        getattr(mock_ews_client.account, f).get.side_effect = Exception("Not found")
+        getattr(mock_ews_client.account, f).children = []
+    mock_ews_client.account.root.walk.return_value = []
 
     with pytest.raises(Exception) as exc_info:
         await tool.execute(message_id="nonexistent-id", is_read=True)
