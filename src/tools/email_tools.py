@@ -517,10 +517,13 @@ def format_forward_header(message) -> dict:
                         sender_email = header_value.strip()
                     break
 
-    # Format as "Name <email>" or just what's available
-    # Use HTML entities for angle brackets to prevent browser from hiding email
+    # Return plain text with literal angle brackets. The reply / forward callers
+    # run this output through escape_html() exactly once before HTML interpolation.
+    # Pre-escaping here would double-escape on every cycle
+    # (`&lt;` → `&amp;lt;` → `&amp;amp;lt;`...), which is the "multiple `&` between
+    # names in the thread" bug users see after a few reply rounds.
     if sender_name and sender_email:
-        from_str = f"{sender_name} &lt;{sender_email}&gt;"
+        from_str = f"{sender_name} <{sender_email}>"
     elif sender_email:
         from_str = sender_email
     elif sender_name:
@@ -528,7 +531,7 @@ def format_forward_header(message) -> dict:
     else:
         from_str = ""
 
-    # To/Cc: Name <email> format
+    # To/Cc: same convention — raw text, single escape happens at the call site.
     def format_recipients(recipients):
         if not recipients:
             return ""
@@ -540,8 +543,7 @@ def format_forward_header(message) -> dict:
             name = (r.name or "") if hasattr(r, "name") else ""
             email = (r.email_address or "") if hasattr(r, "email_address") else ""
             if name and email:
-                # HTML-escape angle brackets to prevent browser from hiding email
-                parts.append(f"{name} &lt;{email}&gt;")
+                parts.append(f"{name} <{email}>")
             elif email:
                 parts.append(email)
             elif name:
