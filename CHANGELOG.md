@@ -20,20 +20,28 @@ was correct.
    model) or a `ConnectError` (unreachable host).
 
 **Fix**:
-- Added `extra_hosts: "host.docker.internal:host-gateway"` to
-  `docker-compose-ghcr.yml` so the host gateway is reachable from inside
-  the bridge as `host.docker.internal`.
-- Updated `.env.ai.example` with concrete `AI_BASE_URL` choices per
-  deployment topology (bare-metal vs. bridge vs. host networking vs. LAN).
-  Strong warning against using the host's LAN IP from inside a bridge.
+- `docker-compose-ghcr.yml` now attaches ews-mcp to a shared external
+  bridge `claude-shared` alongside its private `mcp-network`. Sibling
+  containers (Ollama, Postgres/pgvector, future shared services)
+  attached to the same network resolve each other by container name
+  via Docker DNS — no host-port hop, no hard-coded LAN IPs, and each
+  app keeps its own compose file. A `host.docker.internal` fallback is
+  documented for single-stack deployments that don't want a shared net.
+- Updated `.env.ai.example` with five concrete `AI_BASE_URL` choices
+  ranked by topology (shared external net → bridge fallback →
+  host-network → bare-metal → LAN). Strong warning against using the
+  host's LAN IP from inside a bridge.
 - Refactored the hint dispatcher into `_embedding_error_hint(exc_msg)` —
-  branches on the underlying error and returns a *networking* hint
-  (host.docker.internal + extra_hosts) when the error is connect-style,
-  otherwise the *model-name* hint. New regression test
+  branches on the underlying error and returns a *networking* hint that
+  surfaces both the recommended `claude-shared` path and the
+  `host.docker.internal` fallback when the error is connect-style.
+  Otherwise returns the *model-name* hint. New regression test
   `tests/test_ai_embedding_hint.py` pins the dispatch.
 
-**Operator action**: re-pull and recreate the container with the new
-compose file, then set `AI_BASE_URL=http://host.docker.internal:11434/v1`.
+**Operator action**: one-time `docker network create claude-shared` on
+the host, then attach the Ollama compose to the same external network
+(name the container `ollama` or set a network alias), re-pull ews-mcp
+with the new compose, and set `AI_BASE_URL=http://ollama:11434/v1`.
 
 ## Unreleased — `delete_email(permanent=True)` no longer 500s
 

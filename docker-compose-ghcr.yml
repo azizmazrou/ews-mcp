@@ -28,17 +28,28 @@ services:
     tty: true
 
     # Networking
+    #
+    # ews-mcp keeps its own private bridge (`mcp-network`) for any
+    # future side-car services it wants to ship with, AND attaches to an
+    # external `claude-shared` bridge so it can reach sibling services
+    # (Ollama, Postgres/pgvector, future shared infra) by container name
+    # over Docker DNS — no host-port hop, no hard-coded LAN IPs.
+    #
+    # Prerequisite (one-time, on the host):
+    #     docker network create claude-shared
+    #
+    # Then in your .env:
+    #     AI_BASE_URL=http://ollama:11434/v1
+    # (where `ollama` is the container_name / network alias of the
+    # Ollama service, also attached to `claude-shared`).
+    #
+    # Fallback if you don't want a shared network: replace the
+    # claude-shared block below with `extra_hosts:
+    # ["host.docker.internal:host-gateway"]` and use
+    # AI_BASE_URL=http://host.docker.internal:11434/v1.
     networks:
       - mcp-network
-    # Make the host's gateway reachable as `host.docker.internal` from inside
-    # the bridge so AI_BASE_URL can point at services on the host (Ollama at
-    # :11434, LM Studio at :1234, etc.) without hard-coding the LAN IP. On
-    # bridge networks the host's LAN IP (e.g. 10.0.0.10) is NOT routable
-    # from inside the container — the embedding endpoint times out with
-    # "ConnectError: All connection attempts failed". Use
-    # AI_BASE_URL=http://host.docker.internal:11434/v1 for Ollama.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - claude-shared
     ports:
       # Optional: Expose port for SSE transport (if MCP_TRANSPORT=sse)
       # - "8000:8000"
@@ -92,3 +103,11 @@ networks:
     labels:
       - "app=ews-mcp"
       - "environment=production"
+  # Cross-app service plane. Other compose stacks (Ollama, Postgres, …)
+  # attach to this same network so containers can resolve each other by
+  # name. Marked external so this compose file does NOT own it — create
+  # once with `docker network create claude-shared`. If the network is
+  # missing, `docker compose up` fails fast with a clear message instead
+  # of silently falling back to no service discovery.
+  claude-shared:
+    external: true
