@@ -28,6 +28,41 @@ def _id_from_doc(doc: Dict[str, Any]) -> str:
     return str(raw or "")
 
 
+def _embedding_error_hint(exc_msg: str) -> str:
+    """Return an actionable hint for an EmbeddingError message.
+
+    Two distinct failure modes deserve distinct hints — a connection failure
+    ("unreachable" / "All connection attempts failed" / connect refused /
+    timeout) almost always means the AI_BASE_URL host isn't routable from
+    inside the container (typical bridge-network-to-host-LAN-IP trap). A
+    404/400/model-not-found means the model name is wrong. Conflating both
+    under the same generic "check your model" hint sent operators on long
+    debug detours (see fix/ai-docker-networking).
+    """
+    msg = (exc_msg or "").lower()
+    is_unreachable = (
+        "unreachable" in msg
+        or "all connection attempts failed" in msg
+        or ("connect" in msg and ("refused" in msg or "timeout" in msg or "timed out" in msg))
+    )
+    if is_unreachable:
+        return (
+            "AI_BASE_URL host is not reachable from this process. "
+            "If running in a Docker bridge network, the host's LAN IP is "
+            "NOT routable from inside the container — use "
+            "AI_BASE_URL=http://host.docker.internal:11434/v1 "
+            "(and ensure the container has "
+            "extra_hosts: 'host.docker.internal:host-gateway'). "
+            "If running with network_mode: host or bare-metal, use "
+            "http://localhost:11434/v1."
+        )
+    return (
+        "Verify AI_EMBEDDING_MODEL matches an installed model at "
+        "AI_BASE_URL (e.g. 'text-embedding-3-small' for OpenAI, "
+        "'nomic-embed-text' for Ollama)."
+    )
+
+
 class SemanticSearchEmailsTool(BaseTool):
     """Tool for semantic search across emails."""
 
@@ -206,13 +241,9 @@ class SemanticSearchEmailsTool(BaseTool):
                     threshold=threshold,
                 )
             except EmbeddingError as exc:
-                hint = (
-                    "Verify AI_EMBEDDING_MODEL matches an installed model at "
-                    "AI_BASE_URL (e.g. 'text-embedding-3-small' for OpenAI, "
-                    "'nomic-embed-text' for Ollama)."
-                )
                 raise ToolExecutionError(
-                    f"Embedding provider error: {exc} | Hint: {hint}"
+                    f"Embedding provider error: {exc} | "
+                    f"Hint: {_embedding_error_hint(str(exc))}"
                 ) from exc
 
             # Bug 7: dedupe by message_id. Keep the highest-scoring hit
