@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — Test-suite green-up (real bugs surfaced)
+
+Local test suite was 18-failing on a fresh checkout. Triage found 16 test-side
+issues (patch paths, fixture stubs, assertion drift after refactors) plus
+**two real production bugs** that the failing tests had been quietly flagging:
+
+- **`oof_settings(action="set", ...)` with an internal or external reply was
+  unreachable**. The lazy import `from exchangelib import OofSettings, OofReply`
+  raised `ImportError: cannot import name 'OofReply'` because exchangelib 5.x
+  removed the wrapper class. `OofSettings.internal_reply` / `external_reply` are
+  `MessageField(value_cls=str)` — they take plain strings. Switched the source
+  to assign strings directly, dropping the dead `OofReply` wrapping.
+
+- **`add_attachment(is_inline=True, ...)` silently dropped the Content-ID**.
+  The schema didn't accept `content_id`, so callers couldn't reference inline
+  images from HTML body via `cid:<id>`. Added the parameter; passes through to
+  `FileAttachment(..., content_id=...)` and is echoed in the response.
+
+Also: `attachment_tools.py` had redundant lazy `import base64` /
+`from pathlib import Path` shadowing the module-level imports — removed; this
+was breaking unit-test patches as a side effect.
+
 ## Unreleased — Tool reliability round (Issues 1–5)
 
 Five defects reported against the live MCP deployment were fixed in this
