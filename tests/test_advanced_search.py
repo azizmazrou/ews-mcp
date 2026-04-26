@@ -9,6 +9,19 @@ from src.tools.email_tools import SearchEmailsTool
 from src.exceptions import ToolExecutionError
 
 
+class _FakeQuery(list):
+    """List subclass that mimics enough of an exchangelib QuerySet for tests:
+    ``.only()`` returns self (chainable), ``.count()`` returns len.
+    Slicing is provided natively by ``list``.
+    """
+
+    def only(self, *args, **kwargs):
+        return self
+
+    def count(self):
+        return len(self)
+
+
 @pytest.mark.asyncio
 async def test_search_by_conversation_with_conversation_id(mock_ews_client):
     """Test searching by conversation ID."""
@@ -29,21 +42,24 @@ async def test_search_by_conversation_with_conversation_id(mock_ews_client):
     mock_email2.datetime_received = datetime(2025, 1, 1, 11, 0)
     mock_email2.conversation_id = "conversation-123"
 
-    # Mock filter and order_by chain
-    mock_query = MagicMock()
-    mock_query.filter.return_value.order_by.return_value = [mock_email1, mock_email2]
-    mock_ews_client.account.inbox.all.return_value = mock_query
+    # Source iterates: folder.filter(...).order_by(...)[:max_results]
+    # Returning a real list lets the slice work without further mocking.
+    mock_ews_client.account.inbox.filter.return_value.order_by.return_value = [mock_email1, mock_email2]
 
     result = await tool.execute(
         conversation_id="conversation-123",
-        search_scope=["inbox"]
+        search_scope=["inbox"],
+        include_all_folders=False,  # use the standard-folder map, not full tree walk
     )
 
     assert result["success"] is True
     assert result["conversation_id"] == "conversation-123"
-    assert result["total_results"] == 2
-    assert len(result["results"]) == 2
-    assert result["results"][0]["subject"] == "Project Discussion"
+    # Source returns `count` + `items` in the unified response shape, sorted
+    # by received_time DESC so the assertion is order-independent.
+    assert result["count"] == 2
+    assert len(result["items"]) == 2
+    subjects = {item["subject"] for item in result["items"]}
+    assert {"Project Discussion", "RE: Project Discussion"} == subjects
 
 
 @pytest.mark.asyncio
@@ -71,21 +87,20 @@ async def test_search_by_conversation_with_message_id(mock_ews_client):
     mock_email2.datetime_received = datetime(2025, 1, 2, 10, 0)
     mock_email2.conversation_id = "conversation-456"
 
-    # Mock get and filter/order_by
+    # Source resolves message → conversation_id, then iterates each folder
+    # via folder.filter(conversation_id=...).order_by(...)[:max_results].
     mock_ews_client.account.inbox.get.return_value = mock_original
-
-    mock_query = MagicMock()
-    mock_query.filter.return_value.order_by.return_value = [mock_email1, mock_email2]
-    mock_ews_client.account.inbox.all.return_value = mock_query
+    mock_ews_client.account.inbox.filter.return_value.order_by.return_value = [mock_email1, mock_email2]
 
     result = await tool.execute(
         message_id="email-1",
-        search_scope=["inbox"]
+        search_scope=["inbox"],
+        include_all_folders=False,
     )
 
     assert result["success"] is True
     assert result["conversation_id"] == "conversation-456"
-    assert result["total_results"] == 2
+    assert result["count"] == 2
 
 
 @pytest.mark.asyncio
@@ -144,10 +159,9 @@ async def test_full_text_search_subject_and_body(mock_ews_client):
     mock_email2.datetime_received = datetime(2025, 1, 3, 15, 0)
     mock_email2.text_body = "The project budget is approved."
 
-    # Mock filter and order_by chain
-    mock_query = MagicMock()
-    mock_query.filter.return_value.order_by.return_value = [mock_email1, mock_email2]
-    mock_ews_client.account.inbox.all.return_value = mock_query
+    # Source: folder.filter(...).order_by(...).only(...) → _paginate_query slices it.
+    fake = _FakeQuery([mock_email1, mock_email2])
+    mock_ews_client.account.inbox.filter.return_value.order_by.return_value = fake
 
     result = await tool.execute(
         mode="full_text",
@@ -158,8 +172,9 @@ async def test_full_text_search_subject_and_body(mock_ews_client):
 
     assert result["success"] is True
     assert result["query"] == "project"
-    assert result["total_results"] == 2
-    assert len(result["results"]) == 2
+    # Unified response shape: `count` and `items`
+    assert result["count"] == 2
+    assert len(result["items"]) == 2
 
 
 @pytest.mark.asyncio
@@ -204,9 +219,8 @@ async def test_full_text_search_with_max_results(mock_ews_client):
         mock_email.datetime_received = datetime(2025, 1, 5, 10 + i, 0)
         mock_emails.append(mock_email)
 
-    mock_query = MagicMock()
-    mock_query.filter.return_value.order_by.return_value = mock_emails
-    mock_ews_client.account.inbox.all.return_value = mock_query
+    fake = _FakeQuery(mock_emails)
+    mock_ews_client.account.inbox.filter.return_value.order_by.return_value = fake
 
     result = await tool.execute(
         mode="full_text",
@@ -216,8 +230,8 @@ async def test_full_text_search_with_max_results(mock_ews_client):
     )
 
     assert result["success"] is True
-    assert len(result["results"]) == 3  # Should be limited to 3
-    assert result["total_results"] == 3
+    assert len(result["items"]) == 3  # Should be limited to 3
+    assert result["count"] == 3
 
 
 @pytest.mark.asyncio
