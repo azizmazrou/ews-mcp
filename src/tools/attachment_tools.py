@@ -448,6 +448,10 @@ class AddAttachmentTool(BaseTool):
                         "description": "Whether attachment is inline (embedded in body)",
                         "default": False
                     },
+                    "content_id": {
+                        "type": "string",
+                        "description": "Content-ID for inline references (e.g. 'logo123' to be cited as cid:logo123 from HTML body). Required for inline images to render."
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
@@ -465,6 +469,7 @@ class AddAttachmentTool(BaseTool):
         file_name = kwargs.get("file_name")
         content_type = kwargs.get("content_type", "application/octet-stream")
         is_inline = kwargs.get("is_inline", False)
+        content_id = kwargs.get("content_id")
         target_mailbox = kwargs.get("target_mailbox")
 
         if not message_id:
@@ -481,8 +486,8 @@ class AddAttachmentTool(BaseTool):
             mailbox = self.get_mailbox_info(target_mailbox)
 
             from exchangelib import FileAttachment
-            import base64
-            from pathlib import Path
+            # base64 and Path are already imported at module top; the redundant local
+            # imports that used to be here shadowed them and broke unit-test patches.
 
             # Find the message in Drafts folder (most common use case)
             message = None
@@ -518,13 +523,17 @@ class AddAttachmentTool(BaseTool):
                 # Decode base64 content
                 file_content = base64.b64decode(file_content_b64)
 
-            # Create attachment
-            attachment = FileAttachment(
-                name=file_name,
-                content=file_content,
-                content_type=content_type,
-                is_inline=is_inline
-            )
+            # Create attachment. content_id is required for inline images so the
+            # message body can reference them via `cid:<content_id>`.
+            attachment_kwargs = {
+                "name": file_name,
+                "content": file_content,
+                "content_type": content_type,
+                "is_inline": is_inline,
+            }
+            if content_id:
+                attachment_kwargs["content_id"] = content_id
+            attachment = FileAttachment(**attachment_kwargs)
 
             # Add attachment to message
             if not hasattr(message, 'attachments'):
@@ -535,6 +544,9 @@ class AddAttachmentTool(BaseTool):
 
             self.logger.info(f"Added attachment '{file_name}' to message {message_id}")
 
+            response_extras = {}
+            if content_id:
+                response_extras["content_id"] = content_id
             return format_success_response(
                 f"Attachment '{file_name}' added successfully",
                 message_id=message_id,
@@ -542,7 +554,8 @@ class AddAttachmentTool(BaseTool):
                 attachment_size=len(file_content),
                 content_type=content_type,
                 is_inline=is_inline,
-                mailbox=mailbox
+                mailbox=mailbox,
+                **response_extras,
             )
 
         except ToolExecutionError:
