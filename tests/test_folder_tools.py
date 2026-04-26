@@ -107,16 +107,20 @@ async def test_list_folders_max_depth(mock_ews_client):
     """Test listing folders with depth limit."""
     tool = ListFoldersTool(mock_ews_client)
 
-    # Create nested folder structure
+    # Create nested folder structure. folder_class must be a real string here:
+    # the visibility filter (is_user_visible_folder) needs `"IPF.Note" in folder_class`,
+    # and an auto-created MagicMock attribute would fail that membership test.
     mock_level3 = MagicMock()
     mock_level3.id = "level3"
     mock_level3.name = "Level 3"
+    mock_level3.folder_class = "IPF.Note"
     mock_level3.child_folder_count = 0
     mock_level3.children = []
 
     mock_level2 = MagicMock()
     mock_level2.id = "level2"
     mock_level2.name = "Level 2"
+    mock_level2.folder_class = "IPF.Note"
     mock_level2.child_folder_count = 1
     mock_level2.children = [mock_level3]
 
