@@ -131,9 +131,11 @@ def test_con008_loose_validator_rejects_real_garbage():
 
 @pytest.mark.asyncio
 async def test_delete_email_hard_delete_uses_hard_delete_type(mock_ews_client):
-    """hard_delete=True must call item.delete with the HARD_DELETE
-    delete_type — not move() to trash and not a plain delete() that
-    defaults to MoveToDeletedItems."""
+    """hard_delete=True must call ``item.delete()`` with no kwargs —
+    exchangelib 5.x's ``Item.delete()`` is already HARD_DELETE by default
+    and rejects any ``disposal_type``/``delete_type`` kwarg with TypeError.
+    Must NOT call ``item.move()`` (that would put it in Trash, not
+    permanently delete it)."""
     from src.tools.email_tools import DeleteEmailTool
 
     item = MagicMock()
@@ -147,17 +149,8 @@ async def test_delete_email_hard_delete_uses_hard_delete_type(mock_ews_client):
 
     # move() must NOT be called — that would put the item in Trash.
     item.move.assert_not_called()
-    # delete() must be called with an explicit HARD_DELETE via the
-    # correct ``disposal_type`` kwarg (the exchangelib API; the
-    # previous round used the wrong kwarg ``delete_type``).
-    assert item.delete.called
-    call_kwargs = item.delete.call_args.kwargs
-    assert "disposal_type" in call_kwargs, (
-        f"expected disposal_type kwarg; got {call_kwargs!r}"
-    )
-    assert "delete_type" not in call_kwargs
-    disposal = call_kwargs["disposal_type"]
-    assert str(disposal).replace("_", "").lower().endswith("harddelete"), disposal
+    # delete() must be called with no kwargs (the bare 5.x API).
+    item.delete.assert_called_once_with()
     # Response reports permanent=True and hard_delete=True (both aliases).
     assert result["permanent"] is True
     assert result["hard_delete"] is True

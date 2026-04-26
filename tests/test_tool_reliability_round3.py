@@ -128,12 +128,12 @@ def test_aware_datetime_passes_through_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_eds006_hard_delete_uses_disposal_type_kwarg(mock_ews_client):
-    """The exchangelib API is ``item.delete(disposal_type=...)`` (not
-    ``delete_type=``) and the HARD_DELETE constant lives in
-    ``exchangelib.items`` (not the top-level ``exchangelib`` package).
-    Previous fix used the wrong keyword AND the wrong import path — both
-    produced 500s."""
+async def test_eds006_hard_delete_calls_bare_delete(mock_ews_client):
+    """``Item.delete()`` in exchangelib 5.x already does HARD_DELETE
+    internally and accepts no kwargs. Passing ``disposal_type=`` or
+    ``delete_type=`` raises TypeError — the live NAS surfaced this as a
+    500 on every delete_email(permanent=True). The fix is to call the
+    bare method."""
     from src.tools.email_tools import DeleteEmailTool
 
     item = MagicMock()
@@ -143,30 +143,24 @@ async def test_eds006_hard_delete_uses_disposal_type_kwarg(mock_ews_client):
         tool = DeleteEmailTool(mock_ews_client)
         await tool.execute(message_id="AAMk-1", hard_delete=True)
 
-    # item.delete() called with disposal_type=..., NOT delete_type=...
-    assert item.delete.called
-    call_kwargs = item.delete.call_args.kwargs
-    assert "disposal_type" in call_kwargs, (
-        f"expected disposal_type kwarg; got {call_kwargs!r}"
-    )
-    assert "delete_type" not in call_kwargs
-    # Value is either the exchangelib.items.HARD_DELETE constant or the
-    # literal "HardDelete" fallback — both are valid.
-    value = call_kwargs["disposal_type"]
-    assert str(value).replace("_", "").lower().endswith("harddelete")
+    # Bare call — no disposal_type / delete_type, no positional args.
+    item.delete.assert_called_once_with()
 
 
-def test_eds006_hard_delete_constant_import_path():
-    """``HARD_DELETE`` lives in ``exchangelib.items``, not the package root."""
-    # Must import without error from the documented location.
-    from exchangelib.items import HARD_DELETE
-    assert HARD_DELETE is not None
-    # The top-level package no longer re-exports it.
-    import exchangelib
-    assert not hasattr(exchangelib, "HARD_DELETE"), (
-        "If exchangelib starts re-exporting HARD_DELETE, that's fine; the "
-        "important thing is that src/tools/email_tools.py works with BOTH."
+def test_eds006_real_exchangelib_delete_signature_has_no_disposal_type():
+    """Regression guard against the original sandbox-vs-prod divergence:
+    ``MagicMock().delete(disposal_type=X)`` silently records the kwarg, so
+    a unit test using a plain mock would have green-lit the bug. Pin the
+    real exchangelib signature so we'd notice if it ever grows back."""
+    import inspect
+    from exchangelib.items import Item
+    sig = inspect.signature(Item.delete)
+    params = set(sig.parameters)
+    assert "disposal_type" not in params, (
+        "exchangelib.Item.delete() now accepts disposal_type — adjust the "
+        "production code in src/tools/email_tools.py and revisit this guard."
     )
+    assert "delete_type" not in params
 
 
 # ---------------------------------------------------------------------------

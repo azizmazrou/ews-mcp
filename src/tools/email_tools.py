@@ -2238,25 +2238,18 @@ class DeleteEmailTool(BaseTool):
             item = find_message_for_account(account, message_id)
 
             if permanent:
-                # ``item.delete()`` in exchangelib defaults to a
-                # MoveToDeletedItems disposal — the item ends up in
-                # Trash, defeating "permanent". The correct API is
-                # ``item.delete(disposal_type=HARD_DELETE)``; the
-                # constant lives in ``exchangelib.items``, not at the
-                # top-level ``exchangelib`` package (the previous fix
-                # imported from the wrong place and also used the
-                # wrong keyword ``delete_type=`` — both produced 500s).
-                try:
-                    from exchangelib.items import HARD_DELETE
-                    item.delete(disposal_type=HARD_DELETE)
-                except ImportError:
-                    # Fall back to the wire string if the constant
-                    # ever moves again. ``disposal_type="HardDelete"``
-                    # is accepted by exchangelib in all recent versions.
-                    item.delete(disposal_type="HardDelete")
+                # In exchangelib 5.x, ``Item.delete()`` is already a
+                # HardDelete by default — its body calls ``self._delete(
+                # delete_type=HARD_DELETE, ...)`` internally and the public
+                # method takes no ``disposal_type``/``delete_type`` kwarg.
+                # Earlier versions of this code passed ``disposal_type=``,
+                # which raised ``TypeError`` against exchangelib 5.x and
+                # surfaced as a 500 from delete_email(permanent=True).
+                # See ``Item.delete`` in exchangelib/items/item.py.
+                item.delete()
                 action = "permanently deleted"
             else:
-                # Move to trash folder (Deleted Items) so user can recover.
+                # Move to trash (Deleted Items) so the user can recover.
                 item.move(account.trash)
                 action = "moved to trash"
 
