@@ -35,7 +35,7 @@ async def test_add_attachment_from_file(mock_ews_client):
             mock_path.name = "test_attachment.txt"
             mock_path_class.return_value = mock_path
 
-            with patch('src.tools.attachment_tools.FileAttachment') as mock_file_attachment:
+            with patch('exchangelib.FileAttachment') as mock_file_attachment:
                 mock_attachment = MagicMock()
                 mock_attachment.attachment_id = "attachment-123"
                 mock_file_attachment.return_value = mock_attachment
@@ -69,7 +69,7 @@ async def test_add_attachment_from_base64(mock_ews_client):
     test_content = b"Test file content"
     b64_content = base64.b64encode(test_content).decode('utf-8')
 
-    with patch('src.tools.attachment_tools.FileAttachment') as mock_file_attachment:
+    with patch('exchangelib.FileAttachment') as mock_file_attachment:
         mock_attachment = MagicMock()
         mock_attachment.attachment_id = "attachment-123"
         mock_file_attachment.return_value = mock_attachment
@@ -100,7 +100,7 @@ async def test_add_attachment_inline(mock_ews_client):
     test_content = b"Image content"
     b64_content = base64.b64encode(test_content).decode('utf-8')
 
-    with patch('src.tools.attachment_tools.FileAttachment') as mock_file_attachment:
+    with patch('exchangelib.FileAttachment') as mock_file_attachment:
         mock_attachment = MagicMock()
         mock_file_attachment.return_value = mock_attachment
 
@@ -185,7 +185,11 @@ async def test_delete_attachment_by_id(mock_ews_client):
     mock_message.id = "message-id"
     mock_message.attachments = [mock_attachment]
 
+    # The tool walks drafts -> inbox -> sent. Stub the others to None so the
+    # truthy auto-MagicMock doesn't shadow the real match in inbox.
+    mock_ews_client.account.drafts.get.return_value = None
     mock_ews_client.account.inbox.get.return_value = mock_message
+    mock_ews_client.account.sent.get.return_value = None
 
     result = await tool.execute(
         message_id="message-id",
@@ -212,7 +216,9 @@ async def test_delete_attachment_by_name(mock_ews_client):
     mock_message.id = "message-id"
     mock_message.attachments = [mock_attachment]
 
+    mock_ews_client.account.drafts.get.return_value = None
     mock_ews_client.account.inbox.get.return_value = mock_message
+    mock_ews_client.account.sent.get.return_value = None
 
     result = await tool.execute(
         message_id="message-id",
