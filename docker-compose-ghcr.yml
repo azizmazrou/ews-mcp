@@ -30,6 +30,15 @@ services:
     # Networking
     networks:
       - mcp-network
+    # Make the host's gateway reachable as `host.docker.internal` from inside
+    # the bridge so AI_BASE_URL can point at services on the host (Ollama at
+    # :11434, LM Studio at :1234, etc.) without hard-coding the LAN IP. On
+    # bridge networks the host's LAN IP (e.g. 10.0.0.10) is NOT routable
+    # from inside the container — the embedding endpoint times out with
+    # "ConnectError: All connection attempts failed". Use
+    # AI_BASE_URL=http://host.docker.internal:11434/v1 for Ollama.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # Optional: Expose port for SSE transport (if MCP_TRANSPORT=sse)
       # - "8000:8000"
