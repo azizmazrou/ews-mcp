@@ -13,6 +13,7 @@ from src.tools.email_tools import (
     MoveEmailTool,
     UpdateEmailTool,
     CopyEmailTool,
+    is_exchange_folder_id,
     resolve_folder_for_account,
 )
 from src.tools.email_tools_draft import CreateDraftTool, CreateReplyDraftTool, CreateForwardDraftTool
@@ -333,7 +334,7 @@ async def test_move_email_tool_with_destination_folder_id(mock_ews_client):
     folder_id = "AAMk" + ("x" * 60)
 
     with patch("src.tools.email_tools.find_message_for_account", return_value=mock_email):
-        with patch("src.tools.email_tools.resolve_folder_for_account", return_value=mock_folder) as mock_resolve:
+        with patch("src.tools.email_tools.resolve_folder_id_for_account", return_value=mock_folder) as mock_resolve:
             result = await tool.execute(
                 message_id="test-id",
                 destination_folder_id=folder_id
@@ -469,15 +470,20 @@ async def test_copy_email_tool_with_destination_folder_id(mock_ews_client):
     mock_email.copy.return_value = MagicMock(id="copied-id")
 
     with patch("src.tools.email_tools.find_message_for_account", return_value=mock_email):
-        with patch("src.tools.email_tools.resolve_folder_for_account", return_value=mock_folder) as mock_resolve:
+        with patch("src.tools.email_tools.resolve_folder_id_for_account", return_value=mock_folder) as mock_resolve:
             result = await tool.execute(
                 message_id="email-to-copy",
                 destination_folder_id="AAMk" + ("x" * 60)
             )
 
     assert result["success"] is True
-    mock_resolve.assert_called_once()
+    mock_resolve.assert_called_once_with(mock_ews_client.account, "AAMk" + ("x" * 60))
     mock_email.copy.assert_called_once_with(to_folder=mock_folder)
+
+
+def test_is_exchange_folder_id_accepts_aqmk_prefix():
+    """AQMk is a valid Exchange ID prefix seen in production."""
+    assert is_exchange_folder_id("AQMk" + ("x" * 60)) is True
 
 
 @pytest.mark.asyncio

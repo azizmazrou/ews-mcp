@@ -629,7 +629,8 @@ def is_exchange_folder_id(identifier: str) -> bool:
     """
     Check if the identifier looks like an Exchange folder/item ID.
 
-    Exchange IDs are base64-encoded strings that typically start with 'AAMk'.
+    Exchange IDs are base64-encoded strings that typically start with prefixes
+    like 'AAMk' or 'AQMk'.
     Base64 can contain '/' characters, so we need to detect IDs before
     attempting to parse as folder paths.
 
@@ -639,9 +640,9 @@ def is_exchange_folder_id(identifier: str) -> bool:
     Returns:
         True if it looks like an Exchange ID, False otherwise
     """
-    # Exchange folder/item IDs start with 'AAMk' (base64 encoded)
+    # Exchange folder/item IDs start with well-known base64-encoded prefixes.
     # They are typically 100+ characters long
-    if identifier.startswith('AAMk') and len(identifier) > 50:
+    if identifier.startswith(('AAMk', 'AQMk')) and len(identifier) > 50:
         return True
     # Also check for other common Exchange ID patterns
     if identifier.startswith('AAE') and len(identifier) > 50:
@@ -779,6 +780,17 @@ async def resolve_folder(ews_client, folder_identifier: str):
     Deprecated: Use resolve_folder_for_account with explicit account parameter.
     """
     return await resolve_folder_for_account(ews_client.account, folder_identifier)
+
+
+def resolve_folder_id_for_account(account, folder_id: str):
+    """Resolve an explicit folder ID without prefix heuristics."""
+    found_folder = find_folder_by_id(account.root, folder_id)
+    if found_folder:
+        return found_folder
+    raise ToolExecutionError(
+        f"Folder ID '{folder_id[:20]}...' not found. "
+        f"The ID was provided explicitly but could not be located in your mailbox."
+    )
 
 
 class SendEmailTool(BaseTool):
@@ -2321,9 +2333,12 @@ class MoveEmailTool(BaseTool):
             mailbox = self.get_mailbox_info(target_mailbox)
 
             # Folder ID takes precedence over folder name/path when both are provided.
-            destination_identifier = destination_folder_id or destination_folder
-            dest_folder = await resolve_folder_for_account(account, destination_identifier)
-            dest_name = safe_get(dest_folder, "name", destination_identifier)
+            if destination_folder_id:
+                dest_folder = resolve_folder_id_for_account(account, destination_folder_id)
+                dest_name = safe_get(dest_folder, "name", destination_folder_id)
+            else:
+                dest_folder = await resolve_folder_for_account(account, destination_folder)
+                dest_name = safe_get(dest_folder, "name", destination_folder)
 
             # Find message across all folders (including custom subfolders)
             item = find_message_for_account(account, message_id)
@@ -2504,9 +2519,12 @@ class CopyEmailTool(BaseTool):
             message = find_message_for_account(account, message_id)
             source_folder_name = safe_get(safe_get(message, "folder", None), "name", "unknown")
 
-            destination_identifier = destination_folder_id or destination_folder_name
-            destination_folder = await resolve_folder_for_account(account, destination_identifier)
-            dest_name = safe_get(destination_folder, 'name', destination_identifier)
+            if destination_folder_id:
+                destination_folder = resolve_folder_id_for_account(account, destination_folder_id)
+                dest_name = safe_get(destination_folder, 'name', destination_folder_id)
+            else:
+                destination_folder = await resolve_folder_for_account(account, destination_folder_name)
+                dest_name = safe_get(destination_folder, 'name', destination_folder_name)
 
             # Copy the message (exchangelib uses .copy() method)
             copied_message = message.copy(to_folder=destination_folder)
