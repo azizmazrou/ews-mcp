@@ -287,6 +287,39 @@ async def test_search_emails_tool(mock_ews_client):
 
 
 @pytest.mark.asyncio
+async def test_search_emails_advanced_applies_is_flagged_filter(mock_ews_client):
+    """Advanced mode should include the follow-up flag filter."""
+    tool = SearchEmailsTool(mock_ews_client)
+
+    mock_email = MagicMock()
+    mock_email.id = "email-1"
+    mock_email.subject = "Flagged Email"
+    mock_email.sender.email_address = "important@example.com"
+
+    mock_query = MagicMock()
+    mock_query.only.return_value = mock_query
+    mock_query.order_by.return_value = mock_query
+    mock_query.count.return_value = 1
+    mock_query.__getitem__.return_value = [mock_email]
+
+    mock_folder = MagicMock()
+    mock_folder.name = "Inbox"
+    mock_folder.filter.return_value = mock_query
+    mock_ews_client.account.inbox = mock_folder
+
+    result = await tool.execute(
+        mode="advanced",
+        search_scope=["inbox"],
+        is_flagged=True,
+        max_results=5,
+    )
+
+    assert result["success"] is True
+    args, _kwargs = mock_folder.filter.call_args
+    assert "flag_status_value" in str(args[0])
+
+
+@pytest.mark.asyncio
 async def test_delete_email_tool(mock_ews_client):
     """Test deleting email."""
     tool = DeleteEmailTool(mock_ews_client)

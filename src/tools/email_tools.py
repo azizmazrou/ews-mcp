@@ -1174,6 +1174,10 @@ class SearchEmailsTool(BaseTool):
                         "type": "boolean",
                         "description": "Filter by read status"
                     },
+                    "is_flagged": {
+                        "type": "boolean",
+                        "description": "Filter by Outlook follow-up flag status"
+                    },
                     "start_date": {
                         "type": "string",
                         "description": "Start date (ISO 8601 format)"
@@ -1252,7 +1256,7 @@ class SearchEmailsTool(BaseTool):
         # Quick + advanced shared
         "subject_contains", "from_address", "to_address", "sender",
         "recipient", "body_contains", "query",
-        "has_attachments", "is_read", "importance",
+        "has_attachments", "is_read", "is_flagged", "importance",
         "categories", "keywords",
         "start_date", "end_date",
         # Advanced-only
@@ -1267,7 +1271,8 @@ class SearchEmailsTool(BaseTool):
     # when neither start_date nor end_date was supplied (see _search_quick).
     _QUICK_FILTER_KEYS: tuple = (
         "subject_contains", "from_address", "sender", "to_address", "recipient",
-        "body_contains", "query", "has_attachments", "is_read", "importance",
+        "body_contains", "query", "has_attachments", "is_read", "is_flagged",
+        "importance",
     )
 
     def _validate_kwargs(self, kwargs: Dict[str, Any]) -> None:
@@ -1340,6 +1345,7 @@ class SearchEmailsTool(BaseTool):
                     body_contains, free_text,
                     kwargs.get("has_attachments") is not None,
                     kwargs.get("is_read") is not None,
+                    kwargs.get("is_flagged") is not None,
                     kwargs.get("importance"),
                 ])
 
@@ -1375,6 +1381,11 @@ class SearchEmailsTool(BaseTool):
                 query = query.filter(has_attachments=kwargs["has_attachments"])
             if kwargs.get("is_read") is not None:
                 query = query.filter(is_read=kwargs["is_read"])
+            if kwargs.get("is_flagged") is not None:
+                if kwargs["is_flagged"]:
+                    query = query.filter(flag_status_value=FLAG_STATUS_MAP["Flagged"])
+                else:
+                    query = query.filter(~Q(flag_status_value=FLAG_STATUS_MAP["Flagged"]))
             if kwargs.get("importance"):
                 query = query.filter(importance=kwargs["importance"])
             if kwargs.get("start_date"):
@@ -1512,6 +1523,11 @@ class SearchEmailsTool(BaseTool):
                 q_filters.append(Q(categories__contains=kwargs["categories"]))
             if "is_read" in kwargs and kwargs["is_read"] is not None:
                 q_filters.append(Q(is_read=kwargs["is_read"]))
+            if "is_flagged" in kwargs and kwargs["is_flagged"] is not None:
+                if kwargs["is_flagged"]:
+                    q_filters.append(Q(flag_status_value=FLAG_STATUS_MAP["Flagged"]))
+                else:
+                    q_filters.append(~Q(flag_status_value=FLAG_STATUS_MAP["Flagged"]))
             if kwargs.get("start_date"):
                 start_date = parse_datetime_tz_aware(kwargs["start_date"])
                 if start_date:

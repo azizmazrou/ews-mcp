@@ -106,6 +106,21 @@ async def test_quick_mode_applies_recipient_alias(tool):
 
 
 @pytest.mark.asyncio
+async def test_quick_mode_applies_is_flagged_filter(tool):
+    """``is_flagged=True`` should filter on the Outlook follow-up flag."""
+    recorded, patcher = _patch_folder_returning(tool, [])
+    try:
+        await tool.execute(folder="inbox", is_flagged=True, max_results=5)
+    finally:
+        patcher.stop()
+
+    assert any(
+        kwargs.get("flag_status_value") == 2
+        for (_op, _args, kwargs) in recorded
+    ), recorded
+
+
+@pytest.mark.asyncio
 async def test_quick_mode_query_suppresses_30day_default(tool, caplog):
     """With a filter supplied, the auto "last 30 days" log must NOT appear."""
     import logging
