@@ -20,7 +20,10 @@ _SENSITIVE_KEY_PATTERNS: tuple = (
 
 
 def _is_sensitive(key: str) -> bool:
-    lower = str(key).lower()
+    # Normalise hyphens to underscores so header-style spellings
+    # (`X-API-Key`, `Auth-Token`) match the same patterns as snake_case
+    # field names (`api_key`, `auth_token`).
+    lower = str(key).lower().replace("-", "_")
     return any(pattern in lower for pattern in _SENSITIVE_KEY_PATTERNS)
 
 

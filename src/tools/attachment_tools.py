@@ -7,7 +7,7 @@ import os
 import re
 from pathlib import Path
 
-from exchangelib import Body, HTMLBody, ItemAttachment, Message
+from exchangelib import Body, FileAttachment, HTMLBody, ItemAttachment, Message
 
 from .base import BaseTool
 from ..exceptions import ToolExecutionError, ValidationError
@@ -484,10 +484,6 @@ class AddAttachmentTool(BaseTool):
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
-
-            from exchangelib import FileAttachment
-            # base64 and Path are already imported at module top; the redundant local
-            # imports that used to be here shadowed them and broke unit-test patches.
 
             # Find the message in Drafts folder (most common use case)
             message = None

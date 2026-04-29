@@ -29,6 +29,9 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .base import BaseTool
+from .rule_tools import _match_one
+from .email_tools import ForwardEmailTool
+from .email_tools_draft import CreateForwardDraftTool
 from ..exceptions import ToolExecutionError, ValidationError
 from ..memory import OOFPolicy, OOFPolicyRepo, RuleRepo
 from ..utils import format_success_response, find_message_for_account, safe_get
@@ -169,8 +172,6 @@ class ApplyOOFPolicyTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        from .rule_tools import _match_one
-
         message_id = kwargs.get("message_id")
         target_mailbox = kwargs.get("target_mailbox")
         dry_run = bool(kwargs.get("dry_run", False))
@@ -205,13 +206,6 @@ class ApplyOOFPolicyTool(BaseTool):
                 continue
 
             try:
-                from .email_tools import ForwardEmailTool
-                # We build a forward via the real tool but pipe it through
-                # the Drafts folder by using reply with a "please reply"-style
-                # body and explicitly creating a draft. We reuse
-                # CreateForwardDraftTool to keep the HTML construction
-                # consistent (and safe — it HTML-escapes headers).
-                from .email_tools_draft import CreateForwardDraftTool
                 draft_tool = CreateForwardDraftTool(self.ews_client)
                 result = await draft_tool.safe_execute(
                     message_id=message_id,
