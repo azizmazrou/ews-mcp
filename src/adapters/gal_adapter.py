@@ -17,6 +17,22 @@ from difflib import SequenceMatcher
 from ..core.person import Person, PersonSource
 from ..exceptions import ToolExecutionError
 
+# exchangelib symbols used by GAL parsing. Guarded at module top so an
+# import failure surfaces at startup, not deep inside a tool execution.
+try:
+    from exchangelib.errors import (
+        ErrorNameResolutionNoResults,
+        ErrorNameResolutionMultipleResults,
+    )
+except Exception:  # pragma: no cover - import guard
+    ErrorNameResolutionNoResults = None  # type: ignore[assignment]
+    ErrorNameResolutionMultipleResults = None  # type: ignore[assignment]
+
+try:
+    from exchangelib.properties import Mailbox as _ExchangeMailbox
+except Exception:  # pragma: no cover - import guard
+    _ExchangeMailbox = None  # type: ignore[assignment]
+
 
 # Class-level negative-lookup cache: shared across adapter instances so an
 # agent making many find_person calls in a session doesn't re-scan the GAL
@@ -28,17 +44,8 @@ _NEGATIVE_CACHE_LOCK = asyncio.Lock()
 
 
 def _is_no_results_error(exc: BaseException) -> bool:
-    """True if ``exc`` is an exchangelib "no matches" error.
-
-    Defined at module level (and resolved lazily) so tests that don't
-    have exchangelib installed still import this module cleanly.
-    """
-    try:
-        from exchangelib.errors import (
-            ErrorNameResolutionNoResults,
-            ErrorNameResolutionMultipleResults,
-        )
-    except Exception:  # pragma: no cover
+    """True if ``exc`` is an exchangelib "no matches" error."""
+    if ErrorNameResolutionNoResults is None:
         return False
     return isinstance(
         exc, (ErrorNameResolutionNoResults, ErrorNameResolutionMultipleResults)
@@ -466,25 +473,13 @@ class GALAdapter:
 
             # 3. Raw Mailbox (the Bug 3 path). exchangelib populates
             #    ``.email_address`` and ``.name`` directly on the Mailbox.
-            try:
-                from exchangelib.properties import Mailbox
-            except Exception:  # pragma: no cover - import guard
-                Mailbox = None  # type: ignore[assignment]
-            if Mailbox is not None and isinstance(result, Mailbox):
+            if _ExchangeMailbox is not None and isinstance(result, _ExchangeMailbox):
                 if not getattr(result, "email_address", None):
                     return None
                 return Person.from_gal_result(result, None)
 
             # 4. Exchange "no matches" errors from resolve_names — expected
             #    on every miss; don't pollute logs at WARNING.
-            try:
-                from exchangelib.errors import (
-                    ErrorNameResolutionNoResults,
-                    ErrorNameResolutionMultipleResults,
-                )
-            except Exception:  # pragma: no cover
-                ErrorNameResolutionNoResults = None  # type: ignore[assignment]
-                ErrorNameResolutionMultipleResults = None  # type: ignore[assignment]
             if (
                 ErrorNameResolutionNoResults is not None
                 and isinstance(result, ErrorNameResolutionNoResults)

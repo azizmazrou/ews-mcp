@@ -18,6 +18,7 @@ from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 from .base import BaseTool
+from .attachment_tools import ReadAttachmentTool
 from ..exceptions import ToolExecutionError
 from ..memory import CommitmentRepo, NS
 from ..utils import (
@@ -295,10 +296,6 @@ class PrepareMeetingTool(BaseTool):
         Silently returns None on any failure — this is a convenience feature,
         not a correctness-critical path.
         """
-        try:
-            from .attachment_tools import ReadAttachmentTool
-        except Exception:
-            return None
         name = safe_get(att, "name", "") or ""
         ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
         if ext not in ("pdf", "docx", "xlsx", "xls"):

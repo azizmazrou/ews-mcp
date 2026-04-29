@@ -3,6 +3,8 @@
 from typing import Any, Dict
 from datetime import datetime
 
+from exchangelib import OofSettings
+
 from .base import BaseTool
 from ..exceptions import ToolExecutionError
 from ..utils import format_success_response, parse_datetime_tz_aware, format_datetime
@@ -151,8 +153,6 @@ class OofSettingsTool(BaseTool):
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
-
-            from exchangelib import OofSettings
 
             start_time = parse_datetime_tz_aware(start_time_str) if start_time_str else None
             end_time = parse_datetime_tz_aware(end_time_str) if end_time_str else None
