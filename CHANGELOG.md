@@ -1,5 +1,110 @@
 # Changelog
 
+## Unreleased — Test-suite hardening + 3 production bugs
+
+A focused pass to break the "fix one bug, the next refactor regresses
+another" cycle. The shipped tests now pin the structural patterns that
+caused the recurring regressions, and three live bugs that the existing
+suite did not flag are fixed.
+
+### Production bugs fixed
+
+- **`evaluate_rules_on_message` `move_to_folder` action was silently
+  broken.** Three defects in three lines of `_apply_actions`:
+  the lazy `from .folder_tools import resolve_folder_for_account`
+  pointed at the wrong module (`resolve_folder_for_account` lives in
+  `email_tools.py`); the call was missing `await` on a coroutine;
+  the kwarg name was `folder_name=` instead of the actual
+  `folder_identifier=`. All three were masked by the per-action
+  `try/except Exception` that turns failures into a logged
+  `"error"` field, so the rule engine reported `"ok"` overall while
+  no message was actually moved. Resolver is now imported at module
+  top, awaited, and called with the correct positional argument.
+
+- **Audit log silently leaked hyphenated header values.**
+  `redact_sensitive` matched on substring against the `_SENSITIVE_KEY_PATTERNS`
+  list (`password`, `token`, `secret`, `api_key`, ...). Header-style
+  spellings like `X-API-Key`, `Auth-Token`, and `Client-Secret` slipped
+  past because the matcher compared `x-api-key` against `api_key`
+  (no substring hit). The matcher now normalises hyphens to
+  underscores before comparison, so both `api_key` and `X-API-Key`
+  redact identically.
+
+- **`format_body_for_html` misclassified plain text as HTML.**
+  The "looks like HTML" heuristic was `<[^>]+>`, which matched any
+  content containing a `<` — including plain text like `"if a < b"`.
+  Such inputs were routed through `sanitize_html` (which preserves
+  the `<`), so stray `<` ended up in rendered email as raw markup.
+  The heuristic now requires a real opening or closing tag pattern
+  (`</?[a-zA-Z][a-zA-Z0-9]*\b[^<>]*/?>`), so plain text with
+  comparison operators is escaped correctly.
+
+### Structural test additions
+
+- **`tests/test_exchangelib_signatures.py`** — 19 contract tests
+  pinning every `exchangelib` API the codebase calls with kwargs
+  (`Item.delete`, `Item.save`, `Message.send`, `Account.fetch`,
+  `CalendarItem.save`, `OofSettings`, `FileAttachment`, indexed
+  properties imports). The `OofReply`/`disposal_type` outage class
+  now fails locally before code can ship — the tests run against
+  the real `inspect.signature` of the installed `exchangelib`.
+
+- **`tests/test_no_lazy_exchangelib_imports.py`** — AST-based
+  sentinel that fails if any `from exchangelib...` appears inside
+  a function body in `src/`, and a sibling check for lazy
+  intra-`src/tools/` imports. Module-top guarded `try/except`
+  imports remain allowed (they fail loud at import). 14 lazy
+  imports across `oof_tools.py`, `attachment_tools.py`,
+  `calendar_tools.py`, `email_tools.py`, `briefing_tools.py`,
+  `oof_policy_tools.py`, `meeting_prep_tools.py`,
+  `gal_adapter.py`, and `utils.py` were hoisted as part of
+  this change.
+
+- **`tests/test_rule_actions_execute_path.py`** — 7 execute-path
+  tests for `_apply_actions` covering every action type
+  (`move_to_folder`, `flag_importance`, `categorize`, `mark_read`,
+  unknown). The `move_to_folder` test uses an `AsyncMock` resolver
+  + a typed message stub that rejects coroutines and unknown kwargs
+  — the bug fixed above would have failed all three of its
+  assertions.
+
+- **`tests/test_format_body_for_html.py`** — 14 tests pinning the
+  `<` heuristic, the cascading-escape contract, the
+  `sanitize_html` script/style/handler/javascript-uri removal,
+  and the explicit one-shot-vs-idempotent semantics.
+
+- **`tests/test_audit_redaction.py`** — 31 parametrized tests
+  covering every entry in `_SENSITIVE_KEY_PATTERNS`, the substring
+  variants (`client_secret`, `access_token`), header-style
+  spellings (`X-API-Key`), nested dicts, lists of dicts, long-string
+  truncation, and the inventory pin (the explicit list of patterns
+  is asserted whole so subtractions or typos surface immediately).
+
+- **`tests/test_read_attachment.py`** — 9 tests for
+  `ReadAttachmentTool` (CHANGELOG C1) — the tool had no
+  execute-path coverage despite its extractor methods having
+  previously been on the wrong sibling class. Tests pin the dispatch
+  to `_read_pdf` / `_read_docx` / `_read_excel`, the .txt happy
+  path, and every error path (missing attachment, empty content,
+  unsupported extension).
+
+- **`tests/test_add_attachment_passes_content_id.py`** — 2 tests
+  patching `FileAttachment` and inspecting actual constructor
+  kwargs, so a future refactor that records `content_id` in the
+  response dict but drops it from the constructor call (silently
+  breaking inline images) would fail.
+
+### Documentation
+
+- New `docs/COMMON_PITFALLS.md` summarises the seven recurring
+  patterns and their guard tests.
+
+### Operator-visible changes
+
+None. All changes are additive (tests, hoisted imports) or pure
+bug fixes that restore documented behaviour. No tool schema or
+response shape changed.
+
 ## Unreleased — AI / semantic_search reachable from Docker bridge networks
 
 **Bug**: every `semantic_search_emails` call against the production NAS
