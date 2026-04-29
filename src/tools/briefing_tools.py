@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .base import BaseTool
+from ..services.person_service import PersonService
 from ..exceptions import ToolExecutionError
 from ..memory import CommitmentRepo
 from ..utils import (
@@ -266,11 +267,6 @@ class GenerateBriefingTool(BaseTool):
         return out
 
     def _collect_vip_activity(self, account, since, limit: int) -> List[Dict[str, Any]]:
-        # Lazy import to avoid circulars.
-        try:
-            from ..services.person_service import PersonService
-        except Exception:
-            return []
         try:
             person_service = PersonService(self.ews_client)
             # Best-effort: pull a small list of people the user emails often
