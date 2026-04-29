@@ -27,6 +27,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .base import BaseTool
+from .email_tools import resolve_folder_for_account
 from ..exceptions import ToolExecutionError, ValidationError
 from ..memory import Rule, RuleRepo, Commitment, CommitmentRepo, new_id
 from ..utils import find_message_for_account, format_success_response, safe_get
@@ -129,8 +130,6 @@ async def _apply_actions(
     dry_run: bool,
 ) -> List[Dict[str, Any]]:
     """Apply a list of validated actions to a message. Returns per-action logs."""
-    from ..memory import CommitmentRepo
-
     applied: List[Dict[str, Any]] = []
     for action in actions:
         action_type = action.get("type")
@@ -161,9 +160,7 @@ async def _apply_actions(
                 if not destination:
                     raise ValidationError("move_to_folder requires 'destination'")
                 if not dry_run:
-                    # Use the existing folder resolver for consistency.
-                    from .folder_tools import resolve_folder_for_account
-                    folder = resolve_folder_for_account(account, folder_name=destination)
+                    folder = await resolve_folder_for_account(account, destination)
                     message.move(folder)
                 log_entry["destination"] = destination
 
