@@ -8,7 +8,7 @@ import logging
 import os
 import json
 import re
-from exchangelib import EWSTimeZone, EWSDateTime, EWSDate
+from exchangelib import EWSTimeZone, EWSDateTime, EWSDate, FileAttachment
 import pytz
 
 # Cached reference to exchangelib's CalendarEventDetails (used by the
@@ -252,7 +252,10 @@ def format_body_for_html(body: Optional[str]) -> str:
     if not body:
         return ""
     body = body.strip()
-    looks_like_html = bool(re.search(r"<[^>]+>", body))
+    # Require a real opening/closing tag (e.g. <p>, </div>, <br/>) — the
+    # previous `<[^>]+>` matched plain text like "x < y" and silently
+    # routed it through sanitize_html, which would not escape the `<`.
+    looks_like_html = bool(re.search(r"</?[a-zA-Z][a-zA-Z0-9]*\b[^<>]*/?>", body))
     if looks_like_html:
         return sanitize_html(body)
     return escape_html(body).replace("\n", "<br/>")
@@ -758,7 +761,6 @@ def attach_inline_files(message, inline_attachments: list) -> int:
         return 0
 
     import base64
-    from exchangelib import FileAttachment
 
     count = 0
     used_cids: set = set()
