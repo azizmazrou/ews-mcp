@@ -878,9 +878,6 @@ class FindMeetingTimesTool(BaseTool):
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            from exchangelib import Mailbox
-            from datetime import timedelta
-
             # Parse dates
             start_date = parse_datetime_tz_aware(date_range_start_str)
             end_date = parse_datetime_tz_aware(date_range_end_str)

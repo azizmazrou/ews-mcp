@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from exchangelib import Message, Mailbox, FileAttachment, HTMLBody, Body, Folder, ExtendedProperty
+from exchangelib.errors import ErrorTimeoutExpired
 from exchangelib.queryset import Q
 
 # Define Flag as ExtendedProperty for setting email flag status
@@ -1311,8 +1312,6 @@ class SearchEmailsTool(BaseTool):
         but only the ``*_address`` forms were wired up.
         """
         from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-        from exchangelib.errors import ErrorTimeoutExpired
-        from exchangelib import Q
         import socket
 
         target_mailbox = kwargs.get("target_mailbox")
@@ -2027,8 +2026,6 @@ class GetEmailsBulkTool(BaseTool):
         }
 
     async def execute(self, **kwargs) -> Dict[str, Any]:
-        from exchangelib import Message
-
         message_ids = kwargs.get("message_ids") or []
         if not isinstance(message_ids, list) or not message_ids:
             raise ValidationError("message_ids must be a non-empty list")
