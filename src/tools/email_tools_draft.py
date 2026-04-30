@@ -190,6 +190,16 @@ class CreateReplyDraftTool(BaseTool):
                         "description": "If true, create a reply-all draft; otherwise create a reply draft",
                         "default": False
                     },
+                    "cc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "CC recipients (optional)"
+                    },
+                    "bcc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "BCC recipients (optional)"
+                    },
                     "attachments": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -209,6 +219,8 @@ class CreateReplyDraftTool(BaseTool):
         """Create a reply draft via EWS and save it to Drafts."""
         message_id = kwargs.get("message_id")
         reply_all = kwargs.get("reply_all", False)
+        cc_recipients = kwargs.get("cc", [])
+        bcc_recipients = kwargs.get("bcc", [])
         attachments = kwargs.get("attachments", [])
         target_mailbox = kwargs.get("target_mailbox")
         body = (kwargs.get("body") or "").strip()
@@ -291,6 +303,11 @@ class CreateReplyDraftTool(BaseTool):
                 folder=account.drafts,
             )
 
+            if cc_recipients:
+                message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
+            if bcc_recipients:
+                message.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
+
             inline_count, _ = copy_attachments_to_message(original_message, message)
             attachment_count = 0
 
@@ -326,6 +343,8 @@ class CreateReplyDraftTool(BaseTool):
                 reply_subject=reply_subject,
                 reply_to=reply_to,
                 reply_all=reply_all,
+                cc=cc_recipients if cc_recipients else None,
+                bcc=bcc_recipients if bcc_recipients else None,
                 attachments_count=attachment_count,
                 inline_attachments_preserved=inline_count,
                 created_time=datetime.now().isoformat(),

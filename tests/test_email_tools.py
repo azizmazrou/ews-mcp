@@ -159,6 +159,45 @@ async def test_create_reply_draft_tool_reply_all_uses_all_recipients(mock_ews_cl
 
 
 @pytest.mark.asyncio
+async def test_create_reply_draft_tool_sets_cc_and_bcc(mock_ews_client):
+    """Reply draft should preserve explicitly supplied CC/BCC recipients."""
+    tool = CreateReplyDraftTool(mock_ews_client)
+    mock_ews_client.get_account = Mock(return_value=mock_ews_client.account)
+    mock_ews_client.account.drafts = MagicMock()
+    mock_ews_client.account.primary_smtp_address = "me@example.com"
+
+    original_message = MagicMock()
+    original_message.subject = "Original Subject"
+    original_message.sender.email_address = "sender@example.com"
+    original_message.sender.name = "Sender Name"
+    original_message.to_recipients = [MagicMock(email_address="me@example.com", name="Me")]
+    original_message.cc_recipients = []
+    original_message.datetime_sent = datetime(2025, 1, 1, 10, 0, 0)
+    original_message.body = MagicMock()
+    original_message.body.body = "<p>Original HTML</p>"
+    original_message.attachments = []
+
+    with patch("src.tools.email_tools_draft.find_message_for_account", return_value=original_message):
+        with patch("src.tools.email_tools_draft.Message") as mock_message:
+            mock_msg = MagicMock()
+            mock_msg.id = "reply-draft-id"
+            mock_message.return_value = mock_msg
+
+            result = await tool.execute(
+                message_id="orig-id",
+                body="Reply body",
+                cc=["cc@example.com"],
+                bcc=["bcc@example.com"],
+            )
+
+    assert result["success"] is True
+    assert result["cc"] == ["cc@example.com"]
+    assert result["bcc"] == ["bcc@example.com"]
+    assert [recipient.email_address for recipient in mock_msg.cc_recipients] == ["cc@example.com"]
+    assert [recipient.email_address for recipient in mock_msg.bcc_recipients] == ["bcc@example.com"]
+
+
+@pytest.mark.asyncio
 async def test_create_forward_draft_tool_saves_html_draft(mock_ews_client):
     """Test creating a forward draft saves a Message to Drafts instead of sending."""
     tool = CreateForwardDraftTool(mock_ews_client)
