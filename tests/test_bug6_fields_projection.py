@@ -104,6 +104,7 @@ def _make_fake_email(subject="test", body="x" * 500):
     m.datetime_received = datetime(2026, 4, 18, 10, 0, 0)
     m.is_read = False
     m.has_attachments = False
+    m.categories = ["Blocker", "CodexTest"]
     return m
 
 
@@ -181,8 +182,9 @@ async def test_get_email_details_default_shape_unchanged(mock_ews_client):
     # Full shape keys present.
     for key in ("message_id", "subject", "from", "to", "cc", "body",
                 "body_html", "received_time", "sent_time", "is_read",
-                "has_attachments", "importance", "attachments"):
+                "has_attachments", "importance", "attachments", "categories"):
         assert key in email, email.keys()
+    assert email["categories"] == ["Blocker", "CodexTest"]
 
 
 @pytest.mark.asyncio
@@ -195,11 +197,12 @@ async def test_get_email_details_fields_param_projects(mock_ews_client):
     ):
         tool = GetEmailDetailsTool(mock_ews_client)
         result = await tool.execute(
-            message_id="AAMk-1", fields=["message_id", "subject"]
+            message_id="AAMk-1", fields=["message_id", "subject", "categories"]
         )
 
     email = result["email"]
-    assert email.keys() == {"message_id", "subject"}
+    assert email.keys() == {"message_id", "subject", "categories"}
+    assert email["categories"] == ["Blocker", "CodexTest"]
 
 
 # --- search_by_conversation ---------------------------------------------

@@ -1948,6 +1948,7 @@ class GetEmailDetailsTool(BaseTool):
                 "has_attachments": safe_get(item, "has_attachments", False),
                 "importance": safe_get(item, "importance", "Normal") or "Normal",
                 "attachments": attachment_names,
+                "categories": safe_get(item, "categories", []) or [],
             }
 
             # Projection: when fields=[...] is provided, return only those

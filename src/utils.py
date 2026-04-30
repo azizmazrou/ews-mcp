@@ -512,7 +512,7 @@ EMAIL_DETAIL_FIELDS: tuple = (
     "message_id", "id", "subject", "from", "to", "cc", "bcc",
     "body", "body_html", "snippet", "preview",
     "received_time", "sent_time", "received", "sent",
-    "is_read", "has_attachments", "importance", "attachments",
+    "is_read", "has_attachments", "importance", "attachments", "categories",
     "folder", "conversation_id", "thread_id",
     "similarity_score",
 )

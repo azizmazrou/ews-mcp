@@ -36,6 +36,7 @@ def _fake_email(id_="AAMk-1", subject="hello"):
     m.is_read = False
     m.has_attachments = False
     m.importance = "Normal"
+    m.categories = ["Blocker", "CodexTest"]
     m.conversation_id = "AAQk-1"
     m.attachments = []
     return m
@@ -147,6 +148,7 @@ async def test_get_email_details_default_backward_compat(mock_ews_client):
     assert "email" in result
     # message_id is inside the email object (canonical).
     assert result["email"]["message_id"] == "AAMk-1"
+    assert result["email"]["categories"] == ["Blocker", "CodexTest"]
 
 
 # --- Semantic search: id kept as alias for message_id -------------------
