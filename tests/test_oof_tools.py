@@ -35,6 +35,7 @@ async def test_set_oof_enabled(mock_ews_client):
     assert result["settings"]["internal_reply"] == "I am out of office"
     assert result["settings"]["external_reply"] == "I am currently unavailable"
     assert result["settings"]["external_audience"] == "Known"
+    assert result["settings"]["currently_active"] is True
 
 
 @pytest.mark.asyncio
@@ -65,6 +66,8 @@ async def test_set_oof_scheduled(mock_ews_client):
     assert result["settings"]["state"] == "Scheduled"
     assert "start_time" in result["settings"]
     assert "end_time" in result["settings"]
+    assert mock_oof_instance.start.utcoffset().total_seconds() == 0
+    assert mock_oof_instance.end.utcoffset().total_seconds() == 0
 
 
 @pytest.mark.asyncio
@@ -85,6 +88,37 @@ async def test_set_oof_disabled(mock_ews_client):
     assert result["success"] is True
     assert "updated to Disabled" in result["message"]
     assert result["settings"]["state"] == "Disabled"
+    assert result["settings"]["currently_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_oof_preserves_existing_replies_when_omitted(mock_ews_client):
+    """Changing state without explicit reply texts should keep existing texts."""
+    tool = OofSettingsTool(mock_ews_client)
+
+    current_oof = MagicMock()
+    current_oof.state = "Disabled"
+    current_oof.external_audience = "All"
+    current_oof.internal_reply = MagicMock(message="Existing internal")
+    current_oof.external_reply = MagicMock(message="Existing external")
+    mock_ews_client.account.oof_settings = current_oof
+
+    with patch('exchangelib.OofSettings') as mock_oof_settings:
+        mock_oof_instance = MagicMock()
+        mock_oof_settings.return_value = mock_oof_instance
+
+        result = await tool.execute(
+            action="set",
+            state="Enabled",
+            external_audience="All"
+        )
+
+    assert result["success"] is True
+    assert result["settings"]["internal_reply"] == "Existing internal"
+    assert result["settings"]["external_reply"] == "Existing external"
+    assert result["settings"]["external_audience"] == "All"
+    assert mock_oof_instance.internal_reply == "Existing internal"
+    assert mock_oof_instance.external_reply == "Existing external"
 
 
 @pytest.mark.asyncio

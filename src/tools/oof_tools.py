@@ -16,6 +16,22 @@ class OofSettingsTool(BaseTool):
     Replaces: get_oof_settings, set_oof_settings.
     """
 
+    @staticmethod
+    def _reply_to_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return value.message if hasattr(value, "message") else str(value)
+
+    @classmethod
+    def _currently_active(cls, oof: Any) -> bool:
+        state = getattr(oof, "state", None)
+        if state == "Scheduled" and getattr(oof, "start", None) and getattr(oof, "end", None):
+            now = datetime.now(oof.start.tzinfo) if getattr(oof, "start", None) else datetime.now()
+            return oof.start <= now <= oof.end
+        if state == "Enabled":
+            return True
+        return False
+
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "oof_settings",
@@ -102,12 +118,12 @@ class OofSettingsTool(BaseTool):
             }
 
             if hasattr(oof, 'internal_reply') and oof.internal_reply:
-                settings["internal_reply"] = oof.internal_reply.message if hasattr(oof.internal_reply, 'message') else str(oof.internal_reply)
+                settings["internal_reply"] = self._reply_to_text(oof.internal_reply)
             else:
                 settings["internal_reply"] = ""
 
             if hasattr(oof, 'external_reply') and oof.external_reply:
-                settings["external_reply"] = oof.external_reply.message if hasattr(oof.external_reply, 'message') else str(oof.external_reply)
+                settings["external_reply"] = self._reply_to_text(oof.external_reply)
             else:
                 settings["external_reply"] = ""
 
@@ -116,13 +132,7 @@ class OofSettingsTool(BaseTool):
             if hasattr(oof, 'end') and oof.end:
                 settings["end_time"] = format_datetime(oof.end)
 
-            if settings["state"] == "Scheduled" and "start_time" in settings and "end_time" in settings:
-                now = datetime.now(oof.start.tzinfo) if hasattr(oof, 'start') and oof.start else datetime.now()
-                settings["currently_active"] = oof.start <= now <= oof.end
-            elif settings["state"] == "Enabled":
-                settings["currently_active"] = True
-            else:
-                settings["currently_active"] = False
+            settings["currently_active"] = self._currently_active(oof)
 
             return format_success_response(
                 f"Current OOF state: {settings['state']}",
@@ -137,11 +147,11 @@ class OofSettingsTool(BaseTool):
     async def _set_settings(self, **kwargs) -> Dict[str, Any]:
         """Configure OOF settings."""
         state = kwargs.get("state")
-        internal_reply = kwargs.get("internal_reply", "I am currently out of the office.")
-        external_reply = kwargs.get("external_reply", "I am currently out of the office.")
+        internal_reply = kwargs.get("internal_reply")
+        external_reply = kwargs.get("external_reply")
         start_time_str = kwargs.get("start_time")
         end_time_str = kwargs.get("end_time")
-        external_audience = kwargs.get("external_audience", "Known")
+        external_audience = kwargs.get("external_audience")
         target_mailbox = kwargs.get("target_mailbox")
 
         if not state:
@@ -153,12 +163,31 @@ class OofSettingsTool(BaseTool):
         try:
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
+            from exchangelib import OofSettings, UTC
 
+            current_oof = account.oof_settings
+            current_external_audience = getattr(current_oof, "external_audience", None) if current_oof else None
             start_time = parse_datetime_tz_aware(start_time_str) if start_time_str else None
             end_time = parse_datetime_tz_aware(end_time_str) if end_time_str else None
 
             if start_time and end_time and end_time <= start_time:
                 raise ToolExecutionError("end_time must be after start_time")
+
+            if external_audience is None:
+                external_audience = current_external_audience or "Known"
+
+            if state != "Disabled":
+                current_internal = self._reply_to_text(getattr(current_oof, "internal_reply", None))
+                current_external = self._reply_to_text(getattr(current_oof, "external_reply", None))
+                internal_reply = internal_reply if internal_reply is not None else current_internal
+                external_reply = external_reply if external_reply is not None else current_external
+                if not internal_reply:
+                    internal_reply = "I am currently out of the office."
+                if not external_reply:
+                    external_reply = "I am currently out of the office."
+            else:
+                internal_reply = internal_reply if internal_reply is not None else self._reply_to_text(getattr(current_oof, "internal_reply", None))
+                external_reply = external_reply if external_reply is not None else self._reply_to_text(getattr(current_oof, "external_reply", None))
 
             oof = OofSettings()
             oof.state = state
@@ -172,8 +201,10 @@ class OofSettingsTool(BaseTool):
             if external_reply:
                 oof.external_reply = external_reply
             if start_time and end_time:
-                oof.start = start_time
-                oof.end = end_time
+                # Exchange on-prem accepted scheduled OOF only when the
+                # payload timestamps were serialized in UTC.
+                oof.start = start_time.astimezone(UTC)
+                oof.end = end_time.astimezone(UTC)
 
             account.oof_settings = oof
 
@@ -181,7 +212,8 @@ class OofSettingsTool(BaseTool):
                 "state": state,
                 "internal_reply": internal_reply,
                 "external_reply": external_reply,
-                "external_audience": external_audience
+                "external_audience": external_audience,
+                "currently_active": self._currently_active(oof),
             }
             if start_time:
                 response_data["start_time"] = format_datetime(start_time)
