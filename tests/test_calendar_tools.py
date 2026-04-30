@@ -59,6 +59,7 @@ async def test_get_calendar_tool(mock_ews_client):
     mock_event.end = datetime(2025, 1, 15, 11, 0)
     mock_event.location = "Room A"
     mock_event.is_all_day = False
+    mock_event.categories = ["Blocker", "CodexTest"]
     mock_event.organizer = MagicMock(email_address="organizer@example.com")
     mock_event.required_attendees = []
 
@@ -78,6 +79,7 @@ async def test_get_calendar_tool(mock_ews_client):
 
     assert result["success"] is True
     assert len(result["events"]) > 0
+    assert result["events"][0]["categories"] == ["Blocker", "CodexTest"]
 
 
 @pytest.mark.asyncio

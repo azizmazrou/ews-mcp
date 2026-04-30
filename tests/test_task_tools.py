@@ -64,6 +64,7 @@ async def test_get_tasks_tool(mock_ews_client):
     mock_task.is_complete = False
     mock_task.due_date = datetime(2025, 12, 31)
     mock_task.importance = "Normal"
+    mock_task.categories = ["Waiting", "Critical"]
     mock_task.datetime_created = datetime(2025, 1, 1)
 
     mock_query = MagicMock()
@@ -74,6 +75,7 @@ async def test_get_tasks_tool(mock_ews_client):
 
     assert result["success"] is True
     assert len(result["tasks"]) > 0
+    assert result["tasks"][0]["categories"] == ["Waiting", "Critical"]
 
 
 @pytest.mark.asyncio

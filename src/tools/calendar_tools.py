@@ -322,7 +322,7 @@ class GetCalendarTool(BaseTool):
                 end=end_date
             ).only(
                 'id', 'subject', 'start', 'end', 'location',
-                'organizer', 'is_all_day', 'required_attendees'
+                'organizer', 'is_all_day', 'required_attendees', 'categories'
             ).order_by('start')
 
             # Format events
@@ -350,7 +350,8 @@ class GetCalendarTool(BaseTool):
                     "location": safe_get(item, "location", "") or "",
                     "organizer": organizer_email,
                     "is_all_day": safe_get(item, "is_all_day", False),
-                    "attendees": attendee_emails
+                    "attendees": attendee_emails,
+                    "categories": safe_get(item, "categories", []) or [],
                 }
                 events.append(event_data)
 

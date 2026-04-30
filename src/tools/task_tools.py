@@ -195,6 +195,7 @@ class GetTasksTool(BaseTool):
                         "is_complete": safe_get(item, "is_complete", False),
                         "due_date": due_iso,
                         "importance": safe_get(item, "importance", "Normal") or "Normal",
+                        "categories": safe_get(item, "categories", []) or [],
                     }
                     tasks.append(task_data)
                 except Exception as item_exc:
