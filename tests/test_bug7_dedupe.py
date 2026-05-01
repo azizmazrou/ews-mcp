@@ -49,7 +49,7 @@ async def test_semantic_search_dedupes_by_message_id(_enable_ai):
     fakes = [_fake("A"), _fake("B"), _fake("C")]
     ordered = MagicMock()
     ordered.__getitem__ = lambda _self, _slc: fakes
-    _enable_ai.account.inbox.all.return_value.order_by.return_value = ordered
+    _enable_ai.account.inbox.all.return_value.only.return_value.order_by.return_value = ordered
 
     class _Service:
         def __init__(self, *_a, **_kw):
@@ -86,7 +86,7 @@ async def test_semantic_search_dedupe_keeps_highest_score(_enable_ai):
     fake = _fake("X")
     ordered = MagicMock()
     ordered.__getitem__ = lambda _self, _slc: [fake]
-    _enable_ai.account.inbox.all.return_value.order_by.return_value = ordered
+    _enable_ai.account.inbox.all.return_value.only.return_value.order_by.return_value = ordered
 
     class _Service:
         def __init__(self, *_a, **_kw):

@@ -149,7 +149,7 @@ async def test_semantic_search_respects_per_call_cap(mock_ews_client):
     fakes = [_fake(i) for i in range(200)]
     ordered = MagicMock()
     ordered.__getitem__ = lambda _self, _slc: fakes
-    mock_ews_client.account.inbox.all.return_value.order_by.return_value = ordered
+    mock_ews_client.account.inbox.all.return_value.only.return_value.order_by.return_value = ordered
 
     captured: list[list[str]] = []
 

@@ -386,7 +386,7 @@ async def test_semantic_search_surfaces_embedding_error(mock_ews_client, monkeyp
     ordered = MagicMock()
     ordered.__getitem__ = lambda _self, _slc: [fake_email]
     all_result = MagicMock()
-    all_result.order_by.return_value = ordered
+    all_result.only.return_value.order_by.return_value = ordered
     mock_ews_client.account.inbox.all.return_value = all_result
 
     # Patch the embedding HTTP call to return the Ollama-style 404 body.

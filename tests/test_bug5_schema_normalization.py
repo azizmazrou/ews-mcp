@@ -170,7 +170,7 @@ async def test_semantic_search_emits_message_id_and_id_alias(mock_ews_client):
     fake = _fake_email()
     ordered = MagicMock()
     ordered.__getitem__ = lambda _self, _slc: [fake]
-    mock_ews_client.account.inbox.all.return_value.order_by.return_value = ordered
+    mock_ews_client.account.inbox.all.return_value.only.return_value.order_by.return_value = ordered
 
     class _StubService:
         def __init__(self, *_a, **_kw):
