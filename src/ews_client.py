@@ -1,6 +1,6 @@
 """Exchange Web Services client wrapper."""
 
-from exchangelib import Account, Configuration, DELEGATE, IMPERSONATION, Version, EWSTimeZone
+from exchangelib import Account, Configuration, DELEGATE, IMPERSONATION, FaultTolerance, Version, EWSTimeZone
 from exchangelib.protocol import BaseProtocol, NoVerifyHTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, retry_if_not_exception_type
 import logging
@@ -115,11 +115,16 @@ class EWSClient:
 
                 self.logger.info(f"Using EWS endpoint: {ews_url}")
 
-                # Always use service_endpoint to bypass autodiscovery completely
+                # Always use service_endpoint to bypass autodiscovery completely.
+                # FaultTolerance covers transient EWS soap-shape failures we
+                # observed against EWS-Org Exchange under sustained traffic
+                # (occasional "No Body element in SOAP response" — load balancer
+                # returning HTML instead of SOAP). Outer tenacity retry on
+                # _create_account handles auth-time / connect-time errors.
                 config = Configuration(
                     service_endpoint=ews_url,
                     credentials=credentials,
-                    retry_policy=None,  # Disable built-in retry, we handle it
+                    retry_policy=FaultTolerance(max_wait=30),
                     max_connections=self.config.connection_pool_size
                 )
 
@@ -234,7 +239,7 @@ class EWSClient:
                 config = Configuration(
                     service_endpoint=self._get_ews_url(),
                     credentials=credentials,
-                    retry_policy=None,
+                    retry_policy=FaultTolerance(max_wait=30),
                     max_connections=self.config.connection_pool_size
                 )
 
