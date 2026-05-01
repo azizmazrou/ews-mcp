@@ -180,8 +180,23 @@ class SemanticSearchEmailsTool(BaseTool):
             # Fetch recent emails. Pull more than the per-call cap so that
             # after exclude_automated filtering we still have useful
             # candidates, but cap embedding work below.
+            #
+            # Bug 9: explicit `.only(...)` so we don't drag full MIME bodies
+            # for 150-200 messages just to embed subject + first 500 chars.
+            # Pre-fix: cold semantic_search took 90+s on a 200-message
+            # window because exchangelib was lazy-loading every property
+            # (attachments metadata, headers, full body). With .only() we
+            # narrow GetItem to ~7 fields and the same window finishes in
+            # the single-digit seconds.
             raw_limit = min(200, self._PER_CALL_EMBED_CAP * 3)
-            emails = list(folder.all().order_by('-datetime_received')[:raw_limit])
+            emails = list(
+                folder.all()
+                .only(
+                    "id", "subject", "sender", "datetime_received",
+                    "is_read", "has_attachments", "text_body",
+                )
+                .order_by("-datetime_received")[:raw_limit]
+            )
 
             # Prepare documents for search. Apply exclude_automated BEFORE
             # embedding so we don't pay the embedding cost for noise.

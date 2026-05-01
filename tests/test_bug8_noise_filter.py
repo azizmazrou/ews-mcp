@@ -106,7 +106,7 @@ async def test_semantic_search_excludes_automated_by_default(_enable_ai):
     ]
     ordered = MagicMock()
     ordered.__getitem__ = lambda _self, _slc: fakes
-    _enable_ai.account.inbox.all.return_value.order_by.return_value = ordered
+    _enable_ai.account.inbox.all.return_value.only.return_value.order_by.return_value = ordered
 
     passed_documents: list = []
 
@@ -142,7 +142,7 @@ async def test_semantic_search_keeps_everything_when_disabled(_enable_ai):
     ]
     ordered = MagicMock()
     ordered.__getitem__ = lambda _self, _slc: fakes
-    _enable_ai.account.inbox.all.return_value.order_by.return_value = ordered
+    _enable_ai.account.inbox.all.return_value.only.return_value.order_by.return_value = ordered
 
     seen: list = []
 
