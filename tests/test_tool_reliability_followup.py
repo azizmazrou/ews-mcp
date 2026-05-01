@@ -204,7 +204,12 @@ async def test_b4_manage_folder_delete_accepts_hard_delete_alias(mock_ews_client
 
 @pytest.mark.asyncio
 async def test_b4_manage_folder_delete_soft_default(mock_ews_client):
-    """Without hard_delete/permanent, soft_delete is called."""
+    """Without hard_delete/permanent, the folder is moved to Deleted Items.
+
+    exchangelib's Folder uses ``move_to_trash()`` for soft-delete;
+    ``soft_delete()`` is an ``Item`` method and raises AttributeError
+    on Folder. Pin the new behaviour.
+    """
     from src.tools.folder_tools import ManageFolderTool
 
     folder = MagicMock()
@@ -215,7 +220,8 @@ async def test_b4_manage_folder_delete_soft_default(mock_ews_client):
         result = await tool.execute(action="delete", folder_id="AAMkFolder")
     assert result["success"] is True
     assert result["permanent"] is False
-    folder.soft_delete.assert_called_once()
+    folder.move_to_trash.assert_called_once()
+    folder.soft_delete.assert_not_called()
     folder.delete.assert_not_called()
 
 
