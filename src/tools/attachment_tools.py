@@ -531,12 +531,14 @@ class AddAttachmentTool(BaseTool):
                 attachment_kwargs["content_id"] = content_id
             attachment = FileAttachment(**attachment_kwargs)
 
-            # Add attachment to message
-            if not hasattr(message, 'attachments'):
-                message.attachments = []
+            # Persist via CreateAttachment. `Item.attach(...)` issues the
+            # EWS call and mutates `attachment.attachment_id` in place — the
+            # earlier `attachments.append(...) + message.save()` pattern
+            # only mutated the local list and never reached the server, so
+            # subsequent list_attachments calls returned an empty list.
+            message.attach(attachment)
 
-            message.attachments.append(attachment)
-            message.save()
+            attachment_id = extract_attachment_id(attachment)
 
             self.logger.info(f"Added attachment '{file_name}' to message {message_id}")
 
@@ -546,6 +548,7 @@ class AddAttachmentTool(BaseTool):
             return format_success_response(
                 f"Attachment '{file_name}' added successfully",
                 message_id=message_id,
+                attachment_id=attachment_id,
                 attachment_name=file_name,
                 attachment_size=len(file_content),
                 content_type=content_type,
@@ -654,9 +657,10 @@ class DeleteAttachmentTool(BaseTool):
             if not attachment_to_delete:
                 raise ToolExecutionError(f"Attachment not found")
 
-            # Remove the attachment
-            message.attachments.remove(attachment_to_delete)
-            message.save()
+            # Persist via DeleteAttachment. Same reason as add_attachment:
+            # mutating the local list and saving the parent item does not
+            # send DeleteAttachment to EWS.
+            message.detach(attachment_to_delete)
 
             self.logger.info(f"Deleted attachment '{deleted_name}' from message {message_id}")
 
