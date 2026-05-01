@@ -590,8 +590,16 @@ class ManageFolderTool(BaseTool):
                     folder.delete()
                     action = "permanently deleted"
                 else:
-                    folder.soft_delete()
-                    action = "moved to Deleted Items"
+                    # exchangelib's `Folder` doesn't expose `soft_delete()` —
+                    # that name belongs to `Item`. The folder-level move-to-
+                    # trash is `move_to_trash()`. Falling back to delete()
+                    # if the underlying class is too old to have it.
+                    if hasattr(folder, "move_to_trash"):
+                        folder.move_to_trash()
+                        action = "moved to Deleted Items"
+                    else:
+                        folder.delete()
+                        action = "permanently deleted (no move_to_trash)"
             except Exception as del_exc:
                 # Exchange returns an informative error for common cases
                 # ("folder not empty", "system folder cannot be deleted",

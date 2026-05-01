@@ -139,7 +139,9 @@ async def test_delete_folder_soft(mock_ews_client):
     assert "Deleted" in result["message"] or "deleted" in result["message"]
     assert result["folder_id"] == "folder-to-delete"
     assert result["permanent"] is False
-    mock_folder.soft_delete.assert_called_once()
+    # exchangelib's Folder uses move_to_trash(); soft_delete() is an Item method.
+    mock_folder.move_to_trash.assert_called_once()
+    mock_folder.soft_delete.assert_not_called()
 
 
 @pytest.mark.asyncio
