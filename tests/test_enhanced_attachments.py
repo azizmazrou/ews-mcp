@@ -51,7 +51,12 @@ async def test_add_attachment_from_file(mock_ews_client):
     assert "added successfully" in result["message"]
     assert result["attachment_name"] == "test_attachment.txt"
     assert result["message_id"] == "message-id"
-    mock_message.save.assert_called_once()
+    # Real EWS CreateAttachment goes through Item.attach(), not save().
+    # The from_file path constructs a FileAttachment after the patch, so we
+    # only assert that attach() was called once — its argument is the
+    # internal FileAttachment object, not the patched constructor mock.
+    mock_message.attach.assert_called_once()
+    mock_message.save.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -199,7 +204,9 @@ async def test_delete_attachment_by_id(mock_ews_client):
     assert result["success"] is True
     assert "deleted successfully" in result["message"]
     assert result["attachment_name"] == "document.pdf"
-    mock_message.save.assert_called_once()
+    # Real EWS DeleteAttachment goes through Item.detach(), not save().
+    mock_message.detach.assert_called_once_with(mock_attachment)
+    mock_message.save.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -227,7 +234,8 @@ async def test_delete_attachment_by_name(mock_ews_client):
 
     assert result["success"] is True
     assert result["attachment_name"] == "report.pdf"
-    mock_message.save.assert_called_once()
+    mock_message.detach.assert_called_once_with(mock_attachment)
+    mock_message.save.assert_not_called()
 
 
 @pytest.mark.asyncio
