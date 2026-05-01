@@ -227,6 +227,20 @@ class Settings(BaseSettings):
                     self.ai_model = "gpt-4o-mini"
                 elif self.ai_provider == "anthropic":
                     self.ai_model = "claude-3-5-sonnet-20241022"
+                elif self.ai_provider == "local":
+                    # OpenAI-compatible local endpoints (Ollama, vLLM, LM Studio,
+                    # llama.cpp server) all require a `model` field in
+                    # /chat/completions. With ai_model=None the provider sends
+                    # null and the upstream rejects with HTTP 400 "model is
+                    # required". Refuse to start instead — the right answer is
+                    # to set AI_MODEL to a model name actually loaded at
+                    # AI_BASE_URL.
+                    raise ValueError(
+                        "AI_MODEL is required when AI_PROVIDER=local. "
+                        "Set AI_MODEL to a chat-capable model loaded at "
+                        f"AI_BASE_URL={self.ai_base_url!r} (e.g. "
+                        "'llama3.2:latest' or 'qwen:14b' for Ollama)."
+                    )
                 if self.ai_model:
                     _log.info(
                         f"AI_MODEL not set; defaulting to {self.ai_model!r} "
