@@ -46,3 +46,6 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Claude Code local config — never push
+.claude/
