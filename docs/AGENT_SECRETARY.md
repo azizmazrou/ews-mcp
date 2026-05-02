@@ -99,12 +99,15 @@ X". Typical flow:
 1. The agent (or user) creates a commitment with `track_commitment`.
 2. `list_commitments` surfaces what's open, overdue, or done.
 3. `resolve_commitment` closes one out when complete.
-4. `extract_commitments` uses the configured AI provider to pull
-   candidate commitments out of an email thread.
 
-Stored fields include the message/thread ID, the counterparty, a due
-timestamp, a short excerpt, and a `source` flag (`manual` | `extracted`)
-so AI-generated items are distinguishable.
+> **v4 — auto-extraction is now skill-side.** v3.x exposed
+> `extract_commitments`, which proxied the email body through an LLM
+> on the MCP and saved any detected commitments. v4 removed that tool
+> per the [MCP / skill boundary principle](../docs/ARCHITECTURE.md#mcp--skill-boundary):
+> the consuming agent already has an LLM, so detection happens
+> in-prompt and the agent then issues one or more `track_commitment`
+> calls per item it found. Stored fields include the message/thread
+> ID, the counterparty, a due timestamp, and a short excerpt.
 
 ### Example
 
@@ -113,16 +116,15 @@ track_commitment {
   "description": "Send Alice the Q1 budget numbers",
   "owner": "me",
   "counterparty": "alice@corp.com",
-  "due_at": "2026-04-25T17:00:00Z"
+  "due_at": "2026-04-25T17:00:00Z",
+  "thread_id": "AAQk...",
+  "message_id": "AAMk...",
+  "excerpt": "...will get back to you with the numbers by Friday..."
 }
 
 list_commitments { "scope": "overdue" }
 resolve_commitment {
   "commitment_id": "…", "outcome": "done", "note": "sent via email"
-}
-
-extract_commitments {
-  "message_id": "AAMkAGI…", "save": true, "max_extractions": 5
 }
 ```
 
@@ -182,30 +184,35 @@ what `create_draft` is for.
 
 ## Voice profile
 
-`build_voice_profile` samples up to 200 messages from the user's Sent
-folder, strips quoted replies/signatures, and asks the AI provider to
-emit a JSON style card (formality, typical greetings, typical sign-offs,
-structure notes, 3 short examples).
+A voice profile is a JSON style card (formality, typical greetings,
+typical sign-offs, structure notes, sample examples) that
+draft-generation tools can use as few-shot material to produce text
+that "sounds like the user".
 
-The card is stored once under `NS.VOICE="voice.profile"` / key
-`"current"`. `get_voice_profile` retrieves it; draft-generation tools
-can feed it into prompts as few-shot material to produce text that
-"sounds like you".
+> **v4 — building the card is skill-side.** v3.x exposed
+> `build_voice_profile`, which sampled up to 200 sent messages and
+> asked the configured AI provider to emit the style card. v4 removed
+> that tool. The consuming agent now reads sample sent items via
+> `read_emails(folder="sent")`, derives the style card in-prompt, and
+> persists it via the memory KV under namespace `voice_profile`:
+>
+> ```jsonc
+> memory_set {
+>   "namespace": "voice_profile",
+>   "key": "current",
+>   "value": { "formality": "professional", "greetings": [...], ... }
+> }
+> ```
 
-Safety:
-
-- Samples are capped at 200 messages × 1500 chars, prompt at ~30 KB.
-- The AI is asked to **redact PII** (names, emails, phone numbers) from
-  the stored examples.
-- Only the primary mailbox's Sent folder is read. No impersonation.
+`get_voice_profile` reads the stored card back. The same JSON shape
+v3.x produced is used so existing skill prompts that consume the card
+keep working.
 
 ### Example
 
 ```jsonc
-build_voice_profile { "sample_count": 100, "min_words": 20 }
-// → profile stored; returns formality, greetings, signoffs, 3 examples
-
 get_voice_profile
+// → { "has_profile": true, "profile": {...} }
 ```
 
 ## Rule engine
@@ -347,14 +354,18 @@ downloads).
 
 ## Configuration
 
-All agent features are on by default; toggle with `ENABLE_AGENT=false` to
-exclude the 24 new tools from the tool registry entirely.
+All agent features are on by default; toggle with `ENABLE_AGENT=false`
+to exclude the agent-secretary tools from the tool registry entirely.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ENABLE_AGENT` | `true` | Register the agent-secretary tools |
-| `EWS_MEMORY_DIR` | `data/memory` | Jail for per-mailbox SQLite files |
-| `ENABLE_AI` | `false` | Required for `extract_commitments` and `build_voice_profile` |
+| `EWS_MEMORY_DIR` | `data/memory` | Jail for per-mailbox memory store |
+
+`ENABLE_AI` is no longer required for any agent-secretary tool in v4 —
+only `semantic_search_emails` (in the AI category) needs an embedding
+provider configured. The auto-extraction tools that did need an LLM
+(`extract_commitments`, `build_voice_profile`) were removed.
 | `AI_PROVIDER` | `openai` | `openai` / `anthropic` / `local` |
 
 ## FAQ

@@ -2,7 +2,7 @@
 
 EWS MCP Server supports operating on behalf of other users through Exchange impersonation or delegation. This allows a service account to access multiple mailboxes without requiring separate credentials for each user.
 
-> **Note:** every **base tool (42)** accepts a `target_mailbox` parameter. The **4 optional AI tools** (`semantic_search_emails`, `classify_email`, `summarize_email`, `suggest_replies`) currently ignore `target_mailbox` and always operate on the primary authenticated mailbox.
+> **Note:** every base mailbox tool accepts a `target_mailbox` parameter. The single AI tool in v4 (`semantic_search_emails`) currently ignores `target_mailbox` and always operates on the primary authenticated mailbox; the other AI tools that existed in v3.x have been removed (their work is now done in-prompt by the consuming agent — see [ARCHITECTURE.md](ARCHITECTURE.md#mcp--skill-boundary)).
 
 ## Overview
 
