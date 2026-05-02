@@ -8,6 +8,8 @@ Provides:
 from typing import Any, Dict, List, Optional, Set
 from datetime import datetime
 
+from exchangelib.properties import ConversationId
+
 from .base import BaseTool
 from ..exceptions import ToolExecutionError, ValidationError
 from ..utils import (
@@ -218,12 +220,21 @@ class SearchByConversationTool(BaseTool):
             searched_folders: List[str] = []
             start_time = datetime.now()
 
+            # exchangelib's Message.conversation_id is an EWSElementField
+            # whose value class is ConversationId — passing a raw string
+            # crashes with TypeError when the QuerySet builds the SOAP
+            # restriction (every per-folder filter() raised, so the tool
+            # walked 19 folders, marked all 19 skipped, and returned 0
+            # results). Wrap the id once so every folder.filter() below
+            # gets a properly typed value.
+            cid_filter = ConversationId(id=conversation_id)
+
             for folder in folders_to_search:
                 folder_name = safe_get(folder, "name", "Unknown")
                 searched_folders.append(folder_name)
                 try:
                     items = list(
-                        folder.filter(conversation_id=conversation_id)
+                        folder.filter(conversation_id=cid_filter)
                         .order_by("-datetime_received")[:max_results]
                     )
                 except Exception as exc:
