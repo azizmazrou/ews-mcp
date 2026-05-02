@@ -63,7 +63,11 @@ class _FakeFolder:
         if self._raise_on_filter is not None:
             raise self._raise_on_filter
         conv_id = kw.get("conversation_id")
-        items = [m for m in self._messages if m.conversation_id == conv_id]
+        # Production passes ConversationId objects (typed-field correctness);
+        # tests historically passed strings. Accept either by extracting the
+        # `.id` attribute if present.
+        target = getattr(conv_id, "id", conv_id)
+        items = [m for m in self._messages if m.conversation_id == target]
         return _FolderQuery(items)
 
 
