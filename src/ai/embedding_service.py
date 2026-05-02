@@ -10,26 +10,67 @@ from .base import EmbeddingProvider
 
 
 class EmbeddingService:
-    """Service for managing embeddings and semantic search."""
+    """Service for managing embeddings and semantic search.
 
-    def __init__(self, provider: EmbeddingProvider, cache_dir: Optional[str] = None):
-        """Initialize embedding service.
+    v4.0 — accepts an optional ``sqlite_cache`` (a
+    ``src.cache.sqlite_cache.SQLiteCache`` instance) plus the embedding
+    ``model_name``. When supplied, every cache write also goes through
+    SQLite (BLOB storage, indexed by ``(text_hash, model)``), and on
+    construction we hydrate the in-memory dict from SQLite for the
+    target model. The legacy JSON cache (``data/embeddings/embeddings.json``)
+    is still supported as a fallback for installs that haven't been
+    migrated yet — see ``EWSClient.sqlite_cache`` for the one-shot
+    migration path.
+    """
 
-        Args:
-            provider: Embedding provider to use
-            cache_dir: Optional directory to cache embeddings
-        """
+    def __init__(
+        self,
+        provider: EmbeddingProvider,
+        cache_dir: Optional[str] = None,
+        sqlite_cache=None,
+        model_name: Optional[str] = None,
+    ):
         self.provider = provider
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        self._sqlite = sqlite_cache
+        # The model name is what SQLite keys against. Without it we cannot
+        # write to SQLite (would silently store under "" and never be hit
+        # by future calls), so we fall back to JSON-only in that case and
+        # log loudly.
+        self._model = model_name
+        if self._sqlite is not None and not self._model:
+            logging.getLogger(__name__).warning(
+                "EmbeddingService received sqlite_cache without model_name; "
+                "falling back to JSON cache only. Set AI_EMBEDDING_MODEL "
+                "explicitly to enable SQLite-backed embedding cache."
+            )
+            self._sqlite = None
         self.logger = logging.getLogger(__name__)
 
-        # In-memory cache
+        # In-memory cache (the hot path for search_similar). Populated
+        # from SQLite when available, else from the legacy JSON file.
         self.embedding_cache: Dict[str, List[float]] = {}
 
-        # Load cache from disk if available
-        if self.cache_dir:
+        if self._sqlite is not None:
+            self._load_from_sqlite()
+        elif self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             self._load_cache()
+
+    def _load_from_sqlite(self) -> None:
+        """Hydrate the in-memory dict with every cached vector for our model."""
+        try:
+            n = self._sqlite.count_embeddings(self._model)
+            self.logger.info(
+                "EmbeddingService: %d cached vectors available in SQLite for model=%r",
+                n, self._model,
+            )
+            # We don't bulk-load into RAM up front — search_similar will
+            # bulk-fetch only the candidate hashes via get_embeddings_bulk.
+            # The in-memory dict is lazily populated as embed_text/embed_batch
+            # see hits.
+        except Exception as exc:
+            self.logger.warning("EmbeddingService SQLite probe failed: %s", exc)
 
     def _load_cache(self):
         """Load embeddings cache from disk."""
@@ -77,27 +118,36 @@ class EmbeddingService:
     async def embed_text(self, text: str, use_cache: bool = True) -> List[float]:
         """Generate embedding for text.
 
-        Args:
-            text: Text to embed
-            use_cache: Whether to use cached embeddings
-
-        Returns:
-            Embedding vector
+        Lookup order (v4.0): in-memory dict → SQLite (if wired) → network
+        provider. On a network embed, the result is written to BOTH the
+        in-memory dict and SQLite (when wired) so subsequent calls hit
+        the fast paths.
         """
-        if use_cache:
-            cache_key = self._get_cache_key(text)
-            if cache_key in self.embedding_cache:
-                return self.embedding_cache[cache_key]
+        cache_key = self._get_cache_key(text) if use_cache else None
 
-        # Generate embedding
+        if use_cache:
+            hit = self.embedding_cache.get(cache_key)
+            if hit is not None:
+                return hit
+            # Fall back to SQLite before paying the network round-trip.
+            if self._sqlite is not None:
+                vec = self._sqlite.get_embedding(cache_key, self._model)
+                if vec is not None:
+                    self.embedding_cache[cache_key] = vec
+                    return vec
+
         response = await self.provider.embed(text)
         embedding = response.embedding
 
-        # Cache it
         if use_cache:
-            cache_key = self._get_cache_key(text)
             self.embedding_cache[cache_key] = embedding
-            self._save_cache()
+            if self._sqlite is not None:
+                try:
+                    self._sqlite.put_embedding(cache_key, self._model, embedding)
+                except Exception as exc:
+                    self.logger.warning("SQLite put_embedding failed: %s", exc)
+            else:
+                self._save_cache()
 
         return embedding
 
@@ -115,31 +165,61 @@ class EmbeddingService:
             responses = await self.provider.embed_batch(texts)
             return [r.embedding for r in responses]
 
-        # Check cache
+        # Build (index, hash) up front so we can do one bulk SQLite lookup
+        # for everything not in the in-memory dict.
+        text_hashes = [self._get_cache_key(t) for t in texts]
+
         embeddings: List[Tuple[int, List[float]]] = []
         texts_to_embed: List[str] = []
         indices_to_embed: List[int] = []
+        hashes_to_embed: List[str] = []
 
-        for i, text in enumerate(texts):
-            cache_key = self._get_cache_key(text)
-            if cache_key in self.embedding_cache:
-                embeddings.append((i, self.embedding_cache[cache_key]))
+        # Pass 1: in-memory dict (hot path).
+        unresolved_indices: List[int] = []
+        for i, h in enumerate(text_hashes):
+            v = self.embedding_cache.get(h)
+            if v is not None:
+                embeddings.append((i, v))
             else:
-                texts_to_embed.append(text)
-                indices_to_embed.append(i)
+                unresolved_indices.append(i)
 
-        # Embed uncached texts. texts_to_embed[pos] corresponds positionally
-        # to responses[pos] and to the original texts[indices_to_embed[pos]].
+        # Pass 2: SQLite bulk fetch (warm path).
+        if unresolved_indices and self._sqlite is not None:
+            need_hashes = [text_hashes[i] for i in unresolved_indices]
+            sqlite_hits = self._sqlite.get_embeddings_bulk(need_hashes, self._model)
+            still_unresolved: List[int] = []
+            for i in unresolved_indices:
+                h = text_hashes[i]
+                if h in sqlite_hits:
+                    self.embedding_cache[h] = sqlite_hits[h]
+                    embeddings.append((i, sqlite_hits[h]))
+                else:
+                    still_unresolved.append(i)
+            unresolved_indices = still_unresolved
+
+        # Pass 3: network call for the remainder (cold path).
+        for i in unresolved_indices:
+            texts_to_embed.append(texts[i])
+            hashes_to_embed.append(text_hashes[i])
+            indices_to_embed.append(i)
+
         if texts_to_embed:
             responses = await self.provider.embed_batch(texts_to_embed)
             for pos, (original_idx, response) in enumerate(zip(indices_to_embed, responses)):
                 embedding = response.embedding
                 embeddings.append((original_idx, embedding))
-                cache_key = self._get_cache_key(texts_to_embed[pos])
-                self.embedding_cache[cache_key] = embedding
+                h = hashes_to_embed[pos]
+                self.embedding_cache[h] = embedding
+                if self._sqlite is not None:
+                    try:
+                        self._sqlite.put_embedding(h, self._model, embedding)
+                    except Exception as exc:
+                        self.logger.warning("SQLite put_embedding failed: %s", exc)
 
-            # One disk write for the whole batch (was N writes / call).
-            self._save_cache()
+            # One disk write for the whole batch — only if we're still
+            # operating in JSON-only mode.
+            if self._sqlite is None:
+                self._save_cache()
 
         # Sort by original index
         embeddings.sort(key=lambda x: x[0])

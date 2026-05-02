@@ -1,6 +1,117 @@
 # Changelog
 
-## Unreleased — Test-suite hardening + 3 production bugs
+## v4.0.0 — 2026-05-03
+
+The first **bidirectional body format** release. The MCP now accepts
+markdown from the LLM on the write path and emits markdown to the LLM on
+the read path — Outlook keeps getting and sending HTML on its side.
+Token cost on a typical Outlook MSO body drops ~12× compared with the
+v3.4 `body_html` default.
+
+This release also draws the **MCP / skill boundary** more clearly: the
+MCP does deterministic data work (fetching, transforming, embedding,
+extracting, persisting). The consuming skill / agent does the reasoning
+(classification, summarisation, generation, decision-making). Five LLM-
+proxying tools have been removed because the skill already has an LLM
+loaded and can do that work in the same conversation, without a second
+round trip and without the MCP needing an `AI_MODEL` configuration for
+those features.
+
+### Added
+
+- **`format=html|markdown|text` on `get_email_details`** (default `html`,
+  no breaking change). `markdown` runs the Outlook MSO body through
+  `markdownify` server-side with an MSO-aware strip list, caches the
+  result in SQLite forever (Exchange messages are immutable post-send),
+  and returns ~12× fewer tokens for the same semantic content. When
+  `format!="html"`, the heavy `body_html` field is also dropped from
+  the response so the headline byte saving is real, not theoretical.
+  Companion booleans:
+  - `trim_quoted=true` strips `On …, X wrote:` history out of the body.
+  - `include_body=false` drops both `body` and `body_html` for
+    list-style calls where the agent only wants the envelope.
+- **`format=` schema on `read_emails`** (acknowledged but no
+  functional change in v4.0 — `read_emails` returns only short
+  previews so the conversion has nothing to convert; the schema is
+  in place so v4.1 can extend the rendering uniformly across the
+  list-style tools without further breaking changes).
+- **`body_format=html|markdown|text` on `send_email` / `reply_email` /
+  `forward_email`** (default `html`, no breaking change). When set to
+  `markdown`, the LLM-supplied body is converted to HTML via Python-
+  Markdown before being handed to EWS. The signature-preservation path
+  on `reply_email` / `forward_email` is unchanged — Outlook's signature
+  with its inline cid: image refs still appears at the bottom of the
+  rendered email. Acceptance criterion verified live:
+  `inline_attachments_preserved: 3` on a markdown reply.
+- **Unified per-mailbox SQLite cache** at
+  `data/ews_mcp_<mailbox>.sqlite`. Single file, three tables:
+  `body_format_cache`, `attachment_text_cache`, `embedding_cache`.
+  No vector-database dependency required.
+- **One-shot legacy migration**: on first startup, if a v3.4
+  `data/embeddings/embeddings.json` is present, it is read once,
+  imported into the new `embedding_cache` table (typically against
+  `nomic-embed-text` model). Idempotent. The legacy file is left in
+  place so the existing JSON-based EmbeddingService continues to
+  work; SQLite is wired in at the same time as a parallel cache, and
+  becomes authoritative once the read path is rewired (also in v4.0).
+
+- **Expanded `read_attachment` text extraction**:
+  - `pptx` — slide-by-slide via `python-pptx`, including speaker notes and embedded tables
+  - `msg` — Outlook compound-file via `extract-msg`. Returns subject/from/to/cc/date envelope, body (HTML→markdown if present), and a recursive nested-attachment listing. Solves the very common "user forwarded an entire thread as a .msg attachment" workflow.
+  - `eml` — RFC-822 via stdlib `email`. Same shape as `.msg`.
+  - `html` / `htm` — markdownify, RTL-safe (Arabic / Hebrew preserved)
+  - `csv`, `log`, `json`, `xml`, `md` — BOM-aware UTF-8/UTF-16 decode
+  - The pre-v4 PDF / DOCX / XLSX / TXT paths are unchanged.
+
+- **Issue #112 — Exchange ID handling**. `is_exchange_folder_id()` recognises both `AAMk` and `AQMk` prefixes. `move_email` and `copy_email` resolve `destination_folder_id` directly via `find_folder_by_id` instead of the path/name resolver. `copy_email` no longer returns empty `copied_message_id` when exchangelib hands back a bare `ItemId`.
+
+- **Issue #114 — Outlook categories on 9 create/update tools**. New optional `categories: list[str]` parameter on `create_appointment`, `update_appointment`, `create_task`, `update_task`, `create_contact`, `update_contact`, `create_draft`, `create_reply_draft`, `create_forward_draft`. Replace-on-update semantics; empty list clears. (`update_email` already supported it in v3.4.)
+
+- **Issue #115 — `is_flagged` filter on `search_emails`**. New boolean filter mapping to `PR_FLAG_STATUS` extended property. Wired into both quick and full-text search modes.
+
+- **Issue #119 — `cc` / `bcc` on `create_reply_draft`**. Caller-supplied recipients now persist on the saved draft (was silently dropped). Deduplicated against auto-derived `to_recipients`. Surfaced on the response.
+
+- **Issue #121 — `oof_settings` set-path correctness**. Existing replies are preserved when caller omits them (was overwriting with default text). Scheduled `start`/`end` are normalised to UTC before EWS (fixes `InvalidScheduledOofDuration` on PBS Exchange). `currently_active` is returned by the set path too.
+
+### Removed
+
+- `classify_email`, `summarize_email`, `suggest_replies` — pure LLM
+  reasoning that the consuming skill should do natively. See README
+  migration table for replacements.
+- `extract_commitments` — LLM extraction; skill detects + calls
+  `track_commitment` (manual CRUD remains).
+- `build_voice_profile` — LLM analysis; skill analyses + persists via
+  the memory KV (`get_voice_profile` remains for read-back).
+
+### Changed
+
+- **`AI_MODEL` is now optional**. The only remaining MCP-side LLM call
+  is the embedding model for `semantic_search_emails`, which uses
+  `AI_EMBEDDING_MODEL`. With the 5 reasoning tools removed, no chat
+  model is required.
+- **Tool count: 70 → 67**. Tool surface listed in the README.
+
+### Engineering
+
+- New module `src/body_format.py` — `render_body` (HTML→markdown),
+  `compose_body` (markdown→HTML), `trim_quoted`, plus the schema
+  fragments `READ_FORMAT_SCHEMA` / `WRITE_FORMAT_SCHEMA` so the new
+  parameters declare uniformly across every tool that uses them.
+- New module `src/cache/sqlite_cache.py` — `SQLiteCache` wrapper with
+  WAL journaling, packed `float32` embedding storage, and the legacy
+  JSON importer.
+- `EmbeddingService` rewired to consult SQLite before the network. Lookup order: in-memory dict → SQLite (bulk fetch via `get_embeddings_bulk`) → embed provider. JSON write-path is bypassed when SQLite is wired.
+- ~1100 lines of unreachable code dropped: the 5 LLM-reasoning tool class bodies (`ClassifyEmailTool`, `SummarizeEmailTool`, `SuggestRepliesTool`, `ExtractCommitmentsTool`, `BuildVoiceProfileTool`).
+- Reply / forward path: when `body_format != "html"`, skip the second `format_body_for_html`/`sanitize_html` pass — `compose_body` already produced trusted HTML and the regex-based sanitiser can mangle markdown code fences.
+- Two new dependencies: `markdownify>=0.13.1` (HTML→Markdown), `markdown>=3.5` (Markdown→HTML), `extract-msg>=0.50.0` (Outlook .msg compound-file reader).
+- Per-repo git identity is set to `noreply@anthropic.com` to keep
+  contributor email addresses out of public commit history.
+- The `data_dir` (default `data`) is read off the `Settings` object
+  via `getattr` so older configs without the field continue to work.
+
+---
+
+## v3.4 — Test-suite hardening + 3 production bugs
 
 A focused pass to break the "fix one bug, the next refactor regresses
 another" cycle. The shipped tests now pin the structural patterns that

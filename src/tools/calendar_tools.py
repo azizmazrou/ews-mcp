@@ -160,6 +160,15 @@ class CreateAppointmentTool(BaseTool):
                         "description": "Reminder minutes before (optional)",
                         "default": 15
                     },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Outlook categories to attach to the appointment "
+                            "(Issue #114). Strings; matched case-insensitively "
+                            "against the user's category list."
+                        )
+                    },
                     **INLINE_ATTACHMENTS_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
@@ -211,6 +220,11 @@ class CreateAppointmentTool(BaseTool):
                     Attendee(mailbox=Mailbox(email_address=email))
                     for email in request.attendees
                 ]
+
+            # Issue #114 — Outlook categories on the appointment.
+            cats = kwargs.get("categories")
+            if cats:
+                item.categories = list(cats)
 
             # Add inline (base64) attachments if provided
             inline_count = attach_inline_files(item, kwargs.get("inline_attachments", []))
@@ -395,6 +409,14 @@ class UpdateAppointmentTool(BaseTool):
                         "type": "string",
                         "description": "New body (optional)"
                     },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Replace the appointment's Outlook categories with "
+                            "this list (Issue #114). Pass an empty list to clear."
+                        )
+                    },
                     **INLINE_ATTACHMENTS_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
@@ -432,6 +454,10 @@ class UpdateAppointmentTool(BaseTool):
 
             if "body" in kwargs:
                 item.body = kwargs["body"]
+
+            # Issue #114 — replace categories with the supplied list.
+            if "categories" in kwargs:
+                item.categories = list(kwargs["categories"] or [])
 
             # Add inline (base64) attachments if provided
             inline_count = attach_inline_files(item, kwargs.get("inline_attachments", []))

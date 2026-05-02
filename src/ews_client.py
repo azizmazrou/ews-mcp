@@ -22,6 +22,12 @@ class EWSClient:
         self._account: Optional[Account] = None
         self._impersonated_accounts: Dict[str, Account] = {}
 
+        # v4.0: unified per-mailbox SQLite cache (body_format, attachment_text,
+        # embedding tables). Tools that want caching reach for it via
+        # `self.ews_client.sqlite_cache`. Initialised lazily on first access
+        # so unit tests that don't need it don't pay the file-create cost.
+        self._sqlite_cache = None
+
         # TLS verification: verified by default. Only disable when the operator
         # explicitly sets EWS_INSECURE_SKIP_VERIFY=true (e.g. internal Exchange
         # with a private CA that cannot be installed into the container trust
@@ -43,6 +49,39 @@ class EWSClient:
         if self._account is None:
             self._account = self._create_account()
         return self._account
+
+    @property
+    def sqlite_cache(self):
+        """Lazy unified SQLite cache (body_format + attachment_text + embedding).
+
+        Stored at <data_dir>/ews_mcp_<mailbox>.sqlite. On first access in a
+        container that has a v3.4 ``data/embeddings/embeddings.json`` next
+        to it, the legacy embedding cache is auto-imported (idempotent —
+        the file is renamed .migrated after a successful import).
+        """
+        if self._sqlite_cache is None:
+            from pathlib import Path
+            from .cache.sqlite_cache import SQLiteCache
+            data_dir = Path(getattr(self.config, "data_dir", "data"))
+            mailbox_slug = (
+                self.config.ews_email.replace("@", "_at_").replace(".", "_")
+            )
+            db_path = data_dir / f"ews_mcp_{mailbox_slug}.sqlite"
+            self._sqlite_cache = SQLiteCache(db_path)
+            # One-shot migration of the v3.4 JSON embeddings cache.
+            legacy = data_dir / "embeddings" / "embeddings.json"
+            if legacy.exists():
+                legacy_model = (
+                    getattr(self.config, "ai_embedding_model", None)
+                    or "nomic-embed-text"
+                )
+                stats = self._sqlite_cache.import_legacy_embeddings_json(
+                    legacy, legacy_model
+                )
+                self.logger.info(
+                    "Embedding cache migrated to SQLite: %s", stats
+                )
+        return self._sqlite_cache
 
     @retry(
         stop=stop_after_attempt(3),

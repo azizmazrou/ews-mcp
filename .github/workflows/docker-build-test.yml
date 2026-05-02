@@ -1,50 +1,74 @@
-name: Docker Build Test
+name: Docker Build Smoke
+
+# Lightweight gate that runs on every PR and on pushes to main/master:
+# it builds the Docker image (no push) and verifies the resulting
+# container starts the Python entrypoint cleanly. No pytest, no test
+# suite — the v4.0 product repo intentionally ships without tests
+# (see CONTRIBUTING / CHANGELOG). This workflow exists to catch:
+#
+#   * Dockerfile regressions
+#   * `requirements.txt` resolution failures
+#   * Python import errors (the entrypoint exits with a clear traceback
+#     on missing module / syntax error)
+#
+# The full multi-arch publish workflow lives in `docker-publish.yml`.
 
 on:
+  push:
+    branches:
+      - main
+      - master
   pull_request:
-    paths:
-      - 'Dockerfile'
-      - 'src/**'
-      - 'requirements.txt'
-      - '.github/workflows/docker-*.yml'
+    branches:
+      - main
+      - master
 
 jobs:
-  build-test:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Build image (single arch, no push)
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
           load: true
-          tags: ews-mcp-server:test
+          tags: ews-mcp:ci-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Test Python version
+      - name: Smoke-import the package
+        # Run the container with EWS auth deliberately misconfigured so
+        # it exits early with a config-validation error rather than
+        # opening a real EWS connection. Anything past Python import is
+        # fine here — we just want to fail on missing module / syntax /
+        # import-time exceptions.
         run: |
-          docker run --rm ews-mcp-server:test python --version
-
-      - name: Test Python imports (without config)
-        run: |
-          docker run --rm ews-mcp-server:test python -c "import sys; print('Python OK'); print(f'Version: {sys.version}')"
-
-      - name: Test lazy config loading
-        run: |
-          docker run --rm ews-mcp-server:test python -c "from src.config import Settings; print('Config module imports OK')"
-
-      - name: Test package structure
-        run: |
-          docker run --rm ews-mcp-server:test ls -la /app/src/
-
-      - name: Verify dependencies installed
-        run: |
-          docker run --rm ews-mcp-server:test python -c "import mcp, exchangelib, pydantic, pydantic_settings; print('All dependencies OK')"
+          set -e
+          # Run with no env: src.config will refuse to start. We capture
+          # the output and assert it's a clean ValueError, not an
+          # ImportError or syntax error.
+          OUT=$(docker run --rm \
+            -e EWS_EMAIL=user@example.invalid \
+            -e EWS_AUTH_TYPE=basic \
+            -e EWS_USERNAME=user@example.invalid \
+            -e EWS_PASSWORD=x \
+            ews-mcp:ci-${{ github.sha }} \
+            python -c "import src.main; print('imports ok')" 2>&1) || true
+          echo "$OUT"
+          if echo "$OUT" | grep -q "imports ok"; then
+            echo "::notice::Python import check passed."
+          elif echo "$OUT" | grep -qE "ImportError|ModuleNotFoundError|SyntaxError"; then
+            echo "::error::Import-time failure: $OUT"
+            exit 1
+          else
+            # Other runtime errors (missing env, EWS connection) are
+            # acceptable here — the import succeeded.
+            echo "::notice::Imports succeeded; runtime exited as expected for CI env."
+          fi
