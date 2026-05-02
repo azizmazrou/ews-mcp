@@ -2,10 +2,10 @@ from setuptools import setup, find_packages
 
 setup(
     name="ews-mcp-server",
-    version="3.4.0",
-    description="MCP Server for Microsoft Exchange Web Services",
-    author="Your Name",
-    author_email="your.email@example.com",
+    version="4.0.0",
+    description="MCP Server for Microsoft Exchange Web Services — bidirectional body format, expanded attachment extraction, lean AI surface",
+    author="Abdulaziz Almazrou",
+    author_email="abdulaziz.almazrou@gmail.com",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     install_requires=[

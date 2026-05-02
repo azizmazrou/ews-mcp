@@ -72,6 +72,11 @@ class CreateDraftTool(BaseTool):
                         "description": "Attachment file paths (optional)"
                     },
                     **INLINE_ATTACHMENTS_SCHEMA,
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Outlook categories to attach to the draft (Issue #114)."
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to create draft on behalf of (requires impersonation/delegate access)"
@@ -84,6 +89,7 @@ class CreateDraftTool(BaseTool):
     async def execute(self, **kwargs) -> Dict[str, Any]:
         """Create draft email via EWS and save to Drafts folder."""
         target_mailbox = kwargs.pop("target_mailbox", None)
+        categories = kwargs.pop("categories", None)
         request = self.validate_input(SendEmailRequest, **kwargs)
 
         try:
@@ -124,6 +130,10 @@ class CreateDraftTool(BaseTool):
                 message.cc_recipients = [Mailbox(email_address=email) for email in request.cc]
             if request.bcc:
                 message.bcc_recipients = [Mailbox(email_address=email) for email in request.bcc]
+
+            # Issue #114 — Outlook categories on the draft.
+            if categories:
+                message.categories = list(categories)
 
             # Set importance
             message.importance = request.importance.value
@@ -196,6 +206,29 @@ class CreateReplyDraftTool(BaseTool):
                         "description": "File paths to attach to the draft reply (optional)"
                     },
                     **INLINE_ATTACHMENTS_SCHEMA,
+                    "cc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Additional CC recipients to add to the reply draft. "
+                            "These are saved on the draft as cc_recipients alongside "
+                            "the auto-derived to_recipients (sender, plus original "
+                            "to/cc when reply_all=true). Issue #119."
+                        )
+                    },
+                    "bcc": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Additional BCC recipients to add to the reply draft. "
+                            "Mirrors create_forward_draft for parity."
+                        )
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Outlook categories to attach to the reply draft (Issue #114)."
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to create the draft on behalf of (requires impersonation/delegate access)"
@@ -212,6 +245,11 @@ class CreateReplyDraftTool(BaseTool):
         attachments = kwargs.get("attachments", [])
         target_mailbox = kwargs.get("target_mailbox")
         body = (kwargs.get("body") or "").strip()
+        # Issue #119: caller-supplied cc/bcc were silently dropped on the
+        # saved draft. Now propagated alongside the auto-derived recipients.
+        extra_cc = kwargs.get("cc") or []
+        extra_bcc = kwargs.get("bcc") or []
+        categories = kwargs.get("categories")  # Issue #114
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -291,6 +329,21 @@ class CreateReplyDraftTool(BaseTool):
                 folder=account.drafts,
             )
 
+            # Issue #119: persist caller-supplied cc/bcc on the draft.
+            # De-duplicate against to_recipients (already in seen) so a CC'd
+            # address does not also appear in TO when reply_all=True.
+            to_set = {r.email_address for r in reply_to_recipients}
+            cc_to_save = [Mailbox(email_address=e) for e in extra_cc if e and e not in to_set]
+            bcc_to_save = [Mailbox(email_address=e) for e in extra_bcc if e and e not in to_set]
+            if cc_to_save:
+                message.cc_recipients = cc_to_save
+            if bcc_to_save:
+                message.bcc_recipients = bcc_to_save
+
+            # Issue #114 — Outlook categories on the reply draft.
+            if categories:
+                message.categories = list(categories)
+
             inline_count, _ = copy_attachments_to_message(original_message, message)
             attachment_count = 0
 
@@ -326,6 +379,10 @@ class CreateReplyDraftTool(BaseTool):
                 reply_subject=reply_subject,
                 reply_to=reply_to,
                 reply_all=reply_all,
+                # Issue #119: surface the additional recipients on the
+                # response so callers can sanity-check what landed.
+                cc=[mb.email_address for mb in (cc_to_save or [])],
+                bcc=[mb.email_address for mb in (bcc_to_save or [])],
                 attachments_count=attachment_count,
                 inline_attachments_preserved=inline_count,
                 created_time=datetime.now().isoformat(),
@@ -378,6 +435,11 @@ class CreateForwardDraftTool(BaseTool):
                         "description": "Additional file paths to attach to the draft (optional)"
                     },
                     **INLINE_ATTACHMENTS_SCHEMA,
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Outlook categories to attach to the forward draft (Issue #114)."
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to create the draft on behalf of (requires impersonation/delegate access)"
@@ -396,6 +458,7 @@ class CreateForwardDraftTool(BaseTool):
         bcc_recipients = kwargs.get("bcc", [])
         attachments = kwargs.get("attachments", [])
         target_mailbox = kwargs.get("target_mailbox")
+        categories = kwargs.get("categories")  # Issue #114
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -453,6 +516,10 @@ class CreateForwardDraftTool(BaseTool):
                 message.cc_recipients = [Mailbox(email_address=email) for email in cc_recipients]
             if bcc_recipients:
                 message.bcc_recipients = [Mailbox(email_address=email) for email in bcc_recipients]
+
+            # Issue #114 — Outlook categories on the forward draft.
+            if categories:
+                message.categories = list(categories)
 
             inline_count, regular_count = copy_attachments_to_message(original_message, message)
             original_attachment_count = inline_count + regular_count

@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     api_base_url_internal: Optional[str] = None  # Internal Docker URL (e.g., http://ews-mcp:8000)
     api_title: str = "Exchange Web Services (EWS) MCP API"
     api_description: str = "REST API for Exchange operations via Model Context Protocol"
-    api_version: str = "3.4.0"
+    api_version: str = "4.0.0"
 
     # Performance
     enable_cache: bool = True
@@ -114,6 +114,13 @@ class Settings(BaseSettings):
     # Agent-secretary features: memory store, commitments, approvals, rules,
     # voice profile, OOF policy, briefing, meeting prep.
     enable_agent: bool = True
+
+    # v4.0 — per-mailbox SQLite cache + legacy JSON embedding cache live here.
+    # Defaults to "data" (relative). The Dockerfile sets WORKDIR=/app so the
+    # container resolves this to /app/data; local dev runs resolve relative
+    # to the working directory. Operators wanting an absolute path should
+    # override via DATA_DIR env.
+    data_dir: str = "data"
 
     # Security
     enable_audit_log: bool = True

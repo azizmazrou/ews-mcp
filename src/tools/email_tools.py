@@ -40,6 +40,15 @@ from ..utils import (
 )
 from .folder_tools import find_folder_by_id, get_standard_folder_map
 
+# v4.0 — bidirectional body format schema fragments (read + write)
+from ..body_format import (
+    READ_FORMAT_SCHEMA,
+    WRITE_FORMAT_SCHEMA as BODY_FORMAT_SCHEMA,  # local alias used by email tools
+    render_body,
+    compose_body,
+    trim_quoted as _trim_quoted_body,
+)
+
 
 # ---------------------------------------------------------------------------
 # Search pagination + field-projection helpers (Issue 2)
@@ -630,22 +639,24 @@ def is_exchange_folder_id(identifier: str) -> bool:
     """
     Check if the identifier looks like an Exchange folder/item ID.
 
-    Exchange IDs are base64-encoded strings that typically start with 'AAMk'.
+    Exchange IDs are base64-encoded strings. The most common modern
+    prefixes are:
+
+    * ``AAMk`` — newer EwsLegacyId / EwsId format (most common)
+    * ``AQMk`` — also seen on real mailboxes (Issue #112)
+    * ``AAE``  — older legacy hex-prefix variant
+
     Base64 can contain '/' characters, so we need to detect IDs before
     attempting to parse as folder paths.
-
-    Args:
-        identifier: The folder identifier string
-
-    Returns:
-        True if it looks like an Exchange ID, False otherwise
     """
-    # Exchange folder/item IDs start with 'AAMk' (base64 encoded)
-    # They are typically 100+ characters long
-    if identifier.startswith('AAMk') and len(identifier) > 50:
+    if not identifier or not isinstance(identifier, str):
+        return False
+    # Newer EwsId formats (Issue #112: AQMk seen on production mailboxes
+    # alongside AAMk; both must be recognised).
+    if len(identifier) > 50 and identifier[:4] in ("AAMk", "AQMk"):
         return True
-    # Also check for other common Exchange ID patterns
-    if identifier.startswith('AAE') and len(identifier) > 50:
+    # Legacy hex-prefix variant.
+    if identifier.startswith("AAE") and len(identifier) > 50:
         return True
     return False
 
@@ -803,7 +814,7 @@ class SendEmailTool(BaseTool):
                     },
                     "body": {
                         "type": "string",
-                        "description": "Email body (HTML supported)"
+                        "description": "Email body. Format determined by body_format (default: html)."
                     },
                     "cc": {
                         "type": "array",
@@ -826,6 +837,7 @@ class SendEmailTool(BaseTool):
                         "description": "Attachment file paths (optional)"
                     },
                     **INLINE_ATTACHMENTS_SCHEMA,
+                    **BODY_FORMAT_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to send on behalf of (requires impersonation/delegate access)"
@@ -849,6 +861,14 @@ class SendEmailTool(BaseTool):
         # Get target mailbox for impersonation
         target_mailbox = kwargs.pop("target_mailbox", None)
         dry_run = bool(kwargs.pop("dry_run", False))
+        body_format = kwargs.pop("body_format", "html")
+
+        # v4.0: convert LLM-supplied body to HTML if it came in as markdown/text.
+        # Backward-compatible: body_format="html" (default) is a no-op.
+        if "body" in kwargs and body_format != "html":
+            from ..body_format import compose_body
+            converted_html, _actual_fmt = compose_body(kwargs["body"], body_format)
+            kwargs["body"] = converted_html
 
         # Validate input
         request = self.validate_input(SendEmailRequest, **kwargs)
@@ -1031,7 +1051,8 @@ class ReadEmailsTool(BaseTool):
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to read from (requires impersonation/delegate access)"
-                    }
+                    },
+                    **READ_FORMAT_SCHEMA,
                 }
             }
         }
@@ -1042,6 +1063,10 @@ class ReadEmailsTool(BaseTool):
         max_results = kwargs.get("max_results", 50)
         unread_only = kwargs.get("unread_only", False)
         target_mailbox = kwargs.get("target_mailbox")
+        # v4.0: format/include_body affect the per-item shape. Backward
+        # compatible — defaults match v3.4 (preview only, no full body).
+        fmt = kwargs.get("format", "html")
+        include_body = bool(kwargs.get("include_body", True))
 
         try:
             # Get account (primary or impersonated)
@@ -1175,6 +1200,15 @@ class SearchEmailsTool(BaseTool):
                         "type": "boolean",
                         "description": "Filter by read status"
                     },
+                    "is_flagged": {
+                        "type": "boolean",
+                        "description": (
+                            "Filter by Outlook follow-up flag. true returns only "
+                            "messages currently flagged for follow-up; false returns "
+                            "only unflagged messages. Maps to the EWS "
+                            "PR_FLAG_STATUS extended property (Issue #115)."
+                        )
+                    },
                     "start_date": {
                         "type": "string",
                         "description": "Start date (ISO 8601 format)"
@@ -1253,7 +1287,7 @@ class SearchEmailsTool(BaseTool):
         # Quick + advanced shared
         "subject_contains", "from_address", "to_address", "sender",
         "recipient", "body_contains", "query",
-        "has_attachments", "is_read", "importance",
+        "has_attachments", "is_read", "is_flagged", "importance",
         "categories", "keywords",
         "start_date", "end_date",
         # Advanced-only
@@ -1374,6 +1408,19 @@ class SearchEmailsTool(BaseTool):
                 query = query.filter(has_attachments=kwargs["has_attachments"])
             if kwargs.get("is_read") is not None:
                 query = query.filter(is_read=kwargs["is_read"])
+            if kwargs.get("is_flagged") is not None:
+                # Issue #115: filter on the PR_FLAG_STATUS extended property.
+                # The ``flag_status_value`` field is registered on Message at
+                # module import (see top of this file). EWS stores the flag
+                # as an integer (None=unflagged, 1=complete, 2=flagged).
+                # Map the boolean accordingly.
+                if kwargs["is_flagged"]:
+                    query = query.filter(flag_status_value=2)
+                else:
+                    # Unflagged includes both None and 1 (Complete). EWS
+                    # filter syntax can't OR null-or-1 cleanly without a Q,
+                    # so we exclude the flagged value instead.
+                    query = query.exclude(flag_status_value=2)
             if kwargs.get("importance"):
                 query = query.filter(importance=kwargs["importance"])
             if kwargs.get("start_date"):
@@ -1511,6 +1558,12 @@ class SearchEmailsTool(BaseTool):
                 q_filters.append(Q(categories__contains=kwargs["categories"]))
             if "is_read" in kwargs and kwargs["is_read"] is not None:
                 q_filters.append(Q(is_read=kwargs["is_read"]))
+            if "is_flagged" in kwargs and kwargs["is_flagged"] is not None:
+                # Issue #115 — flag_status_value=2 means flagged for follow-up.
+                if kwargs["is_flagged"]:
+                    q_filters.append(Q(flag_status_value=2))
+                else:
+                    q_filters.append(~Q(flag_status_value=2))
             if kwargs.get("start_date"):
                 start_date = parse_datetime_tz_aware(kwargs["start_date"])
                 if start_date:
@@ -1887,6 +1940,7 @@ class GetEmailDetailsTool(BaseTool):
                             "compatibility."
                         ),
                     },
+                    **READ_FORMAT_SCHEMA,
                 },
                 "required": ["message_id"]
             }
@@ -1897,6 +1951,9 @@ class GetEmailDetailsTool(BaseTool):
         message_id = kwargs.get("message_id")
         target_mailbox = kwargs.get("target_mailbox")
         fields = kwargs.get("fields")  # None -> backward-compat full shape
+        fmt = kwargs.get("format", "html")
+        do_trim_quoted = bool(kwargs.get("trim_quoted", False))
+        include_body = bool(kwargs.get("include_body", True))
 
         # Validate up front. Previously a missing or empty message_id fell
         # through to ``find_message_for_account(account, None)`` which
@@ -1933,14 +1990,58 @@ class GetEmailDetailsTool(BaseTool):
             attachments = safe_get(item, "attachments", []) or []
             attachment_names = [att.name for att in attachments if att and hasattr(att, "name") and att.name]
 
+            text_body_raw = safe_get(item, "text_body", "") or ""
+            html_body_raw = str(safe_get(item, "body", "") or "")
+
+            # v4.0: bidirectional body format. Default fmt='html' keeps
+            # exact v3.4 shape (body=text_body, body_html=html_body) for
+            # backward compat. fmt='markdown' converts on-the-fly via the
+            # SQLite-cached renderer; fmt='text' returns text_body only.
+            mid_str = ews_id_to_str(safe_get(item, "id", None)) or "unknown"
+            cache = getattr(self.ews_client, "sqlite_cache", None)
+            body_value = text_body_raw
+            body_format_used = "html"
+            if include_body:
+                if fmt == "html":
+                    body_value = html_body_raw
+                    body_format_used = "html"
+                elif fmt == "text":
+                    body_value = text_body_raw
+                    body_format_used = "text"
+                elif fmt == "markdown":
+                    cached = cache.get_body(mid_str, "markdown") if cache else None
+                    if cached is not None:
+                        body_value = cached
+                        body_format_used = "markdown"
+                    else:
+                        rendered, actual = render_body(
+                            html_body_raw, text_body_raw, "markdown"
+                        )
+                        body_value = rendered
+                        body_format_used = actual
+                        if cache and actual == "markdown":
+                            cache.put_body(mid_str, "markdown", rendered)
+                if do_trim_quoted and body_format_used in ("markdown", "text"):
+                    body_value = _trim_quoted_body(body_value)
+
+            # v4.0 — body_html is sent ONLY when fmt=='html' AND include_body.
+            # Shipping it on every call defeats the 12x token-saving promise:
+            # a caller asking for format=markdown got both the markdown body
+            # and the full HTML in the same response. Now markdown callers
+            # get just the markdown; html callers get the html in `body`
+            # (we still keep body_html as an explicit alias on html mode for
+            # any v3.4 caller that read body_html directly rather than body).
+            ship_body_html = include_body and body_format_used == "html"
+
             email_details = {
-                "message_id": ews_id_to_str(safe_get(item, "id", None)) or "unknown",
+                "message_id": mid_str,
                 "subject": safe_get(item, "subject", "") or "",
                 "from": from_email,
                 "to": to_emails,
                 "cc": cc_emails,
-                "body": safe_get(item, "text_body", "") or "",
-                "body_html": str(safe_get(item, "body", "") or ""),
+                "body": body_value if include_body else "",
+                "body_format": body_format_used if include_body else "omitted",
+                "body_html": html_body_raw if ship_body_html else "",
                 "received_time": safe_get(item, "datetime_received", datetime.now()).isoformat(),
                 "sent_time": safe_get(item, "datetime_sent", datetime.now()).isoformat(),
                 "is_read": safe_get(item, "is_read", False),
@@ -2317,10 +2418,22 @@ class MoveEmailTool(BaseTool):
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
-            # Folder ID takes precedence over folder name/path when both are provided.
-            destination_identifier = destination_folder_id or destination_folder
-            dest_folder = await resolve_folder_for_account(account, destination_identifier)
-            dest_name = safe_get(dest_folder, "name", destination_identifier)
+            # Issue #112: when ``destination_folder_id`` is supplied, resolve
+            # by ID directly rather than running through the generic resolver.
+            # The generic resolver does path / name / prefix heuristics that
+            # waste round-trips and can mis-route on folders whose display
+            # names happen to look like an Exchange ID. Explicit ID inputs
+            # should be a single ID lookup.
+            if destination_folder_id:
+                dest_folder = find_folder_by_id(account.root, destination_folder_id)
+                if dest_folder is None:
+                    raise ToolExecutionError(
+                        f"destination_folder_id not found: {destination_folder_id}"
+                    )
+                dest_name = safe_get(dest_folder, "name", destination_folder_id)
+            else:
+                dest_folder = await resolve_folder_for_account(account, destination_folder)
+                dest_name = safe_get(dest_folder, "name", destination_folder)
 
             # Find message across all folders (including custom subfolders)
             item = find_message_for_account(account, message_id)
@@ -2501,9 +2614,18 @@ class CopyEmailTool(BaseTool):
             message = find_message_for_account(account, message_id)
             source_folder_name = safe_get(safe_get(message, "folder", None), "name", "unknown")
 
-            destination_identifier = destination_folder_id or destination_folder_name
-            destination_folder = await resolve_folder_for_account(account, destination_identifier)
-            dest_name = safe_get(destination_folder, 'name', destination_identifier)
+            # Issue #112: explicit destination_folder_id resolves directly,
+            # skipping the generic name/path resolver.
+            if destination_folder_id:
+                destination_folder = find_folder_by_id(account.root, destination_folder_id)
+                if destination_folder is None:
+                    raise ToolExecutionError(
+                        f"destination_folder_id not found: {destination_folder_id}"
+                    )
+                dest_name = safe_get(destination_folder, "name", destination_folder_id)
+            else:
+                destination_folder = await resolve_folder_for_account(account, destination_folder_name)
+                dest_name = safe_get(destination_folder, "name", destination_folder_name)
 
             # Copy the message (exchangelib uses .copy() method)
             copied_message = message.copy(to_folder=destination_folder)
@@ -2512,10 +2634,19 @@ class CopyEmailTool(BaseTool):
 
             self.logger.info(f"Copied email '{subject}' from {source_folder_name} to {dest_name} in mailbox: {mailbox}")
 
+            # exchangelib returns either a Message-like object (with .id) or
+            # the bare ItemId after a copy. Handle both — earlier versions
+            # always emitted "" because the bare ItemId path returned empty.
+            if copied_message is None:
+                copied_id_str = ""
+            else:
+                inner = safe_get(copied_message, "id", None)
+                copied_id_str = ews_id_to_str(inner) or ews_id_to_str(copied_message) or ""
+
             return format_success_response(
                 f"Email copied from {source_folder_name} to {dest_name}",
                 message_id=message_id,
-                copied_message_id=ews_id_to_str(safe_get(copied_message, 'id', None)) or '' if copied_message else '',
+                copied_message_id=copied_id_str,
                 subject=subject,
                 source_folder=source_folder_name,
                 destination_folder=dest_name,
@@ -2545,7 +2676,7 @@ class ReplyEmailTool(BaseTool):
                     },
                     "body": {
                         "type": "string",
-                        "description": "The reply body (HTML supported)"
+                        "description": "The reply body. Format determined by body_format (default: html)."
                     },
                     "reply_all": {
                         "type": "boolean",
@@ -2558,6 +2689,7 @@ class ReplyEmailTool(BaseTool):
                         "description": "File paths to attach to the reply (optional)"
                     },
                     **INLINE_ATTACHMENTS_SCHEMA,
+                    **BODY_FORMAT_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to reply from (requires impersonation/delegate access)"
@@ -2571,6 +2703,7 @@ class ReplyEmailTool(BaseTool):
         """Reply to an email via EWS."""
         message_id = kwargs.get("message_id")
         body = kwargs.get("body", "").strip()
+        body_format = kwargs.get("body_format", "html")
         reply_all = kwargs.get("reply_all", False)
         attachments = kwargs.get("attachments", [])
         target_mailbox = kwargs.get("target_mailbox")
@@ -2579,6 +2712,12 @@ class ReplyEmailTool(BaseTool):
             raise ToolExecutionError("message_id is required")
         if not body:
             raise ToolExecutionError("body is required")
+
+        # v4.0: convert markdown/text body to HTML before the existing reply
+        # pipeline runs. The signature-preservation path (copy_attachments_to_message
+        # below) is unaffected — we only change what goes into format_body_for_html().
+        if body_format != "html":
+            body, _actual_fmt = compose_body(body, body_format)
 
         try:
             # Get account (primary or impersonated)
@@ -2623,10 +2762,34 @@ class ReplyEmailTool(BaseTool):
                 self.logger.info(f"Reply to {original_from_email}")
 
             # Build the complete reply body manually
-            # 1. User's message at top, rendered safely (plain text -> escaped +
-            #    <br/>, existing HTML -> lightly sanitised against script/style/
-            #    javascript: payloads). See utils.format_body_for_html.
-            user_message_html = format_body_for_html(body)
+            # 1. User's message at top.
+            #    v4.0: when body_format=='markdown' the body has already been
+            #    converted to trusted HTML by compose_body() upstream (which
+            #    can produce block-level elements <h1>/<ul>/etc). Wrapping
+            #    that inside <p class="MsoNormal">...</p> like the v3.4
+            #    plain-text path produces invalid HTML and Outlook drops the
+            #    MsoNormal styling on promoted blocks. So for markdown/text
+            #    we emit the converted HTML directly under WordSection1
+            #    (which still contains it for Exclaimer's signature-anchor
+            #    needs); for the legacy html path we keep the v3.4 wrap.
+            #
+            #    Also: for markdown/text we skip the second `format_body_for_html
+            #    -> sanitize_html` pass because compose_body's output is
+            #    already trusted markup and the regex-based sanitiser can
+            #    mangle code fences and shell snippets the LLM legitimately
+            #    produced (adversarial review #9).
+            if body_format != "html":
+                user_message_html = body  # already HTML from compose_body, trusted
+                user_block = (
+                    f'<div style="font-size:11pt;font-family:Calibri,sans-serif;">'
+                    f'{user_message_html}</div>'
+                )
+            else:
+                user_message_html = format_body_for_html(body)
+                user_block = (
+                    f'<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">'
+                    f'{user_message_html}</p>'
+                )
 
             # 2. Format the reply headers from original email metadata. These
             #    fields originate in an inbound email (attacker-controlled) and
@@ -2652,7 +2815,7 @@ class ReplyEmailTool(BaseTool):
             # - Headers inline in separator div
             # - original body (with OriginalSection class to avoid Exclaimer confusion)
             complete_body = f'''<div class="WordSection1">
-<p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;">{user_message_html}</p>
+{user_block}
 </div>
 <div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
 <p class="MsoNormal" style="font-size:11pt;font-family:Calibri,sans-serif;"><b>From:</b> {safe_from}<br/>
@@ -2787,6 +2950,7 @@ class ForwardEmailTool(BaseTool):
                         "description": "Additional file paths to attach (optional)"
                     },
                     **INLINE_ATTACHMENTS_SCHEMA,
+                    **BODY_FORMAT_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to forward from (requires impersonation/delegate access)"
@@ -2801,6 +2965,7 @@ class ForwardEmailTool(BaseTool):
         message_id = kwargs.get("message_id")
         to_recipients = kwargs.get("to", [])
         body = kwargs.get("body", "").strip() if kwargs.get("body") else ""
+        body_format = kwargs.get("body_format", "html")
         cc_recipients = kwargs.get("cc", [])
         bcc_recipients = kwargs.get("bcc", [])
         additional_attachments = kwargs.get("attachments", [])
@@ -2810,6 +2975,12 @@ class ForwardEmailTool(BaseTool):
             raise ToolExecutionError("message_id is required")
         if not to_recipients:
             raise ToolExecutionError("to recipients are required")
+
+        # v4.0: convert markdown/text body to HTML before the existing forward
+        # pipeline runs. Signature/inline-attachment preservation downstream
+        # is unaffected — only the prelude body gets converted.
+        if body and body_format != "html":
+            body, _actual_fmt = compose_body(body, body_format)
 
         try:
             # Get account (primary or impersonated)

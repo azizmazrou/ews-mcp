@@ -684,7 +684,13 @@ class ReadAttachmentTool(BaseTool):
     def get_schema(self) -> Dict[str, Any]:
         return {
             "name": "read_attachment",
-            "description": "Extract text content from attachments (PDF, DOCX, XLSX, TXT).",
+            "description": (
+                "Extract text content from attachments. "
+                "Supported: PDF, DOCX, XLSX, PPTX (incl. speaker notes), "
+                "MSG (Outlook compound-file — full thread envelope + body + "
+                "nested attachment listing), EML (RFC-822), HTML (RTL-safe), "
+                "CSV, TXT, LOG, JSON, XML, MD."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -765,11 +771,36 @@ class ReadAttachmentTool(BaseTool):
                 extracted_text = self._read_docx(content, extract_tables)
             elif file_ext in ['xlsx', 'xls']:
                 extracted_text = self._read_excel(content)
-            elif file_ext == 'txt':
-                extracted_text = content.decode('utf-8', errors='replace')
+            elif file_ext == 'pptx':
+                # v4.0 — PowerPoint slide-by-slide text extraction.
+                extracted_text = self._read_pptx(content)
+            elif file_ext == 'msg':
+                # v4.0 — Outlook .msg compound-file (CFB) parser. Reads
+                # an entire forwarded email thread as a single attachment
+                # and returns the from / to / cc / subject envelope plus
+                # the body and a recursive listing of nested attachments.
+                extracted_text = self._read_msg(content)
+            elif file_ext in ('eml',):
+                # Bonus: RFC-822 .eml — same shape as .msg, different
+                # container. Many users export forwarded threads as .eml
+                # rather than .msg, especially from non-Outlook clients.
+                extracted_text = self._read_eml(content)
+            elif file_ext in ('html', 'htm'):
+                # v4.0 — HTML attachments (incl. RTL Arabic) routed through
+                # the same markdownify pipeline used for email body
+                # conversion, so the LLM gets clean GFM markdown instead
+                # of raw MSO-style HTML.
+                extracted_text = self._read_html(content)
+            elif file_ext == 'csv':
+                # v4.0 — light CSV reading (utf-8 / utf-16 BOM-aware), no
+                # external dependency. Returns the file as-is, decoded.
+                extracted_text = self._read_text_decoded(content)
+            elif file_ext in ('txt', 'log', 'json', 'xml', 'md'):
+                extracted_text = self._read_text_decoded(content)
             else:
                 raise ToolExecutionError(
-                    f"Unsupported file type: {file_ext}. Supported: PDF, DOCX, XLSX, TXT"
+                    f"Unsupported file type: {file_ext}. Supported: "
+                    f"PDF, DOCX, XLSX, PPTX, MSG, EML, HTML, CSV, TXT, LOG, JSON, XML, MD."
                 )
 
             self.logger.info(
@@ -907,6 +938,236 @@ class ReadAttachmentTool(BaseTool):
 
         except Exception as e:
             raise ToolExecutionError(f"Failed to read Excel: {str(e)}")
+
+    def _read_pptx(self, content: bytes) -> str:
+        """Extract slide-by-slide text from a PowerPoint .pptx file.
+
+        v4.0 — closes the gap where the MCP only handled PDF/DOCX/XLSX/TXT.
+        Uses ``python-pptx`` (already in requirements). Each slide is
+        emitted with a header so the LLM can reason about position.
+        """
+        try:
+            from pptx import Presentation
+        except ImportError:
+            raise ToolExecutionError(
+                "python-pptx not installed. Run: pip install python-pptx>=0.6.21"
+            )
+        try:
+            buf = io.BytesIO(content)
+            prs = Presentation(buf)
+            parts = []
+            for i, slide in enumerate(prs.slides, 1):
+                parts.append(f"--- Slide {i} ---")
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            t = "".join(run.text for run in para.runs).strip()
+                            if t:
+                                parts.append(t)
+                    # Tables embedded in slides
+                    if getattr(shape, "has_table", False) and shape.has_table:
+                        for row in shape.table.rows:
+                            row_text = " | ".join(
+                                (cell.text or "").strip() for cell in row.cells
+                            )
+                            if row_text.strip():
+                                parts.append(row_text)
+                # Speaker notes if present
+                notes = getattr(slide, "notes_slide", None)
+                if notes and notes.notes_text_frame:
+                    nt = notes.notes_text_frame.text.strip()
+                    if nt:
+                        parts.append(f"[notes] {nt}")
+                parts.append("")
+            return "\n".join(parts).strip()
+        except Exception as e:
+            raise ToolExecutionError(f"Failed to read PPTX: {str(e)}")
+
+    def _read_html(self, content: bytes) -> str:
+        """Convert an HTML attachment to GFM markdown.
+
+        v4.0 — for HTML files attached to emails (status reports, exported
+        web pages, signed RFP excerpts in HTML). Routed through the same
+        markdownify pipeline used by ``get_email_details(format=markdown)``,
+        which strips Outlook MSO/Word junk and preserves Arabic / RTL
+        text correctly.
+        """
+        from ..body_format import render_body
+        text = self._read_text_decoded(content)
+        md, _actual = render_body(html=text, plain="", fmt="markdown")
+        return md
+
+    @staticmethod
+    def _read_text_decoded(content: bytes) -> str:
+        """Decode a bytes payload as text — BOM-aware (UTF-8 / UTF-16),
+        fall back to UTF-8 with replacement on unknown bytes.
+
+        Used by .txt / .csv / .log / .json / .xml / .md / the inner step of .html.
+        """
+        if not content:
+            return ""
+        # UTF-16 LE / BE BOM
+        if content[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            try:
+                return content.decode("utf-16")
+            except UnicodeDecodeError:
+                pass
+        # UTF-8 BOM
+        if content.startswith(b"\xef\xbb\xbf"):
+            return content[3:].decode("utf-8", errors="replace")
+        return content.decode("utf-8", errors="replace")
+
+    def _read_msg(self, content: bytes) -> str:
+        """Extract envelope + body + nested-attachment listing from an
+        Outlook ``.msg`` compound-file (CFB) attachment.
+
+        v4.0 — Real users get full forwarded email threads as ``.msg``
+        attachments. Without this branch the only thing the agent sees is
+        a base64 blob it can't reason about. We use ``extract_msg``
+        (pure-Python, MIT) to parse the envelope and unwind nested
+        attachments, then return a readable text rendering plus a
+        markdown-converted body if HTML is present.
+        """
+        try:
+            import extract_msg
+        except ImportError:
+            raise ToolExecutionError(
+                "extract-msg not installed. Run: pip install extract-msg>=0.50.0"
+            )
+
+        # extract_msg can read directly from a path or BytesIO. Use a
+        # tempfile to avoid loading-into-memory edge cases on huge MSGs.
+        import tempfile
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".msg", delete=False) as tf:
+                tf.write(content)
+                tmp_path = tf.name
+            try:
+                msg = extract_msg.openMsg(tmp_path)
+            finally:
+                # The Message object holds the file open; we'll close +
+                # cleanup the temp file at the end of the with block below.
+                pass
+
+            parts: List[str] = []
+            parts.append(f"Subject: {(msg.subject or '').strip()}")
+            parts.append(f"From: {(msg.sender or '').strip()}")
+            if getattr(msg, "to", None):
+                parts.append(f"To: {msg.to}")
+            if getattr(msg, "cc", None):
+                parts.append(f"Cc: {msg.cc}")
+            if getattr(msg, "bcc", None):
+                parts.append(f"Bcc: {msg.bcc}")
+            sent_date = getattr(msg, "date", None) or getattr(msg, "delivered_at", None)
+            if sent_date:
+                parts.append(f"Date: {sent_date}")
+            parts.append("")  # blank line separator
+
+            # Body — prefer HTML (convert to markdown via the same pipeline
+            # used elsewhere in v4) then text body, then RTF as last resort.
+            html_body = getattr(msg, "htmlBody", None) or getattr(msg, "bodyHTML", None)
+            text_body = getattr(msg, "body", None) or ""
+            rtf_body = getattr(msg, "rtfBody", None)
+
+            if html_body:
+                if isinstance(html_body, bytes):
+                    html_body = html_body.decode("utf-8", errors="replace")
+                from ..body_format import render_body
+                md, _ = render_body(html=html_body, plain=text_body or "", fmt="markdown")
+                parts.append(md.strip())
+            elif text_body:
+                parts.append(text_body.strip() if isinstance(text_body, str)
+                             else text_body.decode("utf-8", errors="replace").strip())
+            elif rtf_body:
+                # RTF rendering is heavy; just note its presence.
+                parts.append("[RTF body present — text/HTML body absent. "
+                             "Use a separate RTF→text path if needed.]")
+
+            # Nested attachment summary (don't recurse into nested .msg
+            # to keep the response bounded; just list them).
+            atts = list(getattr(msg, "attachments", []) or [])
+            if atts:
+                parts.append("")
+                parts.append(f"--- Nested attachments ({len(atts)}) ---")
+                for i, att in enumerate(atts, 1):
+                    name = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None) or f"attachment_{i}"
+                    size = len(getattr(att, "data", b"") or b"")
+                    parts.append(f"  {i}. {name}  ({size} bytes)")
+
+            return "\n".join(parts).strip()
+        except ToolExecutionError:
+            raise
+        except Exception as e:
+            raise ToolExecutionError(f"Failed to read MSG: {str(e)}")
+        finally:
+            try:
+                import os as _os
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    def _read_eml(self, content: bytes) -> str:
+        """Parse an RFC-822 ``.eml`` attachment (stdlib only).
+
+        Variant of ``_read_msg`` for non-Outlook exports. Pulls envelope,
+        body (HTML→markdown if present), and lists nested parts.
+        """
+        from email import policy
+        from email.parser import BytesParser
+
+        try:
+            msg = BytesParser(policy=policy.default).parsebytes(content)
+        except Exception as e:
+            raise ToolExecutionError(f"Failed to parse EML: {str(e)}")
+
+        parts = [
+            f"Subject: {msg.get('Subject', '')}",
+            f"From: {msg.get('From', '')}",
+            f"To: {msg.get('To', '')}",
+        ]
+        if msg.get("Cc"):
+            parts.append(f"Cc: {msg.get('Cc')}")
+        if msg.get("Date"):
+            parts.append(f"Date: {msg.get('Date')}")
+        parts.append("")
+
+        # Walk parts: prefer HTML, fall back to text/plain.
+        html_body = ""
+        text_body = ""
+        attachments = []
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = part.get("Content-Disposition", "") or ""
+            if "attachment" in disp.lower():
+                fn = part.get_filename() or "(unnamed)"
+                payload = part.get_payload(decode=True) or b""
+                attachments.append((fn, len(payload)))
+                continue
+            if ctype == "text/html" and not html_body:
+                try:
+                    html_body = part.get_content()
+                except Exception:
+                    html_body = part.get_payload(decode=True).decode("utf-8", errors="replace")
+            elif ctype == "text/plain" and not text_body:
+                try:
+                    text_body = part.get_content()
+                except Exception:
+                    text_body = part.get_payload(decode=True).decode("utf-8", errors="replace")
+
+        if html_body:
+            from ..body_format import render_body
+            md, _ = render_body(html=html_body, plain=text_body, fmt="markdown")
+            parts.append(md.strip())
+        elif text_body:
+            parts.append(text_body.strip())
+
+        if attachments:
+            parts.append("")
+            parts.append(f"--- Nested attachments ({len(attachments)}) ---")
+            for i, (fn, size) in enumerate(attachments, 1):
+                parts.append(f"  {i}. {fn}  ({size} bytes)")
+
+        return "\n".join(parts).strip()
 
 
 class GetEmailMimeTool(BaseTool):

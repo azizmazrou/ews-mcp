@@ -53,28 +53,32 @@ from .tools import (
     ListFoldersTool, FindFolderTool, ManageFolderTool,
     # Out-of-Office tools (1) — get/set merged into oof_settings
     OofSettingsTool,
-    # AI tools (4 - conditionally enabled)
-    SemanticSearchEmailsTool, ClassifyEmailTool,
-    SummarizeEmailTool, SuggestRepliesTool,
+    # AI tools (1 in v4 - conditionally enabled). Removed:
+    # ClassifyEmailTool, SummarizeEmailTool, SuggestRepliesTool — pure LLM
+    # reasoning that the consuming agent does natively.
+    SemanticSearchEmailsTool,
     # Contact Intelligence tools (2) — communication_history/analyze_network merged into analyze_contacts
     FindPersonTool, AnalyzeContactsTool,
     # --- Agent-secretary tools ---
     # Memory (4)
     MemorySetTool, MemoryGetTool, MemoryListTool, MemoryDeleteTool,
-    # Commitments (4)
+    # Commitments (3 in v4 — manual CRUD only).
+    # Removed: ExtractCommitmentsTool (LLM extraction; skill calls
+    # track_commitment after detecting commitments in-prompt).
     TrackCommitmentTool, ListCommitmentsTool, ResolveCommitmentTool,
-    ExtractCommitmentsTool,
     # Approvals (5)
     SubmitForApprovalTool, ListPendingApprovalsTool, ApproveTool, RejectTool,
     ExecuteApprovedActionTool,
-    # Voice profile (2)
-    BuildVoiceProfileTool, GetVoiceProfileTool,
+    # Voice profile (1 in v4 — read/store only).
+    # Removed: BuildVoiceProfileTool (LLM tone analysis; skill persists
+    # voice cards via memory_set namespace="voice_profile").
+    GetVoiceProfileTool,
     # Rule engine (5)
     RuleCreateTool, RuleListTool, RuleDeleteTool, RuleSimulateTool,
     EvaluateRulesOnMessageTool,
     # OOF policy (3)
     ConfigureOOFPolicyTool, GetOOFPolicyTool, ApplyOOFPolicyTool,
-    # Compound tools (2)
+    # Compound tools (2) — return structured context, no LLM call
     GenerateBriefingTool, PrepareMeetingTool,
 )
 
@@ -459,7 +463,7 @@ class EWSMCPServer:
             module="main",
             action="SERVER_INIT",
             data={
-                "version": "3.4.0",
+                "version": "4.0.0",
                 "user": self.settings.ews_email,
                 "auth_type": self.settings.ews_auth_type,
                 "server_url": self.settings.ews_server_url or "autodiscover"
@@ -759,39 +763,36 @@ class EWSMCPServer:
             ai_tools = []
             if self.settings.enable_semantic_search:
                 ai_tools.append(SemanticSearchEmailsTool)
-            if self.settings.enable_email_classification:
-                ai_tools.append(ClassifyEmailTool)
-            if self.settings.enable_email_summarization:
-                ai_tools.append(SummarizeEmailTool)
-            if self.settings.enable_smart_replies:
-                ai_tools.append(SuggestRepliesTool)
-
+            # v4.0: classify_email / summarize_email / suggest_replies removed.
+            # Those tools just proxied an LLM call; the consuming skill/agent
+            # already runs an LLM and can classify/summarise/draft natively
+            # without an extra MCP round trip.
             tool_classes.extend(ai_tools)
-            self.logger.info(f"AI tools enabled ({len(ai_tools)} tools)")
+            self.logger.info(f"AI tools enabled ({len(ai_tools)} tool)")
 
-        # Agent-secretary tools (memory + commitments + approvals + rules +
-        # voice + OOF policy + briefing + meeting prep). Opt-in via
-        # ENABLE_AGENT (default True).
-        if getattr(self.settings, "enable_agent", True):
+        # Agent-secretary tools. Opt-in via ENABLE_AGENT (default True).
+        # v4.0 trim: removed ExtractCommitmentsTool (LLM extraction — skill
+        # detects + calls track_commitment) and BuildVoiceProfileTool (LLM
+        # tone analysis — skill analyses + persists via voice_profile_set).
+        if self.settings.enable_agent:
             tool_classes.extend([
                 # Memory primitives
                 MemorySetTool, MemoryGetTool, MemoryListTool, MemoryDeleteTool,
-                # Commitments
+                # Commitments — manual CRUD only in v4
                 TrackCommitmentTool, ListCommitmentsTool, ResolveCommitmentTool,
-                ExtractCommitmentsTool,
                 # Approvals
                 SubmitForApprovalTool, ListPendingApprovalsTool, ApproveTool, RejectTool,
-                # Voice profile
-                BuildVoiceProfileTool, GetVoiceProfileTool,
+                # Voice profile — read/store only in v4
+                GetVoiceProfileTool,
                 # Rule engine
                 RuleCreateTool, RuleListTool, RuleDeleteTool, RuleSimulateTool,
                 EvaluateRulesOnMessageTool,
                 # OOF policy
                 ConfigureOOFPolicyTool, GetOOFPolicyTool, ApplyOOFPolicyTool,
-                # Compound tools
+                # Compound tools — return structured context (no LLM call) in v4
                 GenerateBriefingTool, PrepareMeetingTool,
             ])
-            self.logger.info("Agent-secretary tools enabled (24 tools)")
+            self.logger.info("Agent-secretary tools enabled (v4: 21 tools, slimmed)")
 
         # Instantiate and register tools
         for tool_class in tool_classes:
@@ -802,7 +803,7 @@ class EWSMCPServer:
         # ExecuteApprovedActionTool needs the tool registry, so wire it after
         # every other tool is in place. This is why it isn't in the block
         # above.
-        if getattr(self.settings, "enable_agent", True):
+        if self.settings.enable_agent:
             executor = ExecuteApprovedActionTool(self.ews_client, self.tools)
             executor_schema = executor.get_schema()
             self.tools[executor_schema["name"]] = executor

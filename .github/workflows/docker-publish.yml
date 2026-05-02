@@ -1,5 +1,15 @@
 name: Build and Publish Docker Image
 
+# Publishes ews-mcp container images to GHCR so users can simply
+#   docker pull ghcr.io/<owner>/<repo>:latest
+# without cloning + building locally.
+#
+# Triggers:
+#   * push to main      -> tags `latest` + branch + sha
+#   * tag v*.*.*        -> tags semver (major / major.minor / full)
+#   * pull_request      -> build only (no push); validates the Dockerfile
+#   * workflow_dispatch -> manual rebuild
+
 on:
   push:
     branches:
@@ -52,11 +62,14 @@ jobs:
             type=semver,pattern={{major}}
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=ews-mcp
+            org.opencontainers.image.description=MCP server for Microsoft Exchange / Office 365
+            org.opencontainers.image.licenses=MIT
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        continue-on-error: true
         id: docker-build
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
@@ -69,9 +82,12 @@ jobs:
       - name: Build status
         run: |
           if [ "${{ steps.docker-build.outcome }}" == "success" ]; then
-            echo "✅ Docker image built and pushed successfully to GHCR"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "::notice::Docker image built (PR — not pushed to GHCR)."
+            else
+              echo "::notice::Docker image built and pushed to GHCR. Pull with: docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            fi
           else
-            echo "⚠️ Docker image built successfully but push to GHCR failed (permission issue)"
-            echo "To fix: Enable 'Read and write permissions' in repository Settings → Actions → General"
-            echo "Or manually push: docker login ghcr.io && docker build --push -t ghcr.io/azizmazrou/ews-mcp:latest ."
+            echo "::error::Docker build/push failed. If push failed for permissions, enable 'Read and write permissions' in Settings → Actions → General, or push manually with: docker login ghcr.io && docker build --push -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest ."
+            exit 1
           fi

@@ -47,6 +47,11 @@ class CreateTaskTool(BaseTool):
                         "type": "string",
                         "description": "Reminder time (ISO 8601 format, optional)"
                     },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Outlook categories to attach to the task (Issue #114)."
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
@@ -61,6 +66,7 @@ class CreateTaskTool(BaseTool):
         # Validate input first (Pydantic expects datetime types)
         request = self.validate_input(CreateTaskRequest, **kwargs)
         target_mailbox = kwargs.get("target_mailbox")
+        categories = kwargs.get("categories")
 
         try:
             account = self.get_account(target_mailbox)
@@ -90,6 +96,10 @@ class CreateTaskTool(BaseTool):
             if request.reminder_time:
                 task.reminder_is_set = True
                 task.reminder_due_by = parse_datetime_tz_aware(request.reminder_time.isoformat())
+
+            # Issue #114 — Outlook categories on the task.
+            if categories:
+                task.categories = list(categories)
 
             # Save task
             task.save()
@@ -259,6 +269,11 @@ class UpdateTaskTool(BaseTool):
                         "enum": ["Low", "Normal", "High"],
                         "description": "New importance (optional)"
                     },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Replace task categories with this list (Issue #114). Empty list clears."
+                    },
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to operate on (requires impersonation/delegate access)"
@@ -286,6 +301,10 @@ class UpdateTaskTool(BaseTool):
 
             if "body" in kwargs:
                 task.body = kwargs["body"]
+
+            # Issue #114
+            if "categories" in kwargs:
+                task.categories = list(kwargs["categories"] or [])
 
             if "due_date" in kwargs:
                 # Convert string to EWSDate for date-only field

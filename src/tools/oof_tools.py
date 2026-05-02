@@ -1,7 +1,7 @@
 """Out-of-Office (OOF) tools for EWS MCP Server."""
 
 from typing import Any, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from exchangelib import OofSettings
 
@@ -135,13 +135,33 @@ class OofSettingsTool(BaseTool):
             raise ToolExecutionError(f"Failed to get OOF settings: {e}")
 
     async def _set_settings(self, **kwargs) -> Dict[str, Any]:
-        """Configure OOF settings."""
+        """Configure OOF settings.
+
+        Issue #121 — three real problems on the previous implementation:
+
+        1. ``state="Scheduled"`` failed against some Exchange backends with
+           ``InvalidScheduledOofDuration`` because ``start``/``end`` were
+           sent in the caller's local timezone. Normalise to UTC before
+           assignment so EWS sees a SOAP-compliant duration.
+        2. Toggling state to Disabled/Enabled without re-supplying the
+           reply texts overwrote the existing OOF replies with the default
+           "I am currently out of the office." string. Now: when the
+           caller omits ``internal_reply`` / ``external_reply`` we read the
+           current OofSettings and preserve them instead.
+        3. ``currently_active`` was returned by the get path but never by
+           the set path, so callers couldn't tell whether a Scheduled
+           window had already started without a separate get call.
+        """
         state = kwargs.get("state")
-        internal_reply = kwargs.get("internal_reply", "I am currently out of the office.")
-        external_reply = kwargs.get("external_reply", "I am currently out of the office.")
+        # Sentinel default: distinguish "caller omitted" from "caller passed
+        # an empty string" so we can preserve the existing reply text only
+        # in the omitted case.
+        _OMIT = object()
+        internal_reply_in = kwargs.get("internal_reply", _OMIT)
+        external_reply_in = kwargs.get("external_reply", _OMIT)
+        external_audience_in = kwargs.get("external_audience", _OMIT)
         start_time_str = kwargs.get("start_time")
         end_time_str = kwargs.get("end_time")
-        external_audience = kwargs.get("external_audience", "Known")
         target_mailbox = kwargs.get("target_mailbox")
 
         if not state:
@@ -154,19 +174,47 @@ class OofSettingsTool(BaseTool):
             account = self.get_account(target_mailbox)
             mailbox = self.get_mailbox_info(target_mailbox)
 
+            # Read existing settings up front so we can preserve any field
+            # the caller omitted (#121).
+            existing = account.oof_settings
+            existing_internal = (
+                getattr(existing, "internal_reply", None) or ""
+            )
+            existing_external = (
+                getattr(existing, "external_reply", None) or ""
+            )
+            existing_audience = (
+                getattr(existing, "external_audience", None) or "Known"
+            )
+
+            internal_reply = (
+                existing_internal if internal_reply_in is _OMIT else internal_reply_in
+            )
+            external_reply = (
+                existing_external if external_reply_in is _OMIT else external_reply_in
+            )
+            external_audience = (
+                existing_audience if external_audience_in is _OMIT else external_audience_in
+            )
+
             start_time = parse_datetime_tz_aware(start_time_str) if start_time_str else None
             end_time = parse_datetime_tz_aware(end_time_str) if end_time_str else None
 
             if start_time and end_time and end_time <= start_time:
                 raise ToolExecutionError("end_time must be after start_time")
 
+            # #121 — normalise to UTC so EWS gets an unambiguous SOAP
+            # duration. parse_datetime_tz_aware already attaches a tz; here
+            # we convert to UTC explicitly. PBS Exchange in particular
+            # rejects local-tz Scheduled windows with InvalidScheduledOofDuration.
+            if start_time is not None and start_time.tzinfo is not None:
+                start_time = start_time.astimezone(timezone.utc)
+            if end_time is not None and end_time.tzinfo is not None:
+                end_time = end_time.astimezone(timezone.utc)
+
             oof = OofSettings()
             oof.state = state
             oof.external_audience = external_audience
-
-            # OofSettings.internal_reply / external_reply are MessageField(value_cls=str) in
-            # exchangelib >= 5.x — assign plain strings. The legacy OofReply wrapper class was
-            # removed; importing it raises ImportError on every set call.
             if internal_reply:
                 oof.internal_reply = internal_reply
             if external_reply:
@@ -177,11 +225,23 @@ class OofSettingsTool(BaseTool):
 
             account.oof_settings = oof
 
+            # #121 — compute currently_active for parity with get path.
+            now = datetime.now(timezone.utc)
+            if state == "Enabled":
+                currently_active = True
+            elif state == "Disabled":
+                currently_active = False
+            elif state == "Scheduled" and start_time and end_time:
+                currently_active = start_time <= now <= end_time
+            else:
+                currently_active = False
+
             response_data = {
                 "state": state,
                 "internal_reply": internal_reply,
                 "external_reply": external_reply,
-                "external_audience": external_audience
+                "external_audience": external_audience,
+                "currently_active": currently_active,
             }
             if start_time:
                 response_data["start_time"] = format_datetime(start_time)

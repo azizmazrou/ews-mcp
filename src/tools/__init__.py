@@ -9,7 +9,7 @@ from .attachment_tools import ListAttachmentsTool, DownloadAttachmentTool, AddAt
 from .search_tools import SearchByConversationTool
 from .folder_tools import ListFoldersTool, FindFolderTool, ManageFolderTool
 from .oof_tools import OofSettingsTool
-from .ai_tools import SemanticSearchEmailsTool, ClassifyEmailTool, SummarizeEmailTool, SuggestRepliesTool
+from .ai_tools import SemanticSearchEmailsTool
 from .contact_intelligence_tools import FindPersonTool, AnalyzeContactsTool
 
 # Agent-secretary tools (memory, commitments, approvals, rules, voice, OOF
@@ -19,7 +19,6 @@ from .commitment_tools import (
     TrackCommitmentTool,
     ListCommitmentsTool,
     ResolveCommitmentTool,
-    ExtractCommitmentsTool,
 )
 from .approval_tools import (
     SubmitForApprovalTool,
@@ -28,7 +27,7 @@ from .approval_tools import (
     RejectTool,
     ExecuteApprovedActionTool,
 )
-from .voice_tools import BuildVoiceProfileTool, GetVoiceProfileTool
+from .voice_tools import GetVoiceProfileTool
 from .rule_tools import (
     RuleCreateTool,
     RuleListTool,
@@ -94,11 +93,9 @@ __all__ = [
     "ManageFolderTool",
     # Out-of-Office tools (1)
     "OofSettingsTool",
-    # AI tools (4)
+    # AI tools (1 in v4 — semantic only; classification/summarisation/
+    # reply-suggest moved to skill side)
     "SemanticSearchEmailsTool",
-    "ClassifyEmailTool",
-    "SummarizeEmailTool",
-    "SuggestRepliesTool",
     # Contact Intelligence tools (2)
     "FindPersonTool",
     "AnalyzeContactsTool",
@@ -108,19 +105,17 @@ __all__ = [
     "MemoryGetTool",
     "MemoryListTool",
     "MemoryDeleteTool",
-    # Commitments (4)
+    # Commitments (3 in v4 — manual CRUD only; auto-extraction moved to skill)
     "TrackCommitmentTool",
     "ListCommitmentsTool",
     "ResolveCommitmentTool",
-    "ExtractCommitmentsTool",
     # Approvals (5)
     "SubmitForApprovalTool",
     "ListPendingApprovalsTool",
     "ApproveTool",
     "RejectTool",
     "ExecuteApprovedActionTool",
-    # Voice profile (2)
-    "BuildVoiceProfileTool",
+    # Voice profile (1 in v4 — read-only; tone analysis moved to skill side)
     "GetVoiceProfileTool",
     # Rule engine (5)
     "RuleCreateTool",

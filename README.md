@@ -1,550 +1,236 @@
 # EWS MCP Server
 
-<div align="center">
+**A Model Context Protocol server that lets an LLM agent run a real Microsoft Exchange / Office 365 mailbox.**
 
-**Microsoft Exchange integration for the Model Context Protocol**
+Plug it into Claude Desktop, Open WebUI, your in-house agent, or any
+MCP-aware client, and the LLM gets 67 typed tools for email, calendar,
+contacts, tasks, folders, attachments, threads, and follow-up flags —
+plus a small set of agent-side primitives (memory KV, commitments,
+approvals, declarative rules, voice profile, OOF policy, briefing,
+meeting-prep) for building autonomous workflows.
 
-*Give AI assistants first-class access to mail, calendar, contacts, tasks, and directory services*
-
-[![Version](https://img.shields.io/badge/version-3.4.x-blue.svg)](https://github.com/azizmazrou/ews-mcp)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://ghcr.io/azizmazrou/ews-mcp)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
-
-[Quick Start](#quick-start) | [Tools](#all-tools) | [Configuration](#configuration) | [Documentation](#documentation)
-
-</div>
-
----
-
-## Overview
-
-An MCP server that wraps [exchangelib](https://github.com/ecederstrand/exchangelib) to expose Microsoft Exchange Web Services (EWS) to MCP clients such as Claude Desktop, Open WebUI, or any custom client.
-
-- **70 tools** — 66 base + 4 optional AI — across email, drafts, attachments, calendar, contacts, directory (GAL), tasks, search, folders, out-of-office, AND an agent-secretary stack (memory, commitments, approvals, rules, voice profile, OOF policy, briefing, meeting prep)
-- **Agent secretary layer** — per-mailbox SQLite memory store, commitment tracker, human-in-the-loop approval queue, declarative rule engine, OOF policy, voice profile, daily briefing, and meeting prep. See [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md)
-- **3 auth modes**: OAuth2 (client credentials), Basic, NTLM
-- **Impersonation / delegation**: every non-AI tool accepts a `target_mailbox` to act on shared, delegated, or other users' mailboxes
-- **Two transports**: `stdio` (default, for Claude Desktop) and `sse` (HTTP server with OpenAPI schema + bearer auth, for Open WebUI and REST clients)
-- **Enterprise middleware**: rate limiter, circuit breaker, structured logging, audit log with PII redaction
-
----
-
-## What's New (since v3.4.0)
-
-### Agent secretary — 24 new tools
-
-Per-mailbox persistent memory + orchestration tools that turn the server from a stateless Exchange client into an **agentic secretary**. Full guide: [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md).
-
-- **Memory** (4): `memory_set` / `memory_get` / `memory_list` / `memory_delete` — ad-hoc agent scratch state (thread snoozes, person notes, prefs). Backed by per-mailbox SQLite with 1 MiB/value, 50 MiB/namespace caps.
-- **Commitments** (4): `track_commitment`, `list_commitments`, `resolve_commitment`, `extract_commitments` (AI extracts promises from a thread).
-- **Approval queue** (5): `submit_for_approval`, `list_pending_approvals`, `approve`, `reject`, `execute_approved_action`. Allow-listed actions, single-use UUID4 tokens, atomic consume.
-- **Voice profile** (2): `build_voice_profile` (samples Sent folder → AI style card), `get_voice_profile`.
-- **Rule engine** (5): `rule_create`, `rule_list`, `rule_delete`, `rule_simulate`, `evaluate_rules_on_message`. Strict allow-lists on match keys and action types — no `eval`.
-- **OOF policy** (3): `configure_oof_policy` (templates + forward rules), `get_oof_policy`, `apply_oof_policy` (creates drafts, never sends).
-- **Briefing** (1): `generate_briefing` — deterministic inbox-delta + meetings + commitments + overdue tasks + VIP activity one-pager.
-- **Meeting prep** (1): `prepare_meeting` — attendees + per-attendee history + stored notes + attachment previews.
-
-Also: `send_email` gains `dry_run: true` for preview-without-send.
-
-### Drafts workflow
-- `create_draft`, `create_reply_draft`, `create_forward_draft` — build reviewable HTML drafts in the Drafts folder before sending
-- HTML reply/forward prototypes preserve the original conversation, inline images, CDATA blocks, and Outlook-style quoted headers
-
-### Folder discovery & IDs
-- New `find_folder` tool — locate a folder by name or ID across the full hierarchy
-- `move_email` and `manage_folder` now accept `destination_folder_id` / `parent_folder_id` to resolve folders by stable Exchange ID rather than by display name
-
-### Availability & scheduling
-- `check_availability` now correctly parses exchangelib free/busy responses and includes the current mailbox by default
-- Scheduling responses clarified so the AI can act on the result without re-prompting
-
-### Platform
-- Windows wrapper entrypoint fixes the Claude Desktop MSIX working-directory issue
-- Signature placement, separator format, and duplicate `RE:` / `FW:` prefixes fixed in reply/forward
-
-## What's New in v3.4
-
-### Reliability & Code Quality
-
-- **Circuit Breaker**: Trips after 3 consecutive EWS failures, rejects requests instantly for 60s instead of waiting for timeout (saves ~30s/request when Exchange is down)
-- **Proper async/await**: All blocking `resolve_names()` calls wrapped in `asyncio.to_thread()`, inbox+sent scans run concurrently via `asyncio.gather()`
-- **Simplified errors**: Error messages capped at 200 chars, Pydantic validation errors shortened to human-readable format
-- **Removed dead code**: `handle_ews_errors` decorator (-70 lines), deduplicated JSON serialization
-
----
-
-## What's New in v3.3
-
-### Tool Consolidation
-
-v3.3 merged 10 redundant tools into 5 unified tools (search, find_person, manage_folder, oof_settings, analyze_contacts). The base tool count later grew again as new features (drafts, find_folder, email MIME, attach-email-to-draft) were added.
-
-| Merge | Before | After |
-|-------|--------|-------|
-| Search | `search_emails` + `advanced_search` + `full_text_search` | `search_emails` with `mode` param |
-| Contact Lookup | `search_contacts` + `get_contacts` + `resolve_names` | `find_person` with `source` param |
-| Folder Mgmt | `create_folder` + `delete_folder` + `rename_folder` + `move_folder` | `manage_folder` with `action` param |
-| OOF | `set_oof_settings` + `get_oof_settings` | `oof_settings` with `action` param |
-| Network Analysis | `get_communication_history` + `analyze_network` | `analyze_contacts` with `analysis_type` param |
-
-```python
-# Unified search with mode
-search_emails(mode="advanced", keywords="report", folders=["inbox", "sent"])
-search_emails(mode="full_text", search_query="quarterly budget")
-
-# Unified contact lookup with source
-find_person(query="Ahmed", source="all")
-find_person(source="contacts")  # list all contacts
-
-# Unified folder management
-manage_folder(action="create", folder_name="Archive")
-manage_folder(action="rename", folder_id="AAMk...", new_name="Old Projects")
-```
-
-> The 46 Exchange-facing tools (42 base + 4 AI) accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`. The 24 agent-secretary tools act on the primary authenticated mailbox by design — see [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md#architecture).
-
----
-
-## Feature Highlights
-
-<table>
-<tr>
-<td width="50%">
-
-### Email (10 tools) + Drafts (3 tools)
-- Send, read, search (quick / advanced / full-text), delete, move, copy, update
-- Reply / Forward with thread + inline-image preservation
-- Draft variants (`create_draft`, `create_reply_draft`, `create_forward_draft`) for AI-review-before-send flows
-
-</td>
-<td width="50%">
-
-### Calendar (7 tools)
-- Create, update, delete appointments
-- Accept / decline / tentative responses
-- Free/busy availability + multi-attendee time-finder
-- Timezone-aware scheduling
-
-</td>
-</tr>
-<tr>
-<td>
-
-### Contacts + Intelligence (5 tools)
-- `create_contact` / `update_contact` / `delete_contact`
-- `find_person` — unified GAL + contacts + email-history search
-- `analyze_contacts` — communication history, top contacts, domains, dormant, VIPs
-
-</td>
-<td>
-
-### Attachments (7 tools)
-- `list_attachments`, `download_attachment`, `add_attachment`, `delete_attachment`
-- `read_attachment` — text extraction for PDF, DOCX, XLSX
-- `get_email_mime` — raw RFC-822 MIME
-- `attach_email_to_draft` — attach an existing message as `.eml`
-
-</td>
-</tr>
-<tr>
-<td>
-
-### Folders (3) + Tasks (5) + Search (1) + OOF (1)
-- `list_folders`, `find_folder`, `manage_folder` (create/delete/rename/move)
-- Full task CRUD + `complete_task`
-- `search_by_conversation`, `oof_settings` (get/set)
-
-</td>
-<td>
-
-### Enterprise Features
-- Impersonation / delegation on every base tool
-- OAuth2 / Basic / NTLM
-- stdio + SSE/HTTP transports with OpenAPI 3.0 schema
-- Rate limiter, circuit breaker, structured logs, audit log
-- Optional AI layer (OpenAI / Anthropic / OpenAI-compatible)
-
-</td>
-</tr>
-</table>
-
----
-
-## Quick Start
-
-### Option 1: Docker (Recommended)
+The server speaks Exchange Web Services natively (no Graph proxy) and
+ships as a multi-arch container image (`linux/amd64` + `linux/arm64`)
+on GitHub Container Registry. Pull and run:
 
 ```bash
-# Pull latest image
 docker pull ghcr.io/azizmazrou/ews-mcp:latest
+docker run -d --name ews-mcp --env-file .env --network host \
+  ghcr.io/azizmazrou/ews-mcp:latest
+```
 
-# Create configuration
-cat > .env << 'EOF'
-EWS_SERVER_URL=mail.company.com
+---
+
+## What it does well
+
+### Bidirectional Markdown ⇄ HTML body format (~12× cheaper LLM I/O)
+
+Outlook bodies are MSO HTML — typically 5–10× more bytes than the
+information they carry. Reading and writing email through this MCP, the
+LLM can opt into Markdown on either side:
+
+| Direction | Tools | Parameter | Effect |
+|---|---|---|---|
+| Read | `get_email_details` | `format=html\|markdown\|text` (default `html`) | The MCP runs the Outlook MSO body through `markdownify` server-side, caches the result in SQLite, and returns clean GFM markdown. ~12× fewer tokens for the same content. |
+| Read | `get_email_details` | `trim_quoted=true` | Strips the `On …, X wrote:` history glued to the bottom of every reply. Massive savings on long threads. |
+| Read | `get_email_details` | `include_body=false` | Drop the body entirely for envelope-only / list-style calls. |
+| Write | `send_email`, `reply_email`, `forward_email` | `body_format=html\|markdown\|text` (default `html`) | The LLM produces clean markdown; the MCP converts to HTML before EWS. The user's Outlook signature with its inline `cid:` image refs is preserved end-to-end (`inline_attachments_preserved` returned in the response). |
+
+Concrete numbers on a representative 25 KB Outlook reply:
+
+```
+HTML  (default):  25,446 bytes  →  ~5,500 tokens   (baseline)
+markdown:          3,799 bytes  →    ~450 tokens   (~12× cheaper)
+text:              ~3,200 bytes →    ~330 tokens   (lossy — drops links)
+```
+
+Defaults are unchanged from the v3.x line, so existing callers don't
+break — opt in to `markdown` when you want the saving.
+
+### Document text extraction for everything an email actually carries
+
+`read_attachment` returns ready-to-reason text from binary attachments,
+so the LLM never has to download and parse an Excel file itself:
+
+| Format | Library | What you get |
+|---|---|---|
+| PDF | `pdfplumber` | text + tables, page-bounded |
+| DOCX | `python-docx` | text + optional tables |
+| XLSX / XLS | `openpyxl` / `xlrd` | sheet-by-sheet rows |
+| PPTX | `python-pptx` | slide-by-slide text + speaker notes + embedded tables |
+| **MSG** | `extract-msg` | Outlook compound-file: subject / from / to / cc / date envelope **plus** the body (HTML→markdown via the same pipeline as `get_email_details`) **plus** a recursive nested-attachment listing. Ideal for forwarded email threads. |
+| EML | `email` (stdlib) | RFC-822: same shape as `.msg`, used by non-Outlook exporters |
+| HTML / HTM | `markdownify` | GFM markdown, RTL-safe (Arabic / Hebrew) |
+| CSV / LOG / JSON / XML / MD | stdlib | BOM-aware UTF-8 / UTF-16 decode |
+| TXT | stdlib | UTF-8 / UTF-16, BOM-aware |
+
+### Reliable EWS write path with signature + thread preservation
+
+`reply_email`, `forward_email`, `create_reply_draft`, and
+`create_forward_draft` build a fresh Outlook-compatible HTML body
+manually instead of calling EWS `create_reply()` / `create_forward()`,
+which have unpredictable signature placement under Exclaimer. The
+result:
+
+- Original conversation thread preserved with the standard Outlook
+  border-top separator and `From: / Sent: / To: / Cc: / Subject:`
+  header block
+- Inline images from the original message (signature graphics, embedded
+  logos, screenshots inside the thread) copied to the new message
+  before send / save
+- Threading headers (`In-Reply-To` / `References`) set so the reply
+  stays in the same Outlook conversation
+
+Same path is used whether `body_format` is HTML, markdown, or text —
+markdown gets converted upstream of the wrap; the wrap is preserved.
+
+### Multi-mailbox impersonation
+
+Every base tool accepts `target_mailbox=<smtp>` when
+`EWS_IMPERSONATION_ENABLED=true`, so a single service account can read
+the CEO's calendar, send on behalf of `support@`, search across
+multiple shared mailboxes, etc. Per-target accounts are cached.
+
+### Search that scales with the mailbox
+
+`search_emails` has three modes: `quick` (one or two filters,
+direct EWS), `advanced` (every filter combinable with sort / scope), and
+`full_text` (Exchange's `searchquery` engine for prose). All three honor
+a unified parameter vocabulary including `is_read`, `is_flagged`,
+`importance`, `categories`, `from_address`, `body_contains`,
+`has_attachments`, `start_date`, `end_date`, paginated via
+`offset` / `next_offset`.
+
+`search_by_conversation` walks every mail folder in the mailbox by
+default so archived / custom-label messages don't disappear, and
+classifies skipped folders with reasons (`permission_denied`, etc.).
+
+`semantic_search_emails` runs vector cosine over a SQLite-backed
+embedding cache. No external vector database needed; the cache lives
+next to the per-mailbox data file. Embeddings are computed on the
+configured AI provider (OpenAI / Anthropic / OpenAI-compatible local
+endpoint such as Ollama, LM Studio, llama.cpp).
+
+### A clean MCP / skill boundary
+
+The MCP does **deterministic data work** — fetch, transform, embed,
+extract, persist. The consuming skill / agent does the **reasoning** —
+classify, summarise, decide, compose. So the AI surface on the server
+is intentionally small:
+
+- `semantic_search_emails` (vector math + cache, can't be done from
+  the skill efficiently)
+- `read_attachment` text extraction (binary parsing belongs server-side)
+- `compose_body` / `render_body` (deterministic transformations)
+
+LLM-reasoning tools that just round-tripped to a model — `classify_email`,
+`summarize_email`, `suggest_replies`, `extract_commitments`,
+`build_voice_profile` — are intentionally **not** exposed. The skill
+already has an LLM running, and doing those tasks in-prompt with the
+data this MCP returns is faster, cheaper, and produces better results
+than a second LLM hop.
+
+This means `AI_MODEL` (chat) is **optional** in the env — only the
+embedding model is required, and only when semantic search is enabled.
+
+### Per-mailbox SQLite cache
+
+A single SQLite file at `data/ews_mcp_<mailbox>.sqlite` holds three
+tables, all populated lazily:
+
+- `body_format_cache` — converted markdown bodies. Exchange messages
+  are immutable post-send, so we never invalidate.
+- `attachment_text_cache` — extracted PDF / DOCX / XLSX / PPTX / MSG /
+  EML / HTML / CSV text, keyed by attachment ID.
+- `embedding_cache` — packed `float32` vectors for semantic search,
+  keyed by `(text_hash, model)`.
+
+No vector database to stand up. Backups are a single-file copy.
+
+---
+
+## Quick start
+
+### 1 — Get the image
+
+The published multi-arch image lives at
+`ghcr.io/azizmazrou/ews-mcp` and supports both `linux/amd64`
+(Intel / AMD) and `linux/arm64` (Apple Silicon, Raspberry Pi 4/5,
+Ampere). Choose a tag:
+
+| Tag | Use this if you want… |
+|---|---|
+| `latest` | Always-current build of `main` |
+| `4.0.0` (or any `v*.*.*` tag) | A specific semver release |
+| `4.0` | The latest patch on a minor line |
+| `sha-<7chars>` | An exact commit |
+
+```bash
+docker pull ghcr.io/azizmazrou/ews-mcp:latest
+```
+
+GHCR images are anonymously pullable — no `docker login` required for
+public images.
+
+### 2 — Configure
+
+```bash
+cat > .env <<'EOF'
+EWS_SERVER_URL=outlook.office365.com
 EWS_EMAIL=user@company.com
-EWS_AUTH_TYPE=basic
-EWS_USERNAME=user@company.com
-EWS_PASSWORD=your-password
 TIMEZONE=UTC
 
-# If you plan to reach the SSE transport from outside the container,
-# set MCP_HOST=0.0.0.0 AND an API key — the server refuses to bind a
-# non-loopback address without an API key.
+# Auth — pick ONE of the three blocks below
+# OAuth2 (Office 365)
+EWS_AUTH_TYPE=oauth2
+EWS_CLIENT_ID=00000000-0000-0000-0000-000000000000
+EWS_CLIENT_SECRET=...
+EWS_TENANT_ID=00000000-0000-0000-0000-000000000000
+
+# OR Basic
+# EWS_AUTH_TYPE=basic
+# EWS_USERNAME=user@company.com
+# EWS_PASSWORD=...
+
+# OR NTLM (corporate Exchange behind ADFS)
+# EWS_AUTH_TYPE=ntlm
+# EWS_USERNAME=DOMAIN\\user
+# EWS_PASSWORD=...
+
+# Optional — only needed for semantic_search_emails
+ENABLE_AI=true
+AI_PROVIDER=local            # or openai, anthropic
+AI_BASE_URL=http://ollama:11434/v1
+AI_EMBEDDING_MODEL=nomic-embed-text
+
+# Optional — SSE transport for remote MCP clients
 # MCP_TRANSPORT=sse
 # MCP_HOST=0.0.0.0
 # MCP_API_KEY=$(openssl rand -hex 32)
 EOF
-
-# Run
-docker run -d --name ews-mcp --env-file .env ghcr.io/azizmazrou/ews-mcp:latest
 ```
 
-### Option 2: OAuth2 (Office 365)
+### 3 — Run
 
 ```bash
-cat > .env << 'EOF'
-EWS_SERVER_URL=outlook.office365.com
-EWS_EMAIL=user@company.com
-EWS_AUTH_TYPE=oauth2
-EWS_CLIENT_ID=your-azure-client-id
-EWS_CLIENT_SECRET=your-azure-secret
-EWS_TENANT_ID=your-azure-tenant
-TIMEZONE=UTC
-EOF
+docker run -d \
+  --name ews-mcp \
+  --restart unless-stopped \
+  --env-file .env \
+  --network host \
+  -v ./data:/app/data \
+  -v ./logs:/app/logs \
+  ghcr.io/azizmazrou/ews-mcp:latest
 ```
 
-### Option 3: Local Development
-
-```bash
-git clone https://github.com/azizmazrou/ews-mcp.git
-cd ews-mcp
-pip install -r requirements.txt
-cp .env.example .env  # Configure your credentials
-python -m src.main
-```
-
----
-
-## All Tools
-
-**Grand total: 70** — 66 base tools (42 Exchange + 24 agent-secretary, all subject to category flags) + 4 optional AI tools.
-
-### Email (10)
-
-| Tool | Description |
-|------|-------------|
-| `send_email` | Send with attachments, CC/BCC, importance, inline base64 attachments |
-| `read_emails` | Read from any folder with pagination and `unread_only` filter |
-| `search_emails` | Unified search — `mode: "quick"` / `"advanced"` / `"full_text"` |
-| `get_email_details` | Full email content including HTML body |
-| `delete_email` | Soft delete (trash) or `hard_delete: true` for permanent removal |
-| `move_email` | Move to another folder by name or `destination_folder_id` |
-| `copy_email` | Copy to another folder by name or `destination_folder_id` |
-| `update_email` | Mark read/unread, flag status, categories, importance |
-| `reply_email` | Reply with thread + signature + inline-image preservation |
-| `forward_email` | Forward with full body and inline images |
-
-### Email Drafts (3)
-
-| Tool | Description |
-|------|-------------|
-| `create_draft` | Save a draft in `Drafts` for later review/send |
-| `create_reply_draft` | Build a reply draft (quoted original + signature placeholder) without sending |
-| `create_forward_draft` | Build a forward draft without sending |
-
-### Attachments (7)
-
-| Tool | Description |
-|------|-------------|
-| `list_attachments` | List attachments with metadata (name, size, MIME, inline flag) |
-| `download_attachment` | Download as base64 or save to file (see security note in docs) |
-| `add_attachment` | Attach files to a draft email |
-| `delete_attachment` | Remove attachments from a message |
-| `read_attachment` | Extract text from PDF / DOCX / XLSX |
-| `get_email_mime` | Return full RFC-822 MIME content of a message |
-| `attach_email_to_draft` | Attach another message (as `.eml`) to a draft |
-
-### Calendar (7)
-
-| Tool | Description |
-|------|-------------|
-| `create_appointment` | Schedule meetings with attendees, body, location, reminders |
-| `get_calendar` | Retrieve events for a date range |
-| `update_appointment` | Modify time, attendees, location, or cancel |
-| `delete_appointment` | Cancel meeting (with optional cancellation notification) |
-| `respond_to_meeting` | Accept / Decline / Tentative responses with optional body |
-| `check_availability` | Free/busy for attendees over a time window |
-| `find_meeting_times` | Suggested slots across multiple attendees |
-
-### Contacts (3)
-
-| Tool | Description |
-|------|-------------|
-| `create_contact` | Add a contact with email, phones, company, title, department |
-| `update_contact` | Modify contact fields |
-| `delete_contact` | Remove a contact |
-
-### Contact Intelligence (2)
-
-| Tool | Description |
-|------|-------------|
-| `find_person` | Unified lookup — `source: "all" / "gal" / "contacts" / "email_history" / "domain"` |
-| `analyze_contacts` | Unified analysis — `analysis_type: "communication_history" / "overview" / "top_contacts" / "by_domain" / "dormant" / "vip"` |
-
-### Tasks (5)
-
-| Tool | Description |
-|------|-------------|
-| `create_task` | Create task with due date, status, importance, reminder |
-| `get_tasks` | List tasks filtered by status / include_completed |
-| `update_task` | Modify task fields |
-| `complete_task` | Mark task complete |
-| `delete_task` | Remove a task |
-
-### Search (1)
-
-| Tool | Description |
-|------|-------------|
-| `search_by_conversation` | Find all messages sharing a conversation/thread ID |
-
-### Folders (3)
-
-| Tool | Description |
-|------|-------------|
-| `list_folders` | Folder hierarchy with optional counts, depth, hidden-folder toggle |
-| `find_folder` | Locate a folder by name or ID anywhere in the mailbox |
-| `manage_folder` | Unified management — `action: "create" / "delete" / "rename" / "move"` |
-
-### Out-of-Office (1)
-
-| Tool | Description |
-|------|-------------|
-| `oof_settings` | `action: "get"` / `"set"` — internal/external reply, scheduling |
-
-### AI (4, optional)
-
-Enabled per-feature via `enable_ai=true` plus individual flags. Accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`.
-
-| Tool | Description | Feature flag |
-|------|-------------|--------------|
-| `semantic_search_emails` | Natural-language email search via embeddings | `enable_semantic_search` |
-| `classify_email` | Priority / sentiment / optional spam classification | `enable_email_classification` |
-| `summarize_email` | AI summary of a message (configurable length) | `enable_email_summarization` |
-| `suggest_replies` | Generate N draft reply variants | `enable_smart_replies` |
-
-### Agent Secretary (24)
-
-Registered when `ENABLE_AGENT=true` (the default). Fully documented in [`docs/AGENT_SECRETARY.md`](docs/AGENT_SECRETARY.md).
-
-**Memory** (4)
-
-| Tool | Description |
-|------|-------------|
-| `memory_set` / `memory_get` / `memory_list` / `memory_delete` | Per-mailbox JSON KV with namespaces, TTL, 1 MiB value cap |
-
-**Commitments** (4)
-
-| Tool | Description |
-|------|-------------|
-| `track_commitment` | Record "I owe X to Y by Z" or "Y owes me X" |
-| `list_commitments` | Open / overdue / done, filter by owner |
-| `resolve_commitment` | Mark done / cancelled with optional note |
-| `extract_commitments` | AI: detect commitments in a message (requires `ENABLE_AI=true`) |
-
-**Approval queue** (5)
-
-| Tool | Description |
-|------|-------------|
-| `submit_for_approval` | Queue a side-effectful action for human review (allow-listed actions only) |
-| `list_pending_approvals` | View pending items |
-| `approve` / `reject` | Decide an approval (atomic, single-use) |
-| `execute_approved_action` | Run the approved action; consumes the approval |
-
-**Voice profile** (2)
-
-| Tool | Description |
-|------|-------------|
-| `build_voice_profile` | Sample Sent folder → AI-generated style card (formality, greetings, signoffs) |
-| `get_voice_profile` | Retrieve the stored profile |
-
-**Rule engine** (5)
-
-| Tool | Description |
-|------|-------------|
-| `rule_create` / `rule_list` / `rule_delete` | Declarative "match → actions" automations with strict allow-lists |
-| `rule_simulate` | Preview which rules would fire against a message |
-| `evaluate_rules_on_message` | Apply matching rules (with `dry_run` flag) |
-
-**OOF policy** (3)
-
-| Tool | Description |
-|------|-------------|
-| `configure_oof_policy` | Templates + forward rules + VIP passthrough |
-| `get_oof_policy` | Retrieve stored policy |
-| `apply_oof_policy` | Evaluate forward rules for a message — creates DRAFTS, never sends |
-
-**Compound** (2)
-
-| Tool | Description |
-|------|-------------|
-| `generate_briefing` | Today/weekly: inbox delta + meetings + commitments + overdue tasks + VIP activity |
-| `prepare_meeting` | Meeting brief: attendees + per-attendee history + notes + attachment previews |
-
-Plus: `send_email` accepts `dry_run: true` for a preview without sending.
-
----
-
-## Usage Examples
-
-### Reply & Forward (v3.2 Feature)
-
-```python
-# Reply preserving full conversation thread
-reply_email(
-    message_id="AAMkADc3MWUy...",
-    body="<p>Great idea! Let's discuss in tomorrow's meeting.</p>",
-    reply_all=False
-)
-
-# Reply all with attachment
-reply_email(
-    message_id="AAMkADc3MWUy...",
-    body="Please see attached analysis.",
-    reply_all=True,
-    attachments=["/path/to/analysis.pdf"]
-)
-
-# Forward with custom message
-forward_email(
-    message_id="AAMkADc3MWUy...",
-    to=["director@company.com"],
-    cc=["team@company.com"],
-    body="<p><b>Priority:</b> Please review the proposal below.</p>"
-)
-```
-
-**What gets preserved:**
-- Full HTML body with formatting
-- Inline images (signatures, logos, embedded graphics)
-- Conversation threading metadata
-- Original attachments
-- Outlook-style headers
-
-### Impersonation / Multi-Mailbox (v3.2 Feature)
-
-```python
-# Read from shared mailbox
-emails = read_emails(
-    folder="inbox",
-    max_results=10,
-    target_mailbox="info@company.com"
-)
-
-# Send on behalf of support
-send_email(
-    to=["customer@external.com"],
-    subject="Re: Your Inquiry",
-    body="Thank you for contacting support...",
-    target_mailbox="support@company.com"
-)
-
-# Create calendar event in another user's calendar
-create_appointment(
-    subject="Team Sync",
-    start="2025-12-15T10:00:00",
-    end="2025-12-15T11:00:00",
-    attendees=["team@company.com"],
-    target_mailbox="manager@company.com"
-)
-
-# Search across multiple mailboxes
-for mailbox in ["sales@company.com", "support@company.com"]:
-    results = search_emails(
-        subject_contains="urgent",
-        target_mailbox=mailbox
-    )
-```
-
-### Person Search (Multi-Strategy)
-
-```python
-# Never get 0 results - multi-strategy search
-person = find_person(
-    query="Ahmed",
-    source="all",
-    include_stats=True
-)
-
-# Returns comprehensive Person object:
-# - name, email addresses, phone numbers
-# - organization, department, job title
-# - communication stats (emails sent/received)
-# - relationship strength score
-# - sources (GAL, Contacts, Email History)
-```
-
-### Smart Meeting Scheduling
-
-```python
-# Suggest slots that work for every attendee in a date range
-find_meeting_times(
-    attendees=["alice@company.com", "bob@company.com"],
-    duration_minutes=60,
-    start_date="2026-04-20",
-    end_date="2026-04-22",
-    time_slots_per_day=3,
-    min_confidence_percent=80,
-)
-```
-
-### Draft-before-send workflow
-
-Drafts give the AI assistant a safe "preview and confirm" step. Nothing leaves the mailbox until the user explicitly sends.
-
-```python
-# Create a reply draft
-draft = create_reply_draft(
-    message_id="AAMkAGI...",
-    body="<p>Thanks for the update — will review by Friday.</p>",
-    to_all=False,
-)
-# draft["draft_id"] → open in client / add attachments / send later
-
-# Attach files to the draft
-add_attachment(
-    message_id=draft["draft_id"],
-    attachment_paths=["/path/to/report.pdf"],
-)
-
-# Or attach another message as .eml
-attach_email_to_draft(
-    draft_id=draft["draft_id"],
-    message_id_to_attach="AAMkAGI-some-other-msg",
-)
-```
-
-### Folder discovery
-
-```python
-# Find a folder anywhere in the hierarchy by name
-folder = find_folder(folder_name="Archive/Q1 Reports")
-# Use the returned stable folder_id instead of a fragile display path
-move_email(
-    message_id="AAMkAGI...",
-    destination_folder_id=folder["folder_id"],
-)
-```
-
----
-
-## Claude Desktop Integration
-
-Add to your Claude Desktop config:
-
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-**Linux**: `~/.config/Claude/claude_desktop_config.json`
+The two volume mounts are recommended so the per-mailbox SQLite cache
+(body / attachment / embedding) and structured logs survive container
+recreation. Default transport is stdio (Claude Desktop / Claude Code /
+any MCP-stdio client). For SSE / HTTP, set `MCP_TRANSPORT=sse` and
+bind a non-loopback `MCP_HOST` only with `MCP_API_KEY` set — the
+server refuses to listen on `0.0.0.0` without an API key.
+
+### Claude Desktop config
 
 ```json
 {
@@ -561,31 +247,205 @@ Add to your Claude Desktop config:
 }
 ```
 
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows;
+`~/Library/Application Support/Claude/claude_desktop_config.json` on
+macOS; `~/.config/Claude/claude_desktop_config.json` on Linux.
+
+### docker-compose
+
+A reference `docker-compose.yml` ships in the repo. After cloning
+(see "From source" below) you can:
+
+```bash
+cp .env.example .env  # edit credentials
+docker compose up -d
+```
+
+### From source (development / forks)
+
+If you want to modify the code, fork-and-PR, or run a custom build:
+
+```bash
+git clone https://github.com/azizmazrou/ews-mcp.git
+cd ews-mcp
+pip install -r requirements.txt
+cp .env.example .env
+python -m src.main
+```
+
+Or container-build:
+
+```bash
+docker build -t ews-mcp:dev .
+docker run -d --name ews-mcp --env-file .env --network host ews-mcp:dev
+```
+
+### Releasing your own fork
+
+The repo's CI (`.github/workflows/docker-publish.yml`) publishes a
+multi-arch image to GHCR on every push to `main` and on every
+`v*.*.*` tag. To cut a release on a fork:
+
+```bash
+# 1. Make sure your fork has GHCR write permissions enabled in
+#    Settings → Actions → General → Workflow permissions:
+#    "Read and write permissions"
+# 2. Tag and push
+git tag v4.0.1
+git push origin v4.0.1
+```
+
+The workflow runs, builds for `amd64` + `arm64`, and publishes
+`ghcr.io/<your-fork>/ews-mcp:4.0.1`, `:4.0`, `:4`, `:sha-<…>`, and
+updates `:latest` if the tag is on the default branch.
+
 ---
 
-## Configuration
+## Tool surface — 67 tools
 
-### Environment Variables
+| Category | Tools |
+|---|---|
+| **Email (14)** | `send_email`, `read_emails`, `search_emails` (quick / advanced / full_text), `get_email_details`, `get_emails_bulk`, `delete_email`, `move_email`, `copy_email`, `update_email`, `reply_email`, `forward_email`, `create_draft`, `create_reply_draft`, `create_forward_draft` |
+| **Attachments (7)** | `list_attachments`, `download_attachment`, `add_attachment`, `delete_attachment`, `read_attachment` (PDF / DOCX / XLSX / PPTX / MSG / EML / HTML / CSV / TXT / LOG / JSON / XML / MD), `get_email_mime`, `attach_email_to_draft` |
+| **Calendar (7)** | `create_appointment`, `get_calendar`, `update_appointment`, `delete_appointment`, `respond_to_meeting`, `check_availability`, `find_meeting_times` |
+| **Contacts (5)** | `create_contact`, `update_contact`, `delete_contact`, `find_person` (GAL + contacts + email-history), `analyze_contacts` |
+| **Tasks (5)** | `create_task`, `get_tasks`, `update_task`, `complete_task`, `delete_task` |
+| **Search (1)** | `search_by_conversation` |
+| **Folders (3)** | `list_folders`, `find_folder`, `manage_folder` (create / delete / rename / move) |
+| **Out-of-Office (4)** | `oof_settings`, `configure_oof_policy`, `get_oof_policy`, `apply_oof_policy` |
+| **AI (1, optional)** | `semantic_search_emails` |
+| **Memory KV (4)** | `memory_set`, `memory_get`, `memory_list`, `memory_delete` |
+| **Commitments (3)** | `track_commitment`, `list_commitments`, `resolve_commitment` |
+| **Approvals (5)** | `submit_for_approval`, `list_pending_approvals`, `approve`, `reject`, `execute_approved_action` |
+| **Voice profile (1)** | `get_voice_profile` |
+| **Rules (5)** | `rule_create`, `rule_list`, `rule_delete`, `rule_simulate`, `evaluate_rules_on_message` |
+| **Compound (2)** | `generate_briefing`, `prepare_meeting` (return structured context — composition runs on the skill side) |
 
-All settings are parsed by `src/config.py` (Pydantic `Settings`). Examples live in `.env.example`, `.env.basic.example`, `.env.oauth2.example`, `.env.ai.example`.
+Full per-tool input / output schemas in [`docs/API.md`](docs/API.md).
 
-#### Required
+---
+
+## Usage examples
+
+### Read an email cheaply
+
+```python
+get_email_details(
+    message_id="AAMk...",
+    format="markdown",         # 12× fewer tokens than HTML
+    trim_quoted=True,          # drop the "On X wrote:" history
+)
+```
+
+### Compose a reply in markdown — signature preserved
+
+```python
+reply_email(
+    message_id="AAMk...",
+    body_format="markdown",
+    body="""
+    Approved on the Q1 budget. Two changes:
+
+    - Move line 4 (cloud spend) up by 8%
+    - Defer the contractor budget to Q2
+
+    See attached for the revised numbers.
+    """.strip(),
+    attachments=["/path/to/q1-budget-rev2.xlsx"],
+)
+```
+
+The MCP converts the markdown to HTML, hands it to EWS, and the
+existing reply pipeline preserves the user's Outlook signature with its
+inline images at the bottom of the rendered email.
+
+### Read an entire forwarded thread that came as a `.msg` attachment
+
+```python
+read_attachment(
+    message_id="AAMk...",
+    attachment_name="Re_ Q1 Performance Review.msg",
+)
+```
+
+Returns the envelope (subject / from / to / cc / date) plus the body
+converted to markdown plus a listing of any nested attachments inside
+the `.msg`. No manual download / parse step required.
+
+### Find a person across every signal
+
+```python
+find_person(
+    query="Ahmed",
+    source="all",              # GAL + Contacts + email history
+    include_stats=True,
+)
+```
+
+### Free-busy across multiple attendees
+
+```python
+find_meeting_times(
+    attendees=["alice@company.com", "bob@company.com"],
+    duration_minutes=60,
+    date_range_start="2026-04-20",
+    date_range_end="2026-04-22",
+    max_suggestions=3,
+)
+```
+
+### Reply draft for human review before send
+
+```python
+draft = create_reply_draft(
+    message_id="AAMk...",
+    body="<p>Will review by Friday.</p>",
+    cc=["manager@company.com"],
+    categories=["Follow-up"],
+)
+# Open in OWA / Outlook, edit if needed, send manually.
+```
+
+### Filter on Outlook follow-up flag
+
+```python
+search_emails(is_flagged=True, max_results=20)
+```
+
+### Operate on a shared mailbox
+
+```python
+read_emails(folder="inbox", target_mailbox="support@company.com")
+```
+
+(requires `EWS_IMPERSONATION_ENABLED=true` and an account with
+delegate / impersonation rights on the target)
+
+---
+
+## Configuration reference
+
+All settings are pydantic `Settings` parsed from env (or `.env`).
+See `.env.example`, `.env.basic.example`, `.env.oauth2.example`,
+`.env.ai.example`.
+
+### Required
 
 | Variable | Description |
 |----------|-------------|
-| `EWS_EMAIL` | Primary mailbox email address |
-| `EWS_AUTH_TYPE` | `oauth2` (default), `basic`, or `ntlm` |
+| `EWS_EMAIL` | Primary mailbox SMTP address |
+| `EWS_AUTH_TYPE` | `oauth2`, `basic`, or `ntlm` |
 
-#### EWS connection
+### Connection
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EWS_SERVER_URL` | — | Explicit server URL; if empty, autodiscover is used |
-| `EWS_AUTODISCOVER` | `true` | Enable Exchange autodiscover |
-| `EWS_INSECURE_SKIP_VERIFY` | `false` | Disable TLS certificate verification for EWS traffic. Opt-in only — use when the corporate Exchange uses a private CA that cannot be installed into the container trust store. |
-| `EWS_DOWNLOAD_DIR` | `downloads` | Jail directory for `download_attachment` writes (`save_path` is treated as a basename hint only). |
+| `EWS_SERVER_URL` | autodiscover | Explicit EWS endpoint (skip autodiscover) |
+| `EWS_AUTODISCOVER` | `true` | |
+| `EWS_INSECURE_SKIP_VERIFY` | `false` | TLS verification off — only for internal CA setups |
+| `EWS_DOWNLOAD_DIR` | `downloads` | Jail dir for `download_attachment` |
 
-#### Auth — OAuth2 (Office 365)
+### Auth — OAuth2
 
 | Variable | Description |
 |----------|-------------|
@@ -593,219 +453,93 @@ All settings are parsed by `src/config.py` (Pydantic `Settings`). Examples live 
 | `EWS_CLIENT_SECRET` | Azure AD app client secret |
 | `EWS_TENANT_ID` | Azure AD tenant ID |
 
-#### Auth — Basic / NTLM
+### Auth — Basic / NTLM
 
 | Variable | Description |
 |----------|-------------|
-| `EWS_USERNAME` | Username (email or `DOMAIN\\user`) |
-| `EWS_PASSWORD` | Password |
+| `EWS_USERNAME` | SMTP address (basic) or `DOMAIN\user` (NTLM) |
+| `EWS_PASSWORD` | |
 
-#### Impersonation / delegation
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EWS_IMPERSONATION_ENABLED` | `false` | Enable `target_mailbox` on base tools |
-| `EWS_IMPERSONATION_TYPE` | `impersonation` | `impersonation` (service account with `ApplicationImpersonation`) or `delegate` |
-
-#### Transport
+### Multi-mailbox
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` (HTTP + Server-Sent Events) |
-| `MCP_HOST` | `127.0.0.1` | Bind address for SSE. Non-loopback values require `MCP_API_KEY` |
-| `MCP_PORT` | `8000` | Port for SSE |
-| `MCP_API_KEY` | — | Required bearer token on every non-`/health` request when the server is reachable beyond loopback. Clients send `Authorization: Bearer <key>` or `X-API-Key: <key>`. |
-| `MCP_SERVER_NAME` | `ews-mcp-server` | Identifier advertised to MCP clients |
+| `EWS_IMPERSONATION_ENABLED` | `false` | Enable `target_mailbox=` parameter on every tool |
 
-#### OpenAPI (SSE transport)
+### AI (optional)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `API_BASE_URL` | — | Public URL advertised in the OpenAPI `servers` array |
-| `API_BASE_URL_INTERNAL` | — | Internal container URL (e.g. `http://ews-mcp:8000`) |
-| `API_TITLE` | `Exchange Web Services (EWS) MCP API` | OpenAPI title |
-| `API_VERSION` | `3.4.0` | OpenAPI version |
+| Variable | Description |
+|----------|-------------|
+| `ENABLE_AI` | Master switch for the AI category |
+| `ENABLE_SEMANTIC_SEARCH` | Enable `semantic_search_emails` |
+| `AI_PROVIDER` | `openai`, `anthropic`, or `local` |
+| `AI_BASE_URL` | Endpoint (required for `local`) |
+| `AI_EMBEDDING_MODEL` | e.g. `nomic-embed-text`, `text-embedding-3-small` |
+| `AI_API_KEY` | Required for non-`local` providers |
 
-#### Category feature flags
+`AI_MODEL` (chat) is optional — only `AI_EMBEDDING_MODEL` is needed for
+the AI tool that actually ships on this MCP.
 
-All default to `true`. Set to `false` to skip registering a whole category:
-
-| Variable | Toggles |
-|----------|---------|
-| `ENABLE_EMAIL` | Email, drafts, attachments |
-| `ENABLE_CALENDAR` | Calendar |
-| `ENABLE_CONTACTS` | Contacts + contact intelligence |
-| `ENABLE_TASKS` | Tasks |
-| `ENABLE_FOLDERS` | Folder tools (folders are always loaded, but can be disabled here) |
-| `ENABLE_ATTACHMENTS` | Attachment tools |
-| `ENABLE_AGENT` | Agent-secretary tools (memory, commitments, approvals, rules, voice, OOF policy, briefing, meeting prep). Default `true`. |
-
-#### Agent secretary
+### Transport
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENABLE_AGENT` | `true` | Register the 24 agent-secretary tools |
-| `EWS_MEMORY_DIR` | `data/memory` | Jail directory for per-mailbox SQLite memory files |
-
-#### AI (all optional, off by default)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENABLE_AI` | `false` | Master switch |
-| `AI_PROVIDER` | `openai` | `openai`, `anthropic`, or `local` (OpenAI-compatible) |
-| `AI_API_KEY` | — | Provider API key |
-| `AI_MODEL` | auto | e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20241022` |
-| `AI_EMBEDDING_MODEL` | auto | e.g. `text-embedding-3-small` |
-| `AI_BASE_URL` | — | Custom base URL (local / proxy) |
-| `AI_MAX_TOKENS` | `4096` | Completion tokens |
-| `AI_TEMPERATURE` | `0.7` | Sampling temperature |
-| `ENABLE_SEMANTIC_SEARCH` | `false` | Enables `semantic_search_emails` |
-| `ENABLE_EMAIL_CLASSIFICATION` | `false` | Enables `classify_email` |
-| `ENABLE_EMAIL_SUMMARIZATION` | `false` | Enables `summarize_email` |
-| `ENABLE_SMART_REPLIES` | `false` | Enables `suggest_replies` |
-
-#### Performance / reliability
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENABLE_CACHE` | `true` | Response caching |
-| `CACHE_TTL` | `300` | Cache TTL seconds |
-| `CONNECTION_POOL_SIZE` | `10` | EWS connection pool size |
-| `REQUEST_TIMEOUT` | `30` | HTTP timeout seconds |
-| `RATE_LIMIT_ENABLED` | `true` | Enable rate limiter |
-| `RATE_LIMIT_REQUESTS_PER_MINUTE` | `25` | Sliding-window limit |
-| `ENABLE_AUDIT_LOG` | `true` | Emit audit-log entries |
-| `MAX_ATTACHMENT_SIZE` | `157286400` | 150 MB default |
-
-#### Misc
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TIMEZONE` | `UTC` | IANA timezone (e.g. `America/New_York`) |
-| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `MCP_TRANSPORT` | `stdio` | `stdio` or `sse` |
+| `MCP_HOST` | `127.0.0.1` | SSE bind address — non-loopback requires `MCP_API_KEY` |
+| `MCP_PORT` | `8000` | SSE port |
+| `MCP_API_KEY` | — | Bearer token for SSE clients |
 
 ---
 
 ## Architecture
 
 ```
-EWS MCP Server
-├── MCP Protocol Layer             stdio  •  SSE (HTTP + /openapi.json)
-├── Middleware
-│   ├── RateLimiter                25 req/min sliding window (configurable)
-│   ├── CircuitBreaker             trips after 3 connectivity failures, 60s cool-down
-│   ├── ErrorHandler               exception → structured response mapper
-│   ├── Logging                    app log + error log + audit log (rotating)
-│   └── OpenAPI Adapter            per-tool POST /api/tools/{name} routes
-├── Tool Registry (42 base + 4 AI = 46)
-│   ├── Email              (10)    send, read, search(3 modes), update, delete, move, copy, reply, forward
-│   ├── Drafts             (3)     create_draft, create_reply_draft, create_forward_draft
-│   ├── Attachments        (7)     list, download, add, delete, read(PDF/DOCX/XLSX), mime, attach_email_to_draft
-│   ├── Calendar           (7)     create, get, update, delete, respond, availability, find_meeting_times
-│   ├── Contacts           (3)     create, update, delete
-│   ├── Contact Intelligence(2)    find_person, analyze_contacts
-│   ├── Tasks              (5)     create, get, update, complete, delete
-│   ├── Search             (1)     search_by_conversation
-│   ├── Folders            (3)     list, find, manage(create/delete/rename/move)
-│   ├── Out-of-Office      (1)     oof_settings(get/set)
-│   └── AI (optional)      (4)     semantic_search, classify, summarize, suggest_replies
-├── Services
-│   ├── PersonService              multi-source contact discovery + relationship scoring
-│   ├── EmailService               message lookups, folder resolution
-│   ├── ThreadService              conversation reconstruction
-│   └── AttachmentService          attachment I/O
-├── Adapters
-│   ├── GALAdapter                 multi-strategy directory search (exact → partial → domain)
-│   └── CacheAdapter               in-memory TTL cache
-├── AI (optional)
-│   ├── Providers                  OpenAI  •  Anthropic  •  OpenAI-compatible local
-│   ├── EmbeddingService           file-backed cache at data/embeddings/embeddings.json
-│   └── ClassificationService      priority / sentiment / summary / reply suggestions
-├── EWS Client (exchangelib)       impersonation & delegation via target_mailbox
-└── Authentication                 OAuth2 (MSAL) • Basic • NTLM
+                ┌──────────────────────┐
+                │   MCP client (LLM)   │   stdio or SSE
+                └──────────┬───────────┘
+                           │  JSON-RPC over MCP
+                ┌──────────▼───────────┐
+                │   EWS MCP Server     │   ──→  src/tools/* (67 tool classes)
+                │                      │   ──→  src/body_format.py  (HTML ⇄ Markdown)
+                │                      │   ──→  src/cache/sqlite_cache.py
+                └──────────┬───────────┘            ▲ │
+                           │                        │ │
+                           │  exchangelib SOAP      │ │  per-mailbox
+                ┌──────────▼───────────┐            │ │  ews_mcp_<email>.sqlite
+                │  Microsoft Exchange  │            │ │  (3 tables)
+                │  / Office 365        │            │ │
+                └──────────────────────┘            │ │
+                                                    │ │
+                Optional AI provider for embeddings │ │
+                  (OpenAI / Anthropic / Ollama / ──┘ │
+                   LM Studio / llama.cpp / ...)      │
+                                                     │
+                Read/write the cache:                │
+                  body_format_cache (markdown ----->─┘
+                  attachment_text_cache             ─┘
+                  embedding_cache                   ─┘
 ```
+
+Detailed component design in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
 ## Documentation
 
-### Getting Started
-- [Setup Guide](docs/SETUP.md) - Step-by-step installation
-- [Deployment Guide](docs/DEPLOYMENT.md) - Production deployment
-- [Docker Guide](docs/GHCR.md) - Container usage
-
-### Feature Guides
-- [Reply & Forward Guide](docs/REPLY_FORWARD.md) - Email threading & signatures
-- [Impersonation Guide](docs/IMPERSONATION.md) - Multi-mailbox access
-- [API Reference](docs/API.md) - Complete tool documentation
-
-### Integration
-- [Open WebUI Setup](OPENWEBUI_SETUP.md) - REST API integration
-- [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues
-
-### Architecture
-- [Architecture Overview](docs/ARCHITECTURE.md) - Technical deep dive
-- [v3.0 Changes](docs/V3_IMPLEMENTATION_SUMMARY.md) - Version history
-
----
-
-## Security & operations notes
-
-Things to be aware of when deploying. See the Unreleased section of
-[CHANGELOG.md](CHANGELOG.md) for the specific hardening work this covers.
-
-- **SSE transport now defaults to loopback.** `MCP_HOST` defaults to
-  `127.0.0.1`. To expose the server on a non-loopback address you
-  must also set `MCP_API_KEY=<secret>` — clients then pass
-  `Authorization: Bearer <secret>` (or `X-API-Key: <secret>`) on every
-  non-`/health` request. Startup refuses the insecure combination.
-- **TLS verification is on by default.** Set
-  `EWS_INSECURE_SKIP_VERIFY=true` only if your internal Exchange
-  server uses a private CA that cannot be installed into the container's
-  trust store. A warning is logged when this is enabled.
-- **Attachment downloads are jailed.** `download_attachment(save_path=...)`
-  now writes inside `EWS_DOWNLOAD_DIR` (default `./downloads`);
-  directory components and `..` in the caller-supplied path are
-  stripped. The response `file_path` tells you the resolved location.
-- **Audit-log redaction.** Email bodies, token fields, and base64
-  attachment content are replaced with `[redacted]` before being
-  written to `audit.log`.
-- **AI tools now honour `target_mailbox`.** All 46 tools (42 base + 4 AI)
-  accept `target_mailbox` when `EWS_IMPERSONATION_ENABLED=true`.
-- **`read_attachment` supports PDF / DOCX / XLSX / TXT.** Other formats
-  return an "Unsupported file type" error.
-
-## Version History
-
-See [CHANGELOG.md](CHANGELOG.md) for the full history. Recent highlights:
-
-- **v3.4.x (Unreleased)** — HTML reply/forward drafts; `find_folder`; folder-ID support on move/parent resolution; Windows MSIX wrapper; availability parsing fix.
-- **v3.4.0** — Circuit breaker; `asyncio.to_thread` / `asyncio.gather`; 200-char error truncation; removed `handle_ews_errors`; deduplicated JSON encoder.
-- **v3.3.0** — Tool consolidation (unified search / find_person / manage_folder / oof_settings / analyze_contacts).
-- **v3.2.0** — Reply, forward, inline base64 attachments; impersonation on every base tool.
-- **v3.0.0** — Person-centric architecture; multi-strategy GAL search; enterprise logging.
+- **[API.md](docs/API.md)** — every tool with input / output schemas + examples
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — component design + data flow
+- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** — production deployment patterns
+- **[REPLY_FORWARD.md](docs/REPLY_FORWARD.md)** — signature preservation deep-dive
+- **[IMPERSONATION.md](docs/IMPERSONATION.md)** — multi-mailbox / delegate access
+- **[AGENT_SECRETARY.md](docs/AGENT_SECRETARY.md)** — memory / commitments / approvals / rules / voice / OOF policy / briefing
+- **[CONNECTION_GUIDE.md](docs/CONNECTION_GUIDE.md)** — Claude Desktop and other MCP-client setup
+- **[SETUP.md](docs/SETUP.md)** — getting started in detail
+- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — diagnostic playbook
+- **[COMMON_PITFALLS.md](docs/COMMON_PITFALLS.md)** — recurring foot-guns
+- **[CHANGELOG.md](CHANGELOG.md)** — version history
 
 ---
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions welcome! Please read the contributing guidelines before submitting PRs.
-
-## Support
-
-- Issues: [GitHub Issues](https://github.com/azizmazrou/ews-mcp/issues)
-- Discussions: [GitHub Discussions](https://github.com/azizmazrou/ews-mcp/discussions)
-
----
-
-<div align="center">
-
-**Built with exchangelib and the Model Context Protocol**
-
-*Making AI assistants work seamlessly with Microsoft Exchange*
-
-</div>
+MIT — see [LICENSE](LICENSE).
