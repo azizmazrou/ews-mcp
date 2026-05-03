@@ -382,16 +382,29 @@ def _enable_tcp_keepalive(
 
 
 def _authorized_request(
-    headers: Iterable[Tuple[bytes, bytes]], api_key: Optional[str],
+    headers: Iterable[Tuple[bytes, bytes]],
+    api_key: Optional[str],
+    query_string: Optional[bytes] = None,
 ) -> bool:
-    """Constant-time auth check for the Bearer / X-API-Key headers.
+    """Constant-time auth check for the Bearer / X-API-Key / ?api_key= forms.
+
+    Three accepted token transports — checked in this order:
+
+    1. ``Authorization: Bearer <key>``  (RFC-6750, preferred)
+    2. ``X-API-Key: <key>``             (legacy header form)
+    3. ``?api_key=<key>`` query param   (for clients whose UI cannot inject
+       custom headers — e.g. Claude Desktop's "Custom Connector" dialog,
+       which exposes URL + OAuth fields but not arbitrary headers)
 
     ``hmac.compare_digest`` is used so a wrong key of the correct length
     doesn't leak prefix information via string-comparison timing.
 
     Returns True if ``api_key`` is unset (no auth configured) or any
-    supported header contains the configured key. Never logs the
+    supported transport carries the configured key. Never logs the
     presented value; callers get False and a generic 401.
+
+    Operational note: when the query-param form is in use, redact it from
+    any URL/access-log line via ``redact_url_query_secrets()`` before write.
     """
     if not api_key:
         return True
@@ -408,7 +421,45 @@ def _authorized_request(
             candidate = raw.strip().encode("utf-8")
             if hmac.compare_digest(candidate, expected):
                 return True
+    # Query-param fallback. ASGI delivers ``query_string`` as bytes.
+    if query_string:
+        try:
+            qs_text = query_string.decode("utf-8", errors="replace") if isinstance(query_string, (bytes, bytearray)) else str(query_string)
+            from urllib.parse import parse_qs
+            params = parse_qs(qs_text, keep_blank_values=False)
+            for candidate in params.get("api_key", []):
+                if hmac.compare_digest(candidate.encode("utf-8"), expected):
+                    return True
+        except Exception:
+            # Malformed query string -> just deny; never raise from auth.
+            pass
     return False
+
+
+def redact_url_query_secrets(query_string: Any) -> str:
+    """Return a printable form of ``query_string`` with sensitive params
+    masked. Safe to drop into log lines that include URLs.
+
+    Mirrors the SENSITIVE_KEY_PATTERNS in middleware.logging — anything
+    matching ``api_key`` / ``token`` / ``secret`` / etc. becomes
+    ``api_key=[redacted]``.
+    """
+    if not query_string:
+        return ""
+    if isinstance(query_string, (bytes, bytearray)):
+        text = query_string.decode("utf-8", errors="replace")
+    else:
+        text = str(query_string)
+    redacted_keys = ("api_key", "apikey", "token", "secret", "password", "authorization")
+    out = []
+    for pair in text.split("&"):
+        if "=" in pair:
+            k, _v = pair.split("=", 1)
+            if k.lower() in redacted_keys:
+                out.append(f"{k}=[redacted]")
+                continue
+        out.append(pair)
+    return "&".join(out)
 
 
 class EWSMCPServer:
@@ -1200,14 +1251,16 @@ class EWSMCPServer:
             })
             await send({"type": "http.response.body", "body": body})
 
-        def _authorized(headers: list) -> bool:
+        def _authorized(headers: list, query_string: Optional[bytes] = None) -> bool:
             """Backward-compatible wrapper around ``_authorized_request``.
 
             Kept as a closure (rather than inlining) so the caller in
-            ``app`` reads the same way as before — only the auth
-            algorithm changed (constant-time compare via hmac).
+            ``app`` reads the same way as before. ``query_string`` is
+            optional so callers that already check headers-only continue
+            to work; the ``app`` ASGI router passes it for the URL-param
+            fallback used by Claude Desktop's Custom Connector UI.
             """
-            return _authorized_request(headers, api_key)
+            return _authorized_request(headers, api_key, query_string)
 
         # Create a simple ASGI router that handles both MCP and REST endpoints
         async def app(scope, receive, send):
@@ -1239,8 +1292,14 @@ class EWSMCPServer:
                     })
                     return
 
-                # All other endpoints require auth when MCP_API_KEY is set
-                if not _authorized(scope.get("headers") or []):
+                # All other endpoints require auth when MCP_API_KEY is set.
+                # Headers are the primary transport (Bearer / X-API-Key);
+                # ?api_key= in the query string is the fallback for clients
+                # that can't inject custom headers (Claude Desktop UI).
+                if not _authorized(
+                    scope.get("headers") or [],
+                    scope.get("query_string"),
+                ):
                     await _send_401(send)
                     return
 
