@@ -25,6 +25,7 @@ from ..utils import (
     format_body_for_html,
     sanitize_html,
 )
+from ..body_format import compose_body, WRITE_FORMAT_SCHEMA as BODY_FORMAT_SCHEMA
 from .email_tools import add_reply_prefix, add_forward_prefix
 
 
@@ -229,6 +230,7 @@ class CreateReplyDraftTool(BaseTool):
                         "items": {"type": "string"},
                         "description": "Outlook categories to attach to the reply draft (Issue #114)."
                     },
+                    **BODY_FORMAT_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to create the draft on behalf of (requires impersonation/delegate access)"
@@ -245,11 +247,17 @@ class CreateReplyDraftTool(BaseTool):
         attachments = kwargs.get("attachments", [])
         target_mailbox = kwargs.get("target_mailbox")
         body = (kwargs.get("body") or "").strip()
+        body_format = kwargs.get("body_format", "html")
         # Issue #119: caller-supplied cc/bcc were silently dropped on the
         # saved draft. Now propagated alongside the auto-derived recipients.
         extra_cc = kwargs.get("cc") or []
         extra_bcc = kwargs.get("bcc") or []
         categories = kwargs.get("categories")  # Issue #114
+
+        # Convert markdown/text bodies to HTML BEFORE the heuristic in
+        # format_body_for_html runs. Mirrors ReplyEmailTool/ForwardEmailTool.
+        if body and body_format != "html":
+            body, _ = compose_body(body, body_format)
 
         if not message_id:
             raise ToolExecutionError("message_id is required")
@@ -440,6 +448,7 @@ class CreateForwardDraftTool(BaseTool):
                         "items": {"type": "string"},
                         "description": "Outlook categories to attach to the forward draft (Issue #114)."
                     },
+                    **BODY_FORMAT_SCHEMA,
                     "target_mailbox": {
                         "type": "string",
                         "description": "Email address to create the draft on behalf of (requires impersonation/delegate access)"
@@ -454,11 +463,17 @@ class CreateForwardDraftTool(BaseTool):
         message_id = kwargs.get("message_id")
         to_recipients = kwargs.get("to", [])
         body = (kwargs.get("body") or "").strip()
+        body_format = kwargs.get("body_format", "html")
         cc_recipients = kwargs.get("cc", [])
         bcc_recipients = kwargs.get("bcc", [])
         attachments = kwargs.get("attachments", [])
         target_mailbox = kwargs.get("target_mailbox")
         categories = kwargs.get("categories")  # Issue #114
+
+        # Convert markdown/text bodies to HTML BEFORE the heuristic in
+        # format_body_for_html runs. Mirrors CreateReplyDraftTool.
+        if body and body_format != "html":
+            body, _ = compose_body(body, body_format)
 
         if not message_id:
             raise ToolExecutionError("message_id is required")

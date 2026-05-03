@@ -1,5 +1,76 @@
 # Changelog
 
+## v4.0.1 — 2026-05-03
+
+### `?api_key=` query-param auth — Claude Desktop UI compatibility
+
+The Claude Desktop "Custom Connector" dialog exposes a URL field and OAuth
+fields (Client ID + Secret), but **no field for a static `Authorization:
+Bearer` header**. Until v4.0.0 the only way to use the v4 server from
+Claude Desktop was via `mcp-remote` (a CLI adapter) plus a hand-edited
+`claude_desktop_config.json` — needlessly clunky for a local install.
+
+`_authorized_request()` now accepts the same key over **three** transports:
+
+1. `Authorization: Bearer <key>`  (preferred — RFC-6750)
+2. `X-API-Key: <key>`             (legacy header)
+3. `?api_key=<key>` query param   (NEW — Claude Desktop UI fallback)
+
+The query param is only consulted as a last resort and is constant-time
+compared via `hmac.compare_digest`, identical to the header path. A new
+helper `redact_url_query_secrets()` masks any `api_key` / `token` /
+`secret` value before a URL is written to a log line — currently no log
+path includes URLs, but the helper exists as a guardrail for future work.
+
+**To use it**: set `MCP_API_KEY=<your-token>` in the container's `.env`
+(unchanged), then in Claude Desktop's Custom Connector dialog paste:
+
+```
+http://<host>:8000/sse?api_key=YOUR_TOKEN
+```
+
+Leave the OAuth Client ID / Secret fields blank. No JSON, no adapter.
+
+This is a v4.x stop-gap. Proper OAuth 2.0 with PKCE will land in v4.1.0;
+the query-param transport will remain for backward compatibility.
+
+Verified locally against malformed input, URL-encoded values, and the
+redaction helper before deploy. The repo intentionally ships without a
+test directory (per the v4 cleanup); the dev kit is private.
+
+### `&gt;` no longer renders literally on recipient side
+
+**Bug**: when the user (or skill) called `reply_email` / `forward_email` /
+`create_reply_draft` / `create_forward_draft` with `body_format="html"` and
+a body that contained pre-encoded HTML entities but no tags
+(e.g. `"Stage 1 &gt; Stage 2"`, `"Approved &rarr; next stage"`, `"&copy; 2026"`),
+the recipient saw the entity rendered **as literal text** — `&gt;` instead of `>`.
+
+**Cause**: `utils.format_body_for_html()` decided "is this HTML?" by looking
+only for opening/closing tags. An entity-only body slipped past the
+heuristic, was treated as plain text, and ran through `escape_html()` —
+which escaped the leading `&` to `&amp;`, turning `&gt;` into `&amp;gt;`.
+HTML mail clients then rendered that as the literal four-character string `&gt;`.
+
+This is a sibling of the v3.4 thread-header `&amp;` cascade fix — same shape
+(double-escape), different surface (body content rather than the From/To
+header strip).
+
+**Fix**: `format_body_for_html()` now also detects valid HTML entities
+(`&amp;` / `&gt;` / `&#960;` / `&#x2014;`). Any body containing one is
+treated as HTML and routed to `sanitize_html()` rather than `escape_html()`.
+
+**Plus**: `create_reply_draft` and `create_forward_draft` were silently
+ignoring the `body_format` parameter — they had no schema for it and
+never called `compose_body`. Markdown bodies were getting plain-text
+escaped, so headings/lists/code blocks didn't render. They now mirror the
+send-tool path: schema includes `body_format`, and `compose_body()` runs
+when it is `markdown` / `text`.
+
+Verified locally against the full set of entity types (`&gt;` / `&amp;` /
+`&#960;` / `&#x2014;` / `&copy;`), the plain-text-with-`<` no-regression
+case, and the full-pipeline reproduction before deploy.
+
 ## v4.0.0 — 2026-05-03
 
 The first **bidirectional body format** release. The MCP now accepts

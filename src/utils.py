@@ -243,20 +243,30 @@ def sanitize_html(html_content: str) -> str:
 def format_body_for_html(body: Optional[str]) -> str:
     """Return an HTML-safe rendering of a user-supplied body.
 
-    - If the body already contains tags, run it through sanitize_html so
-      attacker-controlled markup is neutralised while the author's intent is
-      preserved.
+    - If the body already contains tags **or HTML entities**, run it through
+      sanitize_html so attacker-controlled markup is neutralised while the
+      author's intent is preserved.
     - Otherwise treat it as plain text: HTML-escape and convert newlines to
       <br/> so line breaks survive the round trip.
+
+    Entity detection matters: a body like ``"Stage 1 &gt; Stage 2"`` has no
+    tags but does have a valid entity. Without entity detection the
+    heuristic would call ``escape_html()``, which escapes the leading ``&``
+    to ``&amp;`` — turning ``&gt;`` into ``&amp;gt;`` and rendering literal
+    ``&gt;`` text in the recipient's view (the v4 ``&gt;`` bug).
     """
     if not body:
         return ""
     body = body.strip()
-    # Require a real opening/closing tag (e.g. <p>, </div>, <br/>) — the
-    # previous `<[^>]+>` matched plain text like "x < y" and silently
-    # routed it through sanitize_html, which would not escape the `<`.
-    looks_like_html = bool(re.search(r"</?[a-zA-Z][a-zA-Z0-9]*\b[^<>]*/?>", body))
-    if looks_like_html:
+    # Real opening/closing tag (e.g. <p>, </div>, <br/>). The previous
+    # `<[^>]+>` matched plain text like "x < y" and silently routed it
+    # through sanitize_html, which would not escape the `<`.
+    has_tag = bool(re.search(r"</?[a-zA-Z][a-zA-Z0-9]*\b[^<>]*/?>", body))
+    # Named or numeric HTML entity: &amp; &gt; &nbsp; &#39; &#x2014; ...
+    # We only match terminated entities (`;`) so a stray `&` followed by
+    # non-entity text still falls through to the escape branch.
+    has_entity = bool(re.search(r"&(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);", body))
+    if has_tag or has_entity:
         return sanitize_html(body)
     return escape_html(body).replace("\n", "<br/>")
 

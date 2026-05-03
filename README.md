@@ -188,9 +188,29 @@ docker run -d \
 The two volume mounts are recommended so the SQLite cache and logs
 survive container recreation.
 
-### Claude Desktop config
+### Claude Desktop — three setups, pick one
 
-Add to your `claude_desktop_config.json`:
+#### A. Custom Connector UI (no JSON — easiest, v4.0.1+)
+
+If you've started the server with SSE transport and an `MCP_API_KEY` set,
+open Claude Desktop → **Connectors** → **Custom Connector** and fill in:
+
+| Field | Value |
+|---|---|
+| **Name** | `EWS` (anything) |
+| **HTTP URL** | `http://<host>:8000/sse?api_key=YOUR_MCP_API_KEY` |
+| **OAuth Client ID** | _(leave blank)_ |
+| **OAuth Client Secret** | _(leave blank)_ |
+
+The `?api_key=` query-param is a stop-gap until v4.1.0 lands proper OAuth
+2.0. The token is hmac-compared on the server, never logged. Replace
+`<host>` with `localhost` (local install), your LAN IP (e.g.
+`192.168.1.10`), or a public hostname behind a TLS proxy. Use HTTPS for
+anything beyond the local network.
+
+#### B. Local stdio container (no SSE port — simplest auth model)
+
+Add to `claude_desktop_config.json`:
 
 ```json
 {
@@ -207,9 +227,80 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
+Claude Desktop launches the container per session, talks to it over
+stdin/stdout. No network port exposed; no auth headache. Best for a
+single user on the same machine.
+
+#### C. Remote SSE via `mcp-remote` (header-based auth, JSON config)
+
+For users on older Claude Desktop versions or who need custom headers:
+
+```json
+{
+  "mcpServers": {
+    "ews": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote",
+        "https://your-host/sse",
+        "--header", "Authorization: Bearer YOUR_MCP_API_KEY"
+      ]
+    }
+  }
+}
+```
+
 Config-file location: `%APPDATA%\Claude\claude_desktop_config.json`
 (Windows), `~/Library/Application Support/Claude/claude_desktop_config.json`
 (macOS), `~/.config/Claude/claude_desktop_config.json` (Linux).
+
+### docker-compose
+
+A reference `docker-compose.yml` ships in the repo. After cloning
+(see "From source" below) you can:
+
+```bash
+cp .env.example .env  # edit credentials
+docker compose up -d
+```
+
+### From source (development / forks)
+
+If you want to modify the code, fork-and-PR, or run a custom build:
+
+```bash
+git clone https://github.com/azizmazrou/ews-mcp.git
+cd ews-mcp
+pip install -r requirements.txt
+cp .env.example .env
+python -m src.main
+```
+
+Or container-build:
+
+```bash
+docker build -t ews-mcp:dev .
+docker run -d --name ews-mcp --env-file .env --network host ews-mcp:dev
+```
+
+### Releasing your own fork
+
+The repo's CI (`.github/workflows/docker-publish.yml`) publishes a
+multi-arch image to GHCR on every push to `main` and on every
+`v*.*.*` tag. To cut a release on a fork:
+
+```bash
+# 1. Make sure your fork has GHCR write permissions enabled in
+#    Settings → Actions → General → Workflow permissions:
+#    "Read and write permissions"
+# 2. Tag and push
+git tag v4.0.1
+git push origin v4.0.1
+```
+
+The workflow runs, builds for `amd64` + `arm64`, and publishes
+`ghcr.io/<your-fork>/ews-mcp:4.0.1`, `:4.0`, `:4`, `:sha-<…>`, and
+updates `:latest` if the tag is on the default branch.
 
 ---
 
