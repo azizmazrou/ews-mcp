@@ -28,6 +28,7 @@ from ..bodyclean import clean_body, html_to_text
 from ..dates import parse_when
 from ..dto import envelope, event_card, fmt_dt
 from ..errors import ToolError
+from ..identity import caller_of, namespace_uid
 from .base import Context, ToolSpec
 
 GRID_MINUTES = 30  # free/busy slot granularity
@@ -454,7 +455,7 @@ async def _get_server_status(ctx: Context) -> Dict[str, Any]:
             cache_block["error"] = str(exc)
     if ctx.sync is not None:
         cache_block["sync"] = ctx.sync.status()
-    return {
+    status = {
         "ok": True,
         "version": __version__,
         "uptime_s": int(time.time() - ctx.started_at),
@@ -462,10 +463,25 @@ async def _get_server_status(ctx: Context) -> Dict[str, Any]:
         "tier": ctx.settings.ews_capability_tier,
         "send_kill_switch": not ctx.settings.send_enabled,
         "tools": len(ctx.registry),
-        "counters": dict(ctx.counters),
+        "counters": dict(ctx.root.counters),
         "alias_stats": ctx.aliaser.stats(),
         "cache": cache_block,
     }
+    # "Who am I, and how loaded is this server?" — answered here rather than
+    # as a 29th tool, which would trip the generated tool table and its count
+    # assertions for something every status call can carry for free.
+    caller = caller_of(ctx)
+    status["caller"] = {
+        "mailbox": caller.smtp,
+        "authenticated": ctx.principal is not None,
+        "subject_hash": (namespace_uid(ctx.settings, caller.subject)
+                         if ctx.principal is not None else None),
+    }
+    if ctx.binder is not None:
+        status["pool"] = ctx.binder.pool.stats()
+        if ctx.binder.caches is not None:
+            cache_block["per_caller"] = ctx.binder.caches.stats()
+    return status
 
 
 # ---------------------------------------------------------------- specs

@@ -40,8 +40,10 @@ def _ctx(tmp_path) -> Context:
     return ctx
 
 
-def _drive(app, path, messages, method="POST"):
-    scope = {"type": "http", "path": path, "method": method, "headers": []}
+def _drive(app, path, messages, method="POST", headers=None, scope=None):
+    scope = scope if scope is not None else {}
+    scope.update({"type": "http", "path": path, "method": method,
+                  "headers": list(headers or [])})
     queue = list(messages)
     sent = []
 
@@ -53,6 +55,14 @@ def _drive(app, path, messages, method="POST"):
 
     asyncio.run(app(scope, receive, send))
     return sent
+
+
+def _header(sent, name):
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    for key, value in start["headers"]:
+        if bytes(key).lower() == name:
+            return bytes(value).decode()
+    return None
 
 
 def _status_and_body(sent):
@@ -113,6 +123,127 @@ def test_disconnect_mid_body_does_not_hang_or_crash(tmp_path):
         {"type": "http.disconnect"},
     ])
     assert sent == []  # no response to a vanished client — and no hang
+
+
+# --- AUTH_MODE=oidc ----------------------------------------------------------
+#
+# The resource server sits in front of the same dispatcher, so these drive the
+# REAL app closure with REAL signed tokens — only the JWKS transport is faked.
+
+def _oidc_app(tmp_path, rsa_keys, **overrides):
+    from conftest import make_binder, make_verifier, oidc_settings
+    settings = oidc_settings(**overrides)
+    ctx = _ctx(tmp_path)
+    ctx.settings = settings
+    ctx.binder = make_binder(settings)
+    return build_app(ctx, settings, verifier=make_verifier(rsa_keys, settings))
+
+
+def _bearer(token):
+    return [(b"authorization", f"Bearer {token}".encode())]
+
+
+def test_oidc_accepts_a_valid_token_and_dispatches(tmp_path, rsa_keys):
+    from conftest import make_token
+    app = _oidc_app(tmp_path, rsa_keys)
+    sent = _drive(app, "/api/tools/echo",
+                  [{"type": "http.request", "body": b'{"q":"hi"}', "more_body": False}],
+                  headers=_bearer(make_token(rsa_keys)))
+    status, body = _status_and_body(sent)
+    assert status == 200
+    assert body["got"] == {"q": "hi"}
+
+
+def test_oidc_refuses_an_unauthenticated_call(tmp_path, rsa_keys):
+    app = _oidc_app(tmp_path, rsa_keys)
+    sent = _post(app, "echo", {"q": "hi"})
+    status, body = _status_and_body(sent)
+    assert status == 401
+    assert body["error"]["code"] == "auth_failed"
+    assert 'error="invalid_token"' in _header(sent, b"www-authenticate")
+
+
+def test_oidc_refuses_an_expired_token_with_a_challenge(tmp_path, rsa_keys):
+    import time
+
+    from conftest import make_token
+    app = _oidc_app(tmp_path, rsa_keys)
+    past = int(time.time()) - 7200
+    sent = _drive(app, "/api/tools/echo",
+                  [{"type": "http.request", "body": b"{}", "more_body": False}],
+                  headers=_bearer(make_token(rsa_keys, iat=past, exp=past + 60)))
+    status, _ = _status_and_body(sent)
+    assert status == 401
+    challenge = _header(sent, b"www-authenticate")
+    assert 'error="invalid_token"' in challenge
+    assert "oauth-protected-resource" in challenge
+
+
+def test_oidc_serves_each_caller_their_own_mailbox(tmp_path, rsa_keys):
+    """With a per-caller upstream there is no configured mailbox to protect:
+    a second identity is served, and served THEIR OWN mailbox."""
+    from conftest import make_token
+
+    from ewsmcp.identity import SCOPE_PRINCIPAL_KEY
+    app = _oidc_app(tmp_path, rsa_keys)
+    scope = {}
+    status, _ = _status_and_body(_drive(
+        app, "/api/tools/echo",
+        [{"type": "http.request", "body": b"{}", "more_body": False}],
+        headers=_bearer(make_token(rsa_keys, sub="someone-else",
+                                   upn="other@corp.example")),
+        scope=scope))
+    assert status == 200
+    assert scope[SCOPE_PRINCIPAL_KEY].smtp == "other@corp.example"
+
+
+def test_oidc_puts_the_principal_in_the_scope(tmp_path, rsa_keys):
+    """The plumbing contract with the tool layer: what lands in the scope here
+    is what `call_tool` reads back out (see test_mcp_sdk_pins.py)."""
+    from conftest import make_token
+
+    from ewsmcp.auth import SCOPE_PRINCIPAL_KEY
+    app = _oidc_app(tmp_path, rsa_keys)
+    scope = {}
+    _drive(app, "/api/tools/echo",
+           [{"type": "http.request", "body": b"{}", "more_body": False}],
+           headers=_bearer(make_token(rsa_keys)), scope=scope)
+    assert scope[SCOPE_PRINCIPAL_KEY].smtp == "exec@corp.example"
+
+
+def test_oidc_still_requires_the_api_key_when_one_is_set(tmp_path, rsa_keys):
+    """Defence in depth: a leaked JWT alone must not reach the mailbox."""
+    from conftest import make_token
+    app = _oidc_app(tmp_path, rsa_keys, mcp_api_key="perimeter-secret")
+    status, _ = _status_and_body(_drive(
+        app, "/api/tools/echo",
+        [{"type": "http.request", "body": b"{}", "more_body": False}],
+        headers=_bearer(make_token(rsa_keys))))
+    assert status == 401
+
+
+def test_health_endpoints_stay_public_in_oidc(tmp_path, rsa_keys):
+    app = _oidc_app(tmp_path, rsa_keys)
+    for path in ("/livez", "/health", "/version"):
+        status, _ = _status_and_body(_drive(app, path, [], method="GET"))
+        assert status == 200, path
+
+
+def test_protected_resource_metadata_is_public(tmp_path, rsa_keys):
+    from conftest import AUDIENCE, ISSUER
+    app = _oidc_app(tmp_path, rsa_keys)
+    status, body = _status_and_body(_drive(
+        app, "/.well-known/oauth-protected-resource", [], method="GET"))
+    assert status == 200
+    assert body["resource"] == AUDIENCE
+    assert body["authorization_servers"] == [ISSUER]
+
+
+def test_protected_resource_metadata_absent_in_static_mode(tmp_path):
+    app = build_app(_ctx(tmp_path), make_settings())
+    status, _ = _status_and_body(_drive(
+        app, "/.well-known/oauth-protected-resource", [], method="GET"))
+    assert status == 404
 
 
 def test_confirm_token_accepted_by_public_schema(tmp_path):
