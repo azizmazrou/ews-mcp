@@ -11,8 +11,9 @@ from .config import Settings
 from .gateway.client import EWSGateway
 from .gateway.connection import ConnectionManager
 from .ids import NullAliaser, get_aliaser
+from .identity import SCOPE_PRINCIPAL_KEY
 from .tools import build_registry
-from .tools.base import Context, dispatch
+from .tools.base import Context, dispatch, for_principal
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,9 @@ def build_context(settings: Settings) -> Context:
         logger.error("audit init failed (%s) — audit disabled", exc)
         audit = _NullAudit()
     cache = None
-    if settings.ews_cache_enabled:
+    # A per-caller upstream gets per-caller mirrors (cache/percaller.py); a
+    # shared store here would be one mailbox's mail readable by everyone.
+    if settings.ews_cache_enabled and not settings.per_caller_upstream:
         try:
             from .cache import CacheStore
             cache = CacheStore(f"{settings.data_dir}/cache/mirror.db")
@@ -78,6 +81,12 @@ def build_context(settings: Settings) -> Context:
 
 
 async def start_connection_manager(ctx: Context) -> None:
+    if ctx.settings.per_caller_upstream:
+        # Nothing to warm: there is no boot-time credential, and probing an
+        # arbitrary caller's mailbox would mean issuing EWS calls nobody
+        # asked for. Readiness is redefined around what IS checkable.
+        logger.info("per-caller upstream: no shared connection to warm")
+        return
     manager = ConnectionManager(
         ctx.gateway,
         max_backoff=float(ctx.settings.ews_warmup_max_backoff_seconds),
@@ -101,6 +110,27 @@ async def start_connection_manager(ctx: Context) -> None:
 
     await manager.start(on_warm=on_warm)
     logger.info("Exchange warmup running in background (see /readyz)")
+
+
+async def _bind_caller(server: Server, ctx: Context) -> Context:
+    """Recover the principal the ASGI layer verified for THIS request.
+
+    The Streamable HTTP transport hands the tool layer the same ASGI scope
+    dict that ``http.build_app`` wrote the principal into (pinned by
+    ``test_mcp_sdk_pins.py``). In stdio, and on any path where the SDK does
+    not attach a request, there is simply no principal — and ``dispatch``
+    refuses rather than falling back to the configured mailbox.
+    """
+    try:
+        request = getattr(server.request_context, "request", None)
+        principal = request.scope.get(SCOPE_PRINCIPAL_KEY) if request else None
+    except LookupError:  # no request context (direct call, tests)
+        principal = None
+    if principal is None:
+        return ctx
+    if ctx.binder is not None:
+        return await ctx.binder.bind(ctx, principal)
+    return for_principal(ctx, principal)
 
 
 def build_mcp_server(ctx: Context) -> Server:
@@ -128,7 +158,8 @@ def build_mcp_server(ctx: Context) -> Server:
                 "message": f"Unknown tool: {name}",
                 "hint": f"Available: {', '.join(sorted(ctx.registry))}",
             }}
-        return await dispatch(ctx, spec, dict(arguments or {}), transport="mcp")
+        call_ctx = await _bind_caller(server, ctx)
+        return await dispatch(call_ctx, spec, dict(arguments or {}), transport="mcp")
 
     return server
 

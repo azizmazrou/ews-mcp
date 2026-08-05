@@ -122,7 +122,7 @@ def test_confirm_rejects_changed_args(tmp_path):
 def test_conditional_confirm_callable(tmp_path):
     ctx = _ctx(tmp_path, ews_capability_tier="full")
     spec = _spec(_ok_handler, cls="destructive",
-                 confirm=lambda kw: kw.get("permanent") is True)
+                 confirm=lambda ctx, kw: kw.get("permanent") is True)
     soft = asyncio.run(dispatch(ctx, spec, {"permanent": False}))
     assert soft.get("ran") is True
     hard = asyncio.run(dispatch(ctx, spec, {"permanent": True}))

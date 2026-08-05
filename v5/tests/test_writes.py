@@ -130,7 +130,7 @@ def make_sendable_draft():
 # --- pack surface -------------------------------------------------------------
 
 
-def test_pack_surface_classes_and_confirm_declarations():
+def test_pack_surface_classes_and_confirm_declarations(tmp_path):
     assert len(writes.TOOLS) == 12
     classes = {s.name: s.side_effect_class for s in writes.TOOLS}
     assert classes == {
@@ -145,15 +145,18 @@ def test_pack_surface_classes_and_confirm_declarations():
         assert SPEC[name].confirm is False
     for name in ("respond_to_event", "cancel_event", "set_oof"):
         assert SPEC[name].confirm is True
+    # Conditional-confirm predicates take (ctx, kwargs): the caller is part of
+    # the decision now, because an idempotent replay is per-caller.
+    ctx = make_ctx(tmp_path, make_account())
     # send_draft: confirm-gated with a CONTENT-BOUND preview hook; the gate
     # is skipped only for an idempotent replay of an already-sent draft.
-    assert SPEC["send_draft"].confirm({"draft_id": "d1"}) is True
+    assert SPEC["send_draft"].confirm(ctx, {"draft_id": "d1"}) is True
     assert SPEC["send_draft"].preview is not None
-    assert SPEC["create_event"].confirm({"send_invitations": True}) is True
-    assert SPEC["create_event"].confirm({}) is False
-    assert SPEC["update_event"].confirm({"notify_attendees": True}) is True
-    assert SPEC["delete_messages"].confirm({"disposition": "permanent"}) is True
-    assert SPEC["delete_messages"].confirm({"disposition": "trash"}) is False
+    assert SPEC["create_event"].confirm(ctx, {"send_invitations": True}) is True
+    assert SPEC["create_event"].confirm(ctx, {}) is False
+    assert SPEC["update_event"].confirm(ctx, {"notify_attendees": True}) is True
+    assert SPEC["delete_messages"].confirm(ctx, {"disposition": "permanent"}) is True
+    assert SPEC["delete_messages"].confirm(ctx, {"disposition": "trash"}) is False
 
 
 # --- create_draft ---------------------------------------------------------------

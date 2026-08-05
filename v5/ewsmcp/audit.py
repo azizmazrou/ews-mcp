@@ -40,7 +40,12 @@ class AuditLog:
         latency_ms: int,
         transport: str = "-",
         detail: Optional[Dict[str, Any]] = None,
+        principal: str = "-",
     ) -> None:
+        # ``principal`` goes into the entry BEFORE hashing, so who did it is
+        # as tamper-evident as what they did. It is a salted hash unless
+        # AUDIT_IDENTITY=smtp (DESIGN.md law #6: no real addresses in
+        # artifacts, and an audit file is not a staff directory).
         entry: Dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "tool": tool,
@@ -48,6 +53,7 @@ class AuditLog:
             "outcome": outcome,
             "latency_ms": latency_ms,
             "transport": transport,
+            "principal": principal,
         }
         if detail:
             entry["detail"] = detail
