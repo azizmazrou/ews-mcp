@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple  # noqa: F401
 
 from exchangelib import Account, Configuration, Credentials, DELEGATE, EWSTimeZone
 from exchangelib.protocol import (
@@ -34,20 +34,50 @@ WELL_KNOWN = {
 
 
 class EWSGateway:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        mailbox: Optional[str] = None,
+        credentials_provider: Optional[Callable[[], Tuple[Any, Optional[str]]]] = None,
+        executor: Optional[ThreadPoolExecutor] = None,
+        max_inflight: Optional[int] = None,
+    ):
+        """One mailbox's view of Exchange.
+
+        ``mailbox`` and ``credentials_provider`` default to the configured
+        static credentials, so single-mailbox mode constructs exactly as it
+        always has. In oidc mode the pool supplies a per-caller mailbox and a
+        provider returning that caller's own OAuth credentials.
+
+        ``executor`` is shared across callers on purpose: the pool size is a
+        politeness budget against Exchange's throttling, and one executor per
+        caller would multiply it by the number of users. ``max_inflight``
+        keeps any single caller from monopolising that shared budget.
+        """
         self.settings = settings
+        self.mailbox = (mailbox or settings.ews_email or "").lower()
+        self._cred_provider = credentials_provider or self._static_credentials
         self._account: Optional[Account] = None
         self._account_lock = threading.Lock()
-        self._pool = ThreadPoolExecutor(
+        self._owns_pool = executor is None
+        self._pool = executor or ThreadPoolExecutor(
             max_workers=max(1, settings.ews_max_concurrency),
             thread_name_prefix="ews",
         )
+        self._semaphore = (asyncio.Semaphore(max_inflight)
+                           if max_inflight and max_inflight > 0 else None)
         self.last_connection_error: Optional[str] = None
         self._folder_cache: Dict[str, Any] = {}
         self._folder_cache_ts = 0.0
         if settings.ews_insecure_skip_verify:
             BaseProtocol.HTTP_ADAPTER_CLS = NoVerifyHTTPAdapter
             logger.warning("TLS verification DISABLED for Exchange traffic")
+
+    def _static_credentials(self) -> Tuple[Any, Optional[str]]:
+        """Username/password, auth type auto-negotiated (DESIGN.md law #5)."""
+        s = self.settings
+        return Credentials(s.ews_username or s.ews_email, s.ews_password or ""), None
 
     # ------------------------------------------------------------- account
 
@@ -61,32 +91,46 @@ class EWSGateway:
     def _build_account(self) -> Account:
         s = self.settings
         BaseProtocol.TIMEOUT = s.request_timeout
+        credentials, auth_type = self._cred_provider()
         kwargs: Dict[str, Any] = dict(
             service_endpoint=s.ews_server_url,
-            credentials=Credentials(s.ews_username or s.ews_email, s.ews_password or ""),
+            credentials=credentials,
             retry_policy=FaultTolerance(max_wait=s.ews_retry_max_wait_seconds),
         )
-        if s.ews_auth_type_force:  # escape hatch for a DIFFERENT Exchange only
+        if auth_type:
+            # OAuth2 only. exchangelib's probe cannot discover Bearer, so this
+            # is the single exception DESIGN.md law #5 carves out.
+            kwargs["auth_type"] = auth_type
+        elif s.ews_auth_type_force:  # escape hatch for a DIFFERENT Exchange only
             logger.warning("auth_type FORCED to %s — the primary Exchange requires auto-negotiation",
                            s.ews_auth_type_force)
             kwargs["auth_type"] = s.ews_auth_type_force
         config = Configuration(**kwargs)
+        # DELEGATE, always. The caller's own token opens the caller's own
+        # mailbox; there is no impersonation anywhere in this server and no
+        # tool takes a mailbox argument.
         return Account(
-            primary_smtp_address=s.ews_email,
+            primary_smtp_address=self.mailbox,
             config=config,
             autodiscover=False,
             access_type=DELEGATE,
             default_timezone=EWSTimeZone(s.ews_tz),
         )
 
-    def reset(self) -> None:
-        """Drop the cached account AND exchangelib's protocol-cache entry.
+    def reset(self, *, global_protocol_cache: bool = True) -> None:
+        """Drop the cached account AND (by default) exchangelib's protocol cache.
 
         Dropping only our Account is not enough: ``CachingProtocol`` hands
         the same wedged Protocol (with its already-negotiated auth type)
         right back on the next build, so a session that died mid-outage
         would never renegotiate. Clearing the cache forces a genuinely
         fresh session + auth negotiation on the next access.
+
+        But that cache is PROCESS-WIDE. With several callers, clearing it to
+        recover one of them would drop everybody else's live Protocol too.
+        So per-caller eviction passes ``global_protocol_cache=False`` and only
+        the connection manager's recovery ladder — which exists exactly to
+        recover the single static account — passes the default.
         """
         with self._account_lock:
             if self._account is not None:
@@ -95,12 +139,31 @@ class EWSGateway:
                 except Exception:
                     pass
                 self._account = None
-        try:
-            CachingProtocol.clear_cache()
-        except Exception as e:
-            logger.debug("protocol cache clear failed: %s", e)
+        if global_protocol_cache:
+            try:
+                CachingProtocol.clear_cache()
+            except Exception as e:
+                logger.debug("protocol cache clear failed: %s", e)
         self._folder_cache.clear()
         self._folder_cache_ts = 0.0
+
+    def close(self) -> None:
+        """Release this caller's Exchange session without touching anyone else's."""
+        self.reset(global_protocol_cache=False)
+        if self._owns_pool:
+            self._pool.shutdown(wait=False)
+
+    def refresh_credentials(self, apply: Callable[[Any], None]) -> None:
+        """Mutate the live credentials IN PLACE (see the exchangelib pins).
+
+        Building a fresh credentials object instead would be a protocol-cache
+        miss — equal hash, unequal ``__eq__`` — minting a second Protocol and
+        leaking the first: one session pool per caller per hourly refresh.
+        """
+        with self._account_lock:
+            if self._account is None:
+                return  # nothing built yet; the next build picks up the token
+            apply(self._account.protocol.credentials)
 
     def test_connection(self) -> bool:
         """Real network probe — must round-trip on EVERY call.
@@ -122,10 +185,18 @@ class EWSGateway:
     # ------------------------------------------------------------- calling
 
     async def call(self, fn: Callable[[Account], Any]) -> Any:
-        """Run blocking EWS work on the bounded pool; the pool size IS the
-        EWS concurrency cap (polite guest on the per-user throttle budget)."""
+        """Run blocking EWS work on the bounded pool.
+
+        The executor is the SERVER-WIDE budget (a polite guest on Exchange's
+        throttling policy); the semaphore, when the pool sets one, is this
+        caller's share of it — so one busy caller cannot starve the others
+        and the thread count does not multiply by the number of callers.
+        """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._pool, lambda: fn(self.account))
+        if self._semaphore is None:
+            return await loop.run_in_executor(self._pool, lambda: fn(self.account))
+        async with self._semaphore:
+            return await loop.run_in_executor(self._pool, lambda: fn(self.account))
 
     # ------------------------------------------------------------- folders
 
