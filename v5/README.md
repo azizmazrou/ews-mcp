@@ -105,7 +105,10 @@ MCP_TRANSPORT=http MCP_PORT=8000 MCP_API_KEY=<long-random-string> ewsmcp
   `npx mcp-remote http://host:8000/mcp --header "Authorization: Bearer <key>"`.
 - Plain REST for scripts: `POST /api/tools/<name>` with an `x-api-key`
   header; OpenAPI at `/openapi.json`.
-- Health: `GET /livez`, `/readyz`, `/health`.
+- Health: `GET /livez`, `/readyz`, `/health` — public. `/metrics` and
+  `/openapi.json` carry no mailbox data and are reachable with the operator
+  key alone (a Prometheus scraper has no user identity, and must not need
+  one); everything else requires a caller.
 
 Docker (containerized HTTP mode — note a container only sees the
 network of its host, not your workstation's VPN):
@@ -136,7 +139,11 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
   Arabic-Indic digits).
 - **Never-exit boot.** Transports bind before any Exchange contact;
   `/livez` is up immediately, `/readyz` reports the warmup honestly, and
-  the connection manager owns recovery.
+  the connection manager owns recovery. In per-caller mode there is no
+  shared connection to warm, so `/readyz` instead probes what needs no
+  identity — including whether Exchange still offers a `Bearer` challenge,
+  which is what would silently break every caller if OAuth were turned off
+  on the EWS virtual directory.
 
 ## Configuration (env)
 
@@ -159,6 +166,62 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 | `EWS_SEMANTIC_INDEX` | `none` | `pgvector` enables the optional vector tier (+`find_similar`) |
 | `EWS_SEMANTIC_PG_DSN` / `EWS_SEMANTIC_OLLAMA_URL` / `EWS_SEMANTIC_MODEL` | — | Vector tier wiring (requires `psycopg`, not a core dependency) |
 | `EWS_TZ` | `Asia/Riyadh` | Server timezone for date grammar + display |
+
+### Per-caller auth (`AUTH_MODE=oidc`)
+
+`AUTH_MODE` defaults to `static`: one shared `MCP_API_KEY`, one mailbox,
+exactly the behaviour documented above.
+
+In `oidc` the server is an OAuth2 **resource server**. The caller presents the
+**end user's** access token; the server verifies it against the IdP's JWKS
+(`iss`, `aud` = this server's own resource id, `exp`/`nbf`, an algorithm
+allowlist that excludes `HS*`) and derives the mailbox from a claim. HTTP
+transport only — stdio cannot carry a bearer token, so that combination
+refuses to boot.
+
+Upstream, the verified token is exchanged **on behalf of** the caller for one
+whose audience is Exchange, and that token opens **their own** mailbox with
+`access_type=DELEGATE`. There is no service account, no `ApplicationImpersonation`
+and no `target_mailbox` argument anywhere — one caller is one mailbox, enforced
+by the absence of any way to name another.
+
+Each caller gets their own pooled Exchange session (LRU + idle TTL) and their
+own alias namespace under `DATA_DIR/users/<hash>/`. The EWS thread pool is
+shared — it is a politeness budget against Exchange's throttling — with
+`EWS_MAX_CONCURRENCY_PER_USER` as each caller's share of it.
+
+Endpoints: `/.well-known/oauth-protected-resource` is public and advertises the
+issuer; rejections carry `WWW-Authenticate: Bearer` with `invalid_token`
+(re-acquire and retry) or `insufficient_scope` (stop).
+
+| var | default | meaning |
+|---|---|---|
+| `AUTH_MODE` | `static` | `static` = today's single-mailbox server; `oidc` = per-caller identity |
+| `AUTH_ISSUER` / `AUTH_AUDIENCE` / `AUTH_JWKS_URL` | — | Token issuer, **this** server's resource id, and the IdP's key set |
+| `AUTH_ALLOWED_ALGS` | `RS256,ES256` | Signature allowlist; any `HS*` entry is refused at boot |
+| `AUTH_MAILBOX_CLAIM` | `upn,email,preferred_username` | Ordered claim list; first non-empty wins |
+| `AUTH_EMAIL_DOMAIN_ALLOWLIST` | — | Glob list; the blast-radius control (a valid guest identity must not reach Exchange) |
+| `AUTH_CLOCK_SKEW_SECONDS` / `AUTH_JWKS_TTL_SECONDS` / `AUTH_JWKS_MIN_REFETCH_SECONDS` | `60` / `3600` / `60` | Validation leeway and JWKS caching (the refetch cooldown stops `kid` spraying from becoming a DoS relay onto the IdP) |
+| `AUTH_UPSTREAM_MODE` | `obo` | How the EWS token is obtained: `obo` (recommended), `dual_header`, or `passthrough` (needs `AUTH_ALLOW_TOKEN_PASSTHROUGH=true`) |
+| `AUTH_OBO_STYLE` | `aad` | `aad` or `rfc8693` — AD FS and Keycloak differ here |
+| `AUTH_OBO_TOKEN_URL` / `AUTH_OBO_CLIENT_ID` / `AUTH_OBO_CLIENT_SECRET` / `AUTH_EWS_SCOPE` | — | This server's confidential client, used ONLY to exchange the caller's own token. Required in `oidc` |
+| `AUTH_TOKEN_EXPIRY_MARGIN_SECONDS` / `AUTH_TOKEN_CACHE_MAX` | `120` / `500` | Exchanged-token cache (memory only — tokens are never written to `DATA_DIR`) |
+| `AUTH_GATEWAY_POOL_MAX` / `AUTH_GATEWAY_IDLE_TTL_SECONDS` | `50` / `1800` | Per-caller Exchange connection pool |
+| `EWS_MAX_CONCURRENCY_PER_USER` | `4` | Per-caller share of the server-wide `EWS_MAX_CONCURRENCY` budget |
+| `DATA_DIR_NAMESPACE_SALT` | — | Required in `oidc`: salts the per-caller `DATA_DIR` namespace |
+| `AUTH_DATA_DIR_NAMING` / `AUDIT_IDENTITY` | `hash` / `hash` | `smtp` writes real addresses into directory names / audit records — debugging only |
+
+The cache mirror works in `oidc` too, but **per caller and warmed
+differently**: no background loop could run, because delegated OAuth
+deliberately leaves no long-lived credential. Instead each caller's mirror is
+refreshed from inside their own requests, after the answer has been sent, with
+the token already in hand — so FTS5 (Arabic) search, `find_similar` and
+`waiting_on` work for people actively using the server, warming up over their
+first few calls. A sync failure never fails a tool call; reads fall back to
+live EWS.
+
+`EWS_SEMANTIC_INDEX` must still be `none` in `oidc` (refused at boot): the
+embeddings table has no tenant column yet.
 
 ## The send flow (two-phase, content-bound)
 
