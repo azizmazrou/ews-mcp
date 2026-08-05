@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 HTTP_BY_CODE = {
     "validation": 400,
     "auth_failed": 401,
+    "identity_blocked": 403,
     "tier_blocked": 403,
     "kill_switch": 403,
     "recipient_blocked": 403,
@@ -44,6 +45,38 @@ class ToolError(Exception):
     @property
     def http_status(self) -> int:
         return HTTP_BY_CODE[self.code]
+
+
+def _quoted(value: str) -> str:
+    """RFC 7230 quoted-string: backslash and double-quote must be escaped, and
+    control characters dropped — an unescaped value would let a crafted error
+    description forge extra auth parameters in the header."""
+    cleaned = "".join(c for c in value if c >= " " and c != "\x7f")
+    return '"' + cleaned.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def www_authenticate(
+    realm: str = "ews-mcp",
+    error: Optional[str] = None,
+    desc: Optional[str] = None,
+    resource_metadata: Optional[str] = None,
+) -> bytes:
+    """Build an RFC 6750 ``WWW-Authenticate: Bearer`` challenge value.
+
+    ``error`` is one of the RFC 6750 codes (``invalid_token``,
+    ``invalid_request``, ``insufficient_scope``); ``resource_metadata`` points
+    at ``/.well-known/oauth-protected-resource`` so a generic MCP client can
+    discover the authorization server. NEVER pass token material in ``desc``
+    (DESIGN.md law #6).
+    """
+    parts = [f"realm={_quoted(realm)}"]
+    if error:
+        parts.append(f"error={_quoted(error)}")
+    if desc:
+        parts.append(f"error_description={_quoted(desc)}")
+    if resource_metadata:
+        parts.append(f"resource_metadata={_quoted(resource_metadata)}")
+    return ("Bearer " + ", ".join(parts)).encode("ascii", "replace")
 
 
 def map_exception(exc: Exception) -> ToolError:
