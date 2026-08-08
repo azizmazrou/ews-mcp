@@ -21,7 +21,16 @@ together with the pins, never the pins alone.
 import inspect
 
 import pytest
-from exchangelib import Account, CalendarItem, Message, OofSettings
+from exchangelib import (
+    OAUTH2,
+    Account,
+    CalendarItem,
+    Configuration,
+    Credentials,
+    Message,
+    OAuth2AuthorizationCodeCredentials,
+    OofSettings,
+)
 from exchangelib.fields import IntegerField
 from exchangelib.folders import Folder
 from exchangelib.folders.collections import FolderCollection
@@ -29,6 +38,7 @@ from exchangelib.items import Item, ReplyToItem
 from exchangelib.properties import ConversationId
 from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
+from oauthlib.oauth2 import OAuth2Token
 from exchangelib.version import EXCHANGE_2016, Version
 
 
@@ -146,3 +156,67 @@ def test_protocol_cache_is_evictable():
     fresh session + auth negotiation; closing the protocol alone hands
     the same wedged instance back on the next build."""
     assert callable(getattr(CachingProtocol, "clear_cache", None))
+
+
+# --- OAuth2: the per-caller gateway pool's load-bearing assumptions -----------
+#
+# In oidc mode every caller's access token expires roughly hourly and must be
+# refreshed under a live Account. HOW that refresh is applied decides whether
+# the server is stable or leaks a connection pool per caller per hour, so the
+# behaviour is pinned rather than assumed.
+
+def test_oauth2_auth_type_constant_exists():
+    """oidc mode is the one place DESIGN.md law #5 allows pinning auth_type:
+    exchangelib's probe cannot discover Bearer."""
+    assert isinstance(OAUTH2, str)
+
+
+def test_oauth_credentials_hash_ignores_the_access_token():
+    """exchangelib excludes `_access_token` from __hash__ on purpose ("may be
+    refreshed once in a while"). The pool relies on that."""
+    creds = OAuth2AuthorizationCodeCredentials(
+        access_token=OAuth2Token({"access_token": "tok-1"}))
+    before = hash(creds)
+    creds.access_token = OAuth2Token({"access_token": "tok-2-entirely-different"})
+    assert hash(creds) == before
+
+
+def test_protocol_cache_key_is_endpoint_plus_credentials():
+    """Which is why the identity of the credentials OBJECT is what matters."""
+    assert CachingProtocol._cache_key(
+        Configuration(service_endpoint="https://mail.example.com/EWS/Exchange.asmx",
+                      credentials=Credentials("u", "p"))
+    ) == ("https://mail.example.com/EWS/Exchange.asmx", Credentials("u", "p"))
+
+
+def test_in_place_token_refresh_reuses_the_protocol_but_a_new_object_leaks():
+    """THE pin behind GatewayPool.refresh_token().
+
+    Refreshing in place keeps the same Protocol — same session pool, same
+    connections. Building a FRESH credentials object instead is a cache miss
+    (equal hash, unequal __eq__), so it mints a second Protocol and the first
+    is never closed: one leaked session pool per caller per token refresh.
+    """
+    endpoint = "https://mail.example.com/EWS/Exchange.asmx"
+
+    def config(creds):
+        return Configuration(service_endpoint=endpoint, credentials=creds,
+                             auth_type=OAUTH2, retry_policy=FaultTolerance(max_wait=5))
+
+    CachingProtocol.clear_cache()
+    creds = OAuth2AuthorizationCodeCredentials(
+        access_token=OAuth2Token({"access_token": "tok-1", "token_type": "Bearer"}))
+    first = Protocol(config=config(creds))
+    try:
+        with creds.lock:
+            creds.access_token = OAuth2Token({"access_token": "tok-2",
+                                              "token_type": "Bearer"})
+        assert Protocol(config=config(creds)) is first
+        assert len(CachingProtocol._protocol_cache) == 1
+
+        replacement = OAuth2AuthorizationCodeCredentials(
+            access_token=OAuth2Token({"access_token": "tok-3", "token_type": "Bearer"}))
+        assert Protocol(config=config(replacement)) is not first
+        assert len(CachingProtocol._protocol_cache) == 2
+    finally:
+        CachingProtocol.clear_cache()

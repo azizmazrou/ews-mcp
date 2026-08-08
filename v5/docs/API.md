@@ -407,7 +407,8 @@ ids change when items move; re-run the search for fresh ones.
 | code | HTTP | meaning |
 |---|---|---|
 | `validation` | 400 | bad arguments (schema-checked on the REST shim) |
-| `auth_failed` | 401 | bad/missing API key, or Exchange rejected credentials |
+| `auth_failed` | 401 | bad/missing API key or bearer token, or Exchange rejected credentials — re-acquire a token and retry |
+| `identity_blocked` | 403 | token is valid but this identity may not use the server (domain allowlist / missing scope) — retrying will not help |
 | `tier_blocked` | 403 | tool needs a higher `EWS_CAPABILITY_TIER` |
 | `kill_switch` | 403 | send-class call while `SEND_ENABLED=false` |
 | `recipient_blocked` | 403 | recipient failed the allow/denylist |
@@ -485,10 +486,17 @@ a data-plane server:
 - **One-shot send tools** (`send_email`, `reply_email`, `forward_email`):
   the ONLY way mail leaves the mailbox is `create_draft` → `send_draft`.
 - **Impersonation / delegated mailboxes** (`target_mailbox` everywhere):
-  one server = one mailbox.
-- **OAuth2/MSAL flows**: the target deployment is on-prem Exchange with
-  auto-negotiated auth; a Graph/OAuth backend would be a different
-  gateway, not a flag.
+  still dropped, and still banned — no tool takes a mailbox argument, and
+  the server never uses `ApplicationImpersonation`. What changed with
+  `AUTH_MODE=oidc` is only that one *process* can serve many mailboxes:
+  each request is pinned to its own caller's mailbox with
+  `access_type=DELEGATE`, so "one caller = one mailbox" is preserved by
+  the absence of any cross-mailbox argument.
+- **Client-credentials OAuth2 / MSAL flows**: still dropped. A single app
+  credential that can open every mailbox is exactly what the multi-user
+  design refuses. Only *delegated* OAuth2 is supported, where the token
+  carries the end user's own identity (`AUTH_MODE=oidc`,
+  `AUTH_UPSTREAM_MODE=obo`).
 - **Contacts folder management** (create/update/delete contacts).
 - **Folder management** (create/rename/delete folders).
 - **MIME export** and raw-content endpoints.

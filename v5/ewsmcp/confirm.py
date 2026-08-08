@@ -95,15 +95,27 @@ def content_hash(*parts: Any) -> str:
 def make_token(
     *,
     mailbox: str,
+    subject: str,
     action: str,
     target_id: str,
     chash: str,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     secret: Optional[str] = None,
 ) -> dict:
-    """Mint a confirm token bound to (mailbox, action, target_id, chash)."""
+    """Mint a confirm token bound to (subject, mailbox, action, target_id, chash).
+
+    ``subject`` is the CALLER, and it is inside the HMAC input — so one caller
+    can neither forge nor redeem another's token, and since ``_CONSUMED`` is
+    keyed on the signature (which now covers the subject), single-use stays
+    correct per caller rather than globally.
+
+    It is the token subject rather than the address on purpose: a mailbox
+    rename mid-TTL should invalidate the token, and a reassigned address must
+    never let a successor redeem their predecessor's pending confirmation.
+    """
     exp = int(time.time()) + int(ttl_seconds)
-    payload = {"m": mailbox, "a": action, "t": target_id, "c": chash, "e": exp}
+    payload = {"m": mailbox, "u": subject, "a": action, "t": target_id,
+               "c": chash, "e": exp}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     sig = hmac.new(_secret(secret), raw, hashlib.sha256).hexdigest()
     token = base64.urlsafe_b64encode(raw).decode("ascii") + "." + sig
@@ -114,6 +126,7 @@ def verify_token(
     token: str,
     *,
     mailbox: str,
+    subject: str,
     action: str,
     target_id: str,
     chash: str,
@@ -141,9 +154,12 @@ def verify_token(
         return False, "expired"
     if (
         payload.get("m"),
+        payload.get("u"),
         payload.get("a"),
         payload.get("t"),
         payload.get("c"),
-    ) != (mailbox, action, target_id, chash):
+    ) != (mailbox, subject, action, target_id, chash):
+        # Includes the caller mismatch, and tokens minted before ``u`` existed
+        # (``None`` never equals a subject) — both are "re-preview, please".
         return False, "stale"
     return True, "ok"

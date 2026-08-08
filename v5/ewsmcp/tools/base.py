@@ -10,14 +10,18 @@ handler (on the EWS pool) → audit.
 
 import asyncio
 import fnmatch
+import logging
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from ..confirm import consume_token, content_hash, make_token, verify_token
 from ..errors import ToolError, map_exception
+from ..identity import Caller, audit_identity, caller_of
+
+logger = logging.getLogger(__name__)
 
 TIER_RANK = {"read": 0, "draft": 1, "full": 2}
 CLASS_TIER = {"read": "read", "write": "draft", "send": "full", "destructive": "full"}
@@ -36,8 +40,19 @@ CONFIRM_TOKEN_PROPERTY = {
     ),
 }
 
-_SEND_TIMES: deque = deque()
+# Send timestamps PER CALLER. A single shared deque meant one caller's sends
+# consumed everybody else's hourly budget — invisible with one mailbox, a
+# denial of service between colleagues with several.
+_SEND_TIMES: Dict[str, deque] = {}
 _SEND_LOCK = threading.Lock()
+_RATE_WINDOW_MAX_CALLERS = 500  # prune threshold, not a cap on who may send
+
+
+def _prune_rate_windows(now: float) -> None:
+    """Drop callers with nothing left inside the hour. Caller-held lock."""
+    for subject in [s for s, w in _SEND_TIMES.items()
+                    if not w or now - w[-1] > 3600]:
+        del _SEND_TIMES[subject]
 
 
 def reset_send_rate_window() -> None:
@@ -53,7 +68,7 @@ class ToolSpec:
     input_schema: Dict[str, Any]
     handler: Callable[..., Awaitable[Dict[str, Any]]]  # handler(ctx, **kwargs)
     requires_ews: bool = True
-    confirm: Union[bool, Callable[[Dict[str, Any]], bool]] = False
+    confirm: Union[bool, Callable[[Any, Dict[str, Any]], bool]] = False
     output_schema: Optional[Dict[str, Any]] = None
     # Optional async hook ``preview(ctx, kwargs) -> content dict`` that
     # resolves the REAL content the confirm token must bind (e.g. fetch the
@@ -65,8 +80,9 @@ class ToolSpec:
     # snippet.
     preview: Optional[Callable[[Any, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None
 
-    def confirm_needed(self, kwargs: Dict[str, Any]) -> bool:
-        return self.confirm(kwargs) if callable(self.confirm) else bool(self.confirm)
+    def confirm_needed(self, ctx: Any, kwargs: Dict[str, Any]) -> bool:
+        return (self.confirm(ctx, kwargs) if callable(self.confirm)
+                else bool(self.confirm))
 
     def public_schema(self) -> Dict[str, Any]:
         schema = {
@@ -93,11 +109,37 @@ class Context:
     registry: Dict[str, ToolSpec] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
     counters: Dict[str, int] = field(default_factory=dict)
+    principal: Any = None  # Principal | None (None = static mode)
+    binder: Any = None  # CallerBinder | None (oidc: per-caller gateway/aliaser)
+    _root: Any = None  # the shared boot Context, when this is a per-request clone
     _circuit_failures: int = 0
     _circuit_open_until: float = 0.0
 
+    @property
+    def root(self) -> "Context":
+        """The process-wide Context that owns the genuinely shared state.
+
+        Counters and the circuit breaker must NOT be cloned per request:
+        counters would vanish, and each caller would get a private circuit
+        that never opens. Everything else on a clone is per-caller by design.
+        """
+        return self._root or self
+
     def bump(self, key: str) -> None:
-        self.counters[key] = self.counters.get(key, 0) + 1
+        root = self.root
+        root.counters[key] = root.counters.get(key, 0) + 1
+
+
+def for_principal(root: Context, principal: Any) -> Context:
+    """A per-request view of the boot Context, bound to one caller.
+
+    A shallow copy, so concurrent callers never alias each other — and no
+    handler signature changes, because handlers only ever reach identity
+    through ``ctx``. The stores (gateway, aliaser, cache) are still the
+    shared ones: they become per-caller with the gateway pool, once each
+    caller opens their own mailbox.
+    """
+    return replace(root, principal=principal, _root=root.root)
 
 
 def _split(raw: str) -> List[str]:
@@ -129,24 +171,29 @@ def _recipient_guard(ctx: Context, kwargs: Dict[str, Any]) -> None:
                             f"recipient '{r}' is not allowlisted (EWS_RECIPIENT_ALLOWLIST)")
 
 
-def _rate_guard(ctx: Context) -> None:
+def _rate_guard(ctx: Context, caller: Caller) -> None:
     cap = int(ctx.settings.ews_max_sends_per_hour or 0)
     if cap <= 0:
         return
     now = time.time()
     with _SEND_LOCK:
-        while _SEND_TIMES and now - _SEND_TIMES[0] > 3600:
-            _SEND_TIMES.popleft()
-        if len(_SEND_TIMES) >= cap:
-            retry = int(3600 - (now - _SEND_TIMES[0]))
+        if len(_SEND_TIMES) > _RATE_WINDOW_MAX_CALLERS:
+            _prune_rate_windows(now)
+        window = _SEND_TIMES.setdefault(caller.subject, deque())
+        while window and now - window[0] > 3600:
+            window.popleft()
+        if len(window) >= cap:
+            retry = int(3600 - (now - window[0]))
             raise ToolError("rate_capped",
                             f"send rate cap reached ({cap}/hour)",
                             retry_after_s=retry)
-        _SEND_TIMES.append(now)
+        window.append(now)
 
 
-def _external_recipients(ctx: Context, source: Dict[str, Any]) -> List[str]:
-    own = ctx.settings.ews_email.rsplit("@", 1)[-1].lower()
+def _external_recipients(ctx: Context, caller: Caller,
+                        source: Dict[str, Any]) -> List[str]:
+    """External relative to the CALLER's own domain, not the server's."""
+    own = caller.smtp.rsplit("@", 1)[-1].lower()
     return sorted({
         r for r in _recipients(source) if r.rsplit("@", 1)[-1] != own
     })
@@ -162,7 +209,8 @@ _CONFIRM_HINTS = {
 }
 
 
-async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
+async def _confirm_gate(ctx: Context, spec: ToolSpec, caller: Caller,
+                        kwargs: Dict[str, Any],
                         token: Optional[str]) -> Optional[Dict[str, Any]]:
     """Returns the phase-1 response, or None when execution may proceed.
 
@@ -191,7 +239,8 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
         target_id = "-"
     if not token:
         tok = make_token(
-            mailbox=ctx.settings.ews_email, action=spec.name, target_id=target_id,
+            mailbox=caller.smtp, subject=caller.subject,
+            action=spec.name, target_id=target_id,
             chash=chash, ttl_seconds=ctx.settings.confirm_ttl_seconds, secret=secret,
         )
         if content is not None:
@@ -204,7 +253,8 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
                 k: (v[:200] if k in ("body", "message", "comment") and isinstance(v, str) else v)
                 for k, v in kwargs.items()
             }
-        external = _external_recipients(ctx, content if content is not None else kwargs)
+        external = _external_recipients(
+            ctx, caller, content if content is not None else kwargs)
         response: Dict[str, Any] = {
             "ok": True,
             "requires_confirmation": True,
@@ -217,7 +267,7 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             response["warnings"] = [f"external recipients: {', '.join(external)}"]
         return response
     ok, reason = verify_token(
-        token, mailbox=ctx.settings.ews_email, action=spec.name,
+        token, mailbox=caller.smtp, subject=caller.subject, action=spec.name,
         target_id=target_id, chash=chash, secret=secret,
     )
     if ok and not consume_token(token):
@@ -237,8 +287,10 @@ async def mint_token(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any]) -> st
     """Server-side pre-confirmation (e.g. a human-approved queue item).
 
     Mirrors ``_confirm_gate``'s binding exactly: preview-hook specs get a
-    token bound to the resolved content, others to the literal arguments.
+    token bound to the resolved content, others to the literal arguments —
+    and, like the gate, the token is bound to the caller on ``ctx``.
     """
+    caller = caller_of(ctx)
     if spec.preview is not None:
         content = await spec.preview(ctx, dict(kwargs))
         body_text = content.get("body_text")
@@ -255,7 +307,8 @@ async def mint_token(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any]) -> st
         chash = content_hash(dict(kwargs))
         target_id = "-"
     return make_token(
-        mailbox=ctx.settings.ews_email, action=spec.name, target_id=target_id,
+        mailbox=caller.smtp, subject=caller.subject,
+        action=spec.name, target_id=target_id,
         chash=chash,
         ttl_seconds=ctx.settings.confirm_ttl_seconds,
         secret=ctx.settings.send_confirm_secret,
@@ -276,6 +329,35 @@ def _resolve_ids(ctx: Context, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+async def _run_handler(ctx: Context, spec: ToolSpec,
+                       kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the handler, retrying ONCE if Exchange rejected our token.
+
+    A caller's access token can be revoked, or their clock can drift, between
+    the expiry-margin check and the actual request. Re-exchanging and retrying
+    turns that into a hiccup instead of a failed call.
+
+    Reads only, deliberately. On a send or a delete we cannot know whether
+    Exchange rejected the request or merely the response, so a silent retry
+    risks sending twice. Those callers get the error and retry themselves —
+    which is exactly what ``idempotency_key`` exists for.
+    """
+    try:
+        return await spec.handler(ctx, **kwargs)
+    except Exception as exc:
+        binder = ctx.binder
+        if (binder is None or ctx.principal is None
+                or spec.side_effect_class != "read"
+                or map_exception(exc).code != "auth_failed"):
+            raise
+        logger.info("upstream rejected the caller's token mid-flight — "
+                    "re-exchanging and retrying once")
+        binder.on_upstream_auth_failure(ctx.principal)
+        ctx.gateway = await binder.pool.acquire(
+            ctx.principal, await binder.exchanger.token_for(ctx.principal))
+        return await spec.handler(ctx, **kwargs)
+
+
 async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
                    transport: str = "-") -> Dict[str, Any]:
     start = time.time()
@@ -285,7 +367,20 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
     # (a leak here used to surface as TypeError → misleading 502).
     kwargs = dict(kwargs)
     confirm_token = kwargs.pop("confirm_token", None)
+    caller = caller_of(ctx)
     try:
+        # Identity — before every other gate, and FAIL CLOSED. In oidc mode a
+        # missing principal means the ASGI layer's verification did not reach
+        # us (an SDK change, a new transport, a wiring mistake). Falling back
+        # to the configured mailbox here would hand it to an anonymous
+        # caller, so the only safe answer is to refuse.
+        if ctx.settings.auth_mode == "oidc" and ctx.principal is None:
+            raise ToolError(
+                "auth_failed",
+                "no verified caller identity reached the dispatcher",
+                hint="The server is in AUTH_MODE=oidc; every call must carry "
+                     "a verified bearer token.",
+            )
         # Kill-switch (policy precedes connectivity)
         if spec.side_effect_class == "send" and not ctx.settings.send_enabled:
             raise ToolError(
@@ -304,11 +399,14 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             )
         # Circuit breaker
         now = time.time()
-        if ctx._circuit_open_until > now:
+        # On the ROOT: the circuit tracks Exchange's health, which is a
+        # property of the server, not of whoever happens to be calling.
+        root = ctx.root
+        if root._circuit_open_until > now:
             raise ToolError(
                 "upstream_unavailable",
                 "circuit open after repeated upstream failures",
-                retry_after_s=int(ctx._circuit_open_until - now),
+                retry_after_s=int(root._circuit_open_until - now),
             )
         # Cold gate
         if spec.requires_ews and ctx.manager is not None and ctx.manager.state == "connecting":
@@ -326,18 +424,18 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
         _recipient_guard(ctx, kwargs)
         # Two-phase confirm (content-bound via spec.preview when present,
         # otherwise the caller's literal args; single-use either way)
-        if spec.confirm_needed(kwargs):
-            phase1 = await _confirm_gate(ctx, spec, kwargs, confirm_token)
+        if spec.confirm_needed(ctx, kwargs):
+            phase1 = await _confirm_gate(ctx, spec, caller, kwargs, confirm_token)
             if phase1 is not None:
                 outcome = "phase1"
                 return phase1
         # Send rate cap — this call WILL execute
         if spec.side_effect_class == "send":
-            _rate_guard(ctx)
+            _rate_guard(ctx, caller)
         # Alias → raw ids
         kwargs = _resolve_ids(ctx, kwargs)
-        result = await spec.handler(ctx, **kwargs)
-        ctx._circuit_failures = 0
+        result = await _run_handler(ctx, spec, kwargs)
+        ctx.root._circuit_failures = 0
         if isinstance(result, dict):
             result.setdefault("ok", True)
         return result
@@ -356,10 +454,11 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
         err = map_exception(exc)
         outcome = err.code
         if err.code in ("upstream_unavailable", "upstream_error", "throttled"):
-            ctx._circuit_failures += 1
-            if ctx._circuit_failures >= ctx.settings.circuit_failure_threshold:
-                ctx._circuit_open_until = time.time() + ctx.settings.circuit_open_seconds
-                ctx._circuit_failures = 0
+            root = ctx.root
+            root._circuit_failures += 1
+            if root._circuit_failures >= ctx.settings.circuit_failure_threshold:
+                root._circuit_open_until = time.time() + ctx.settings.circuit_open_seconds
+                root._circuit_failures = 0
         return err.to_dict()
     finally:
         ctx.bump(f"tool.{spec.name}")
@@ -378,4 +477,10 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             tool=spec.name, side_effect_class=spec.side_effect_class,
             outcome=outcome, latency_ms=int((time.time() - start) * 1000),
             transport=transport, detail=detail,
+            principal=audit_identity(ctx, caller),
         )
+        # Opportunistic mirror warm-up, AFTER the answer is on its way, using
+        # the token already in hand. Fire-and-forget by design: it must never
+        # add latency to this call, and never fail it.
+        if ctx.binder is not None and ctx.principal is not None:
+            ctx.binder.schedule_sync(ctx)

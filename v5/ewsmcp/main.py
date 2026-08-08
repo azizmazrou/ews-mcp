@@ -6,6 +6,7 @@ import sys
 
 
 def main() -> None:
+    from .auth.redact import install as install_token_redaction
     from .config import get_settings
 
     settings = get_settings()
@@ -14,6 +15,9 @@ def main() -> None:
         stream=sys.stderr,  # stdout belongs to MCP in stdio mode
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # Before anything can log: httpx, uvicorn and exchangelib all dump headers
+    # and URLs on error, and a bearer token must never survive that.
+    install_token_redaction()
     try:
         if settings.mcp_transport == "http":
             from .http import serve_http

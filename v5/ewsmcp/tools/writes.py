@@ -45,6 +45,7 @@ from exchangelib.items import (
 
 from ..dates import parse_when
 from ..errors import ToolError
+from ..identity import caller_of
 from .base import Context, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,17 @@ def reset_idempotency_store() -> None:
     """Tests only."""
     with _IDEMPOTENT_LOCK:
         _IDEMPOTENT_SENDS.clear()
+
+
+def _scoped(ctx: Any, key: str) -> str:
+    """Namespace an idempotency key to its caller.
+
+    The key is caller-supplied, so a bare key was a shared namespace: replay
+    someone else's key and the store handed back THEIR send receipt —
+    internet_message_id included. That is an information leak, not a
+    collision, and it is why this scoping is not optional.
+    """
+    return f"{caller_of(ctx).subject}\x1f{key}"
 
 
 def _idempotency_get(key: str) -> Optional[Dict[str, Any]]:
@@ -411,7 +423,7 @@ async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
     # class "write" so a no-invite event stays available at draft tier, but
     # the dispatcher kill-switch only covers class "send". Invitations leave
     # the org, so the same switch must hold here. (Confirm is already gated
-    # by the dispatcher via confirm=lambda kw: send_invitations.)
+    # by the dispatcher via confirm=lambda ctx, kw: send_invitations.)
     if send_invitations and not ctx.settings.send_enabled:
         raise ToolError(
             "kill_switch",
@@ -534,7 +546,7 @@ async def _send_draft_preview(ctx: Context, kwargs: Dict[str, Any]) -> Dict[str,
     return content
 
 
-def _send_confirm_needed(kwargs: Dict[str, Any]) -> bool:
+def _send_confirm_needed(ctx: Any, kwargs: Dict[str, Any]) -> bool:
     """Skip the confirm gate on an idempotent REPLAY (v3.5 semantics).
 
     A retry with the same idempotency_key + draft_id returns the cached
@@ -545,7 +557,7 @@ def _send_confirm_needed(kwargs: Dict[str, Any]) -> bool:
     """
     key = kwargs.get("idempotency_key")
     if isinstance(key, str) and key:
-        prior = _idempotency_get(key)
+        prior = _idempotency_get(_scoped(ctx, key))
         if prior is not None and prior.get("draft_id") == kwargs.get("draft_id"):
             return False
     return True
@@ -554,7 +566,7 @@ def _send_confirm_needed(kwargs: Dict[str, Any]) -> bool:
 async def _send_draft(ctx: Context, *, draft_id: str,
                       idempotency_key: Optional[str] = None) -> Dict[str, Any]:
     if idempotency_key:
-        prior = _idempotency_get(idempotency_key)
+        prior = _idempotency_get(_scoped(ctx, idempotency_key))
         if prior is not None:
             if prior["draft_id"] != draft_id:
                 raise ToolError(
@@ -575,7 +587,7 @@ async def _send_draft(ctx: Context, *, draft_id: str,
 
     result = await ctx.gateway.call(work)
     if idempotency_key:
-        _idempotency_put(idempotency_key, {"draft_id": draft_id,
+        _idempotency_put(_scoped(ctx, idempotency_key), {"draft_id": draft_id,
                                            "result": dict(result),
                                            "ts": time.time()})
     return result
@@ -782,7 +794,7 @@ TOOLS: List[ToolSpec] = [
             "send_invitations": {"type": "boolean", "default": False},
         }, required=["subject", "start", "end"]),
         handler=_create_event,
-        confirm=lambda kw: bool(kw.get("send_invitations")),
+        confirm=lambda ctx, kw: bool(kw.get("send_invitations")),
     ),
     ToolSpec(
         name="update_event",
@@ -798,7 +810,7 @@ TOOLS: List[ToolSpec] = [
             "notify_attendees": {"type": "boolean", "default": False},
         }, required=["event_id"]),
         handler=_update_event,
-        confirm=lambda kw: bool(kw.get("notify_attendees")),
+        confirm=lambda ctx, kw: bool(kw.get("notify_attendees")),
     ),
     ToolSpec(
         name="send_draft",
@@ -857,7 +869,7 @@ TOOLS: List[ToolSpec] = [
                             "default": "trash"},
         }, required=["ids"]),
         handler=_delete_messages,
-        confirm=lambda kw: kw.get("disposition") == "permanent",
+        confirm=lambda ctx, kw: kw.get("disposition") == "permanent",
     ),
     ToolSpec(
         name="set_oof",

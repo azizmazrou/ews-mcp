@@ -40,6 +40,7 @@ import re
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
@@ -438,8 +439,15 @@ class NullAliaser:
 
 # Process-wide singleton per resolved directory, so every tool shares one
 # lock and one counter sequence.
-_ALIASERS: dict[str, IdAliaser] = {}
+#
+# Bounded LRU: with a per-caller namespace this grows with the number of
+# people who have ever called, not with the number of mailboxes configured.
+# Eviction is cheap and lossless — an IdAliaser holds no open connection
+# (``_connect`` opens one per operation) and all state lives in SQLite, so a
+# re-created instance reads exactly the same aliases back.
+_ALIASERS: "OrderedDict[str, IdAliaser]" = OrderedDict()
 _ALIASERS_GUARD = threading.Lock()
+_ALIASERS_MAX = 256
 
 
 def get_aliaser(memory_dir: str) -> IdAliaser:
@@ -450,6 +458,10 @@ def get_aliaser(memory_dir: str) -> IdAliaser:
         if aliaser is None:
             aliaser = IdAliaser(memory_dir)
             _ALIASERS[key] = aliaser
+            while len(_ALIASERS) > _ALIASERS_MAX:
+                _ALIASERS.popitem(last=False)
+        else:
+            _ALIASERS.move_to_end(key)
         return aliaser
 
 
