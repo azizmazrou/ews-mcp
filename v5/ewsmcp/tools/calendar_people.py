@@ -23,6 +23,8 @@ from datetime import datetime, time as dtime, timedelta
 from itertools import islice
 from typing import Any, Dict, List, Optional, Tuple
 
+from exchangelib import EWSTimeZone
+
 from .. import __version__
 from ..bodyclean import clean_body, html_to_text
 from ..dates import parse_when
@@ -57,6 +59,20 @@ def _ceil_to_grid(dt: datetime, step_minutes: int = GRID_MINUTES) -> datetime:
     floored = dt.replace(minute=(dt.minute // step_minutes) * step_minutes,
                          second=0, microsecond=0)
     return floored if floored >= dt else floored + timedelta(minutes=step_minutes)
+
+
+def _fb_aware(value: Optional[datetime], tz: Any) -> Optional[datetime]:
+    """Free/busy CalendarEvent start/end arrive NAIVE — exchangelib logs
+    "Returning naive datetime ... on field start". EWS renders them in the
+    timezone the request carried but drops the offset. Left naive they are
+    two different bugs downstream: fmt_dt reads them as SYSTEM local time
+    (right only by accident when the host tz equals EWS_TZ, two hours off in
+    a UTC container), and merge_busy_and_find_slots compares them against a
+    tz-aware window, raising "can't compare offset-naive and offset-aware
+    datetimes". Re-attach the timezone we asked for."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=tz)
 
 
 # ------------------------------------------------- slot synthesis (pure)
@@ -185,6 +201,13 @@ async def _check_availability(ctx: Context, attendees: List[str], start: str,
     if int(duration_minutes) <= 0:
         raise ToolError("validation", "'duration_minutes' must be positive.")
     start_dt, end_dt = _window(start, end, tz)
+    # get_free_busy_info serializes the window as an Exchange timezone and
+    # reads tzinfo.ms_id. The shared date grammar hands back stdlib ZoneInfo,
+    # which has no such attribute — so re-anchor on EWSTimeZone here, at the
+    # exchangelib boundary, and leave dates.py free of exchangelib imports.
+    ews_tz = EWSTimeZone(tz)
+    start_dt = start_dt.astimezone(ews_tz)
+    end_dt = end_dt.astimezone(ews_tz)
     requests = [(email, "Required", False) for email in emails]
 
     def work(account: Any) -> List[Any]:
@@ -206,8 +229,8 @@ async def _check_availability(ctx: Context, attendees: List[str], start: str,
         entries: List[Dict[str, Any]] = []
         blocks: List[Tuple[datetime, datetime]] = []
         for ev in getattr(view, "calendar_events", None) or []:
-            ev_start = getattr(ev, "start", None)
-            ev_end = getattr(ev, "end", None)
+            ev_start = _fb_aware(getattr(ev, "start", None), ews_tz)
+            ev_end = _fb_aware(getattr(ev, "end", None), ews_tz)
             if ev_start is None or ev_end is None:
                 continue
             status = str(getattr(ev, "busy_type", None) or "Busy")
