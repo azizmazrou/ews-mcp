@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from ..bodyclean import clean_body
 from ..dates import parse_when
-from ..dto import envelope, event_card, fmt_dt, msg_card, msg_full
+from ..dto import envelope, event_card, fmt_dt, msg_card, msg_full, sniff_smime_type
 from ..errors import ToolError
 from ..gateway.client import WELL_KNOWN, paginate
 from .base import Context, ToolSpec
@@ -674,35 +674,52 @@ async def _get_attachment(ctx: Context, message_id: str,
         att = _pick_attachment(atts, attachment)
         name = getattr(att, "name", "") or "attachment"
         content_type = getattr(att, "content_type", None)
+        raw_content = getattr(att, "content", None)  # FileAttachment bytes (5.0.3)
+        smime_type = sniff_smime_type(name, content_type, raw_content)
         out: Dict[str, Any] = {
             "ok": True,
             "name": name,
             "size_bytes": getattr(att, "size", None),
             "content_type": content_type,
         }
+        if smime_type:
+            out["smime_type"] = smime_type
         chosen = mode
         if mode == "auto":
-            chosen = "text" if _is_texty(name, content_type) else "info"
-            if chosen == "info":
-                out["hint"] = ("Binary attachment — metadata only. Call again "
-                               "with mode='save' to write it to disk.")
+            if smime_type == "enveloped":
+                chosen = "info"
+                out["hint"] = ("S/MIME encrypted (PKCS#7 EnvelopedData) — the "
+                               "content is not readable without the recipient's "
+                               "private key.")
+            elif smime_type == "signed":
+                chosen = "text"
+            else:
+                chosen = "text" if _is_texty(name, content_type) else "info"
+                if chosen == "info":
+                    out["hint"] = ("Binary attachment — metadata only. Call again "
+                                   "with mode='save' to write it to disk.")
         if chosen == "info":
             out["mode"] = "info"
             return out
-        content = getattr(att, "content", None)  # FileAttachment bytes (5.0.3)
-        if not isinstance(content, (bytes, bytearray)):
+        if not isinstance(raw_content, (bytes, bytearray)):
             raise ToolError(
                 "validation",
                 f"Attachment {name!r} has no retrievable bytes (item attachment?).",
                 hint="Only file attachments can be read; use mode='info'.",
             )
-        data = bytes(content)
+        data = bytes(raw_content)
         if chosen == "text":
             text = data.decode("utf-8", errors="replace")
             out["mode"] = "text"
             out["text"] = text[:_TEXT_CAP]
             if len(text) > _TEXT_CAP:
                 out["truncated"] = True
+            if smime_type == "signed":
+                out["hint"] = ("Signed, not encrypted (PKCS#7 SignedData) — this "
+                               "is the raw DER wrapper decoded as text, so the "
+                               "certificate/signature bytes around the readable "
+                               "message content appear as � replacement "
+                               "characters.")
             return out
         safe = re.sub(r"[^\w.\-]+", "_", name).strip("._") or "attachment.bin"
         dest = Path(ctx.settings.data_dir) / "attachments"
@@ -986,9 +1003,14 @@ TOOLS: List[ToolSpec] = [
             "flagged) for text-like attachments (text/* content type or "
             ".txt/.csv/.md/.log/.json name); 'save' → write the bytes under "
             "the server data dir and return saved_path; 'auto' (default) → "
-            "text when text-like, otherwise info plus a hint. When the message "
-            "has several attachments you MUST pick one via `attachment` (a "
-            "name, or a zero-based index as a string)."
+            "text when text-like, otherwise info plus a hint. An smime.p7m "
+            "attachment (application/pkcs7-mime) is sniffed and reported as "
+            "`smime_type: signed|enveloped` — signed is NOT encrypted (auto "
+            "decodes as text, cert/signature bytes show as replacement chars); "
+            "enveloped IS encrypted (auto stays info; content is unrecoverable "
+            "without the recipient's private key). When the message has "
+            "several attachments you MUST pick one via `attachment` (a name, "
+            "or a zero-based index as a string)."
         ),
         side_effect_class="read",
         requires_ews=True,

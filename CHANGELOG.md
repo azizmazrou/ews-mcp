@@ -2,6 +2,78 @@
 
 ## [Unreleased]
 
+### Added
+- `v5`: `get_attachment` and `get_message` now sniff `smime.p7m`
+  (`application/pkcs7-mime`) attachments and report `smime_type:
+  signed|enveloped` — that content-type/filename names BOTH opaque-signed
+  and encrypted S/MIME identically, so previously the calling model had
+  to guess from an empty body + the filename alone (and guessed wrong:
+  it assumed "encrypted" on a signed message). The real answer is the
+  DER `ContentInfo.contentType` OID at the start of the PKCS#7 structure
+  (RFC 5652) — read directly off the already-fetched attachment bytes,
+  no new dependency. `get_attachment(mode='auto')` now decodes `signed`
+  as text (the original MIME is embedded in cleartext inside the
+  SignedData wrapper; cert/signature bytes render as replacement chars)
+  and correctly leaves `enveloped` as `info` with a hint that the
+  content is genuinely unrecoverable without the recipient's private key.
+- `v5`: rules conditions now cover every predicate Outlook/OWA's own
+  rule editor exposes — `sender_contains`/`recipient_contains`/
+  `subject_or_body_contains`/`header_contains` (substring matches, as
+  opposed to the exact-address `from_addresses`/`sent_to_addresses`),
+  `sensitivity`, `flagged_for_action`, the `is_*` message-type flags
+  (meeting request/response, automatic forward/reply, encrypted, signed,
+  read receipt, NDR, voicemail, approval request, permission-controlled),
+  the `sent_to_me`/`sent_only_to_me`/`sent_cc_me`/`sent_to_or_cc_me`/
+  `not_sent_to_me` "my name is" group, `min_size_bytes`/`max_size_bytes`
+  (`WithinSizeRange`), and `received_after`/`received_before`
+  (`WithinDateRange`, sharing the one date grammar every other tool
+  uses). Excluded on purpose: `Categories`/`ItemClasses`/
+  `MessageClassifications`/`FromConnectedAccounts` have no OWA UI at
+  all — `unsupported_fields` flags a rule using one of those instead of
+  silently misrepresenting it.
+
+  Found live: a real "BMW OUT" rule (contains "bmw." in the recipient
+  address) showed up conditionless with `ContainsRecipientStrings`
+  flagged unsupported — that substring-match pattern is what OWA's
+  simple UI actually builds, so it was the dominant real-world case,
+  not an edge one; the user then asked for full parity with everything
+  OWA's condition picker offers.
+
+### Fixed
+- `v5`: OAuth discovery paths (`/.well-known/oauth-*`, `/register`) now
+  404 instead of inheriting the `MCP_API_KEY` gate's 401. This server
+  implements no OAuth; a 401 there reads to a spec-compliant MCP client
+  as "OAuth required, no metadata available" — LibreChat surfaced this
+  as a dead-end OAuth prompt on a plain header-auth (multi-user mode)
+  connection. 404 is the correct "not supported" signal — this fixes the
+  "no metadata" case, but does NOT make `MCP_API_KEY` safe to combine
+  with a non-OAuth LibreChat MCP connection (confirmed live: LibreChat
+  still attempts OAuth on any 401 from the first `/mcp` touch, and
+  doesn't reliably recover). See README "HTTP transport" for the actual
+  guidance — omit `MCP_API_KEY` for that connection; the REST shim's
+  `x-api-key` is unaffected.
+
+### Added
+- `v5`: Inbox rules (mail filters) — `list_rules`/`create_rule`/
+  `update_rule`/`delete_rule`, 32 tools total (was 28). exchangelib
+  implements neither `GetInboxRules` nor `UpdateInboxRules`, so
+  `ewsmcp/gateway/rules.py` talks the raw EWS XML directly (schema
+  verified against Microsoft's own EWS reference), exposing a curated
+  condition/action subset (from/subject/body/attachments/importance →
+  move/copy/forward/redirect/delete/mark/stop). `forward_to`/
+  `redirect_to` re-check `SEND_ENABLED` themselves (same pattern as
+  `create_event`'s invitations) and always require two-phase confirm,
+  same as delete/permanent_delete — a rule is a standing auto-send
+  order, not a one-off. `update_rule` replaces a rule wholesale, matching
+  EWS's own `SetRuleOperation` semantics (not a partial patch).
+- `v5`: multi-user mode (`EWS_MULTI_USER=true`, HTTP transport only) —
+  each request carries its own `X-EWS-Email`/`X-EWS-Password` headers
+  (e.g. LibreChat `customUserVars`) instead of a shared mailbox, resolved
+  to a bounded, idle-evicting cache of per-user Exchange sessions
+  (`ewsmcp/multiuser.py`). Cache mirror, audit log, alias DB and semantic
+  index are all disabled in this mode — see README "Multi-user mode" and
+  `v5/DESIGN.md` §Multi-user.
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all

@@ -102,6 +102,12 @@ class EWSGateway:
         self._folder_cache.clear()
         self._folder_cache_ts = 0.0
 
+    def close(self) -> None:
+        """Tear down this gateway for good (multi-user eviction only —
+        the process-wide single-mailbox gateway just lives until exit)."""
+        self.reset()
+        self._pool.shutdown(wait=False, cancel_futures=True)
+
     def test_connection(self) -> bool:
         """Real network probe — must round-trip on EVERY call.
 

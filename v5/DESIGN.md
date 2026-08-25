@@ -30,7 +30,7 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 
 ## §Tools — the surface
 
-Four packs (see the generated table in `docs/API.md`):
+Five packs (see the generated table in `docs/API.md`):
 
 - **mail-read** (6): `list_folders`, `search_messages`, `get_message`,
   `get_thread`, `get_attachment`, `get_mailbox_overview`.
@@ -42,6 +42,19 @@ Four packs (see the generated table in `docs/API.md`):
   `delete_draft`, `send_draft`), bulk ops (`update_messages`,
   `move_messages`, `delete_messages`), calendar writes (`create_event`,
   `update_event`, `respond_to_event`, `cancel_event`), `set_oof`.
+- **rules** (4): `list_rules`, `create_rule`, `update_rule`, `delete_rule`
+  — Inbox rules (mail filters) via EWS's GetInboxRules/UpdateInboxRules,
+  which exchangelib does not implement (`gateway/rules.py` talks raw EWS
+  XML). Conditions cover every predicate Outlook/OWA's own rule editor
+  exposes — everything under its "Contains these words / Was sent or
+  received / My name is / Is flagged with / Is / Size / Received" menus
+  — except the four that have no OWA UI at all (`Categories`,
+  `ItemClasses`, `MessageClassifications`, `FromConnectedAccounts`);
+  `unsupported_fields` on a listed rule flags those four if present, so
+  a rule using one is never silently misrepresented. `forward_to`/
+  `redirect_to` re-check `SEND_ENABLED` themselves (same exception as
+  `create_event`'s invitations, §Safety) since a rule is a standing
+  auto-send order, not a one-off.
 - **semantic** (+1, only when enabled): `find_similar`.
 
 Every list-shaped result ships exactly the canonical envelope
@@ -60,8 +73,9 @@ without two model decisions):
 - **Tiers** `EWS_CAPABILITY_TIER=read|draft|full` (default `draft`)
   remove above-tier tools from the registry AND refuse them at dispatch.
 - **Recipient guard** (allow/denylist globs) fires on every tool whose
-  arguments carry recipients (drafts, events) and on the draft's RESOLVED
-  recipients inside `send_draft`'s confirm gate.
+  arguments carry recipients (drafts, events, rule `forward_to`/
+  `redirect_to`) and on the draft's RESOLVED recipients inside
+  `send_draft`'s confirm gate.
 - **Two-phase confirm**: phase 1 returns a preview + HMAC token; phase 2
   must echo it. For `send_draft` the token binds the draft's CONTENT
   (subject + sorted recipients + full body, refetched and re-verified at
@@ -70,14 +84,16 @@ without two model decisions):
   `idempotency_key` + draft) return the cached receipt without a fresh
   token — that is what makes retry-after-timeout safe (Stripe semantics).
 - **Send rate cap** `EWS_MAX_SENDS_PER_HOUR`.
-- The one documented handler-side check: `create_event`/`update_event`
-  are write-class for tier purposes, but invitations leave the org, so
-  they re-check the kill-switch when (and only when) they would notify.
+- The documented handler-side checks: `create_event`/`update_event` are
+  write-class for tier purposes, but invitations leave the org, so they
+  re-check the kill-switch when (and only when) they would notify; same
+  for `create_rule`/`update_rule` when `forward_to`/`redirect_to` is set
+  — a rule is a standing auto-send order, not a one-off.
 
 ## §Ids — aliases only
 
 The model never sees a raw EWS id: outputs carry short aliases (`m12`,
-`e3`, `d1`, `t4`, `p2`, `k1`, `f7`), inputs accept aliases or raw ids.
+`e3`, `d1`, `t4`, `p2`, `k1`, `f7`, `r3`), inputs accept aliases or raw ids.
 The SQLite-backed aliaser survives restarts, rebinds on moves, and keeps
 `internet_message_id` as a secondary key. Stale alias → clean re-search
 hint, never an upstream error. Page-sized mints batch into one
@@ -130,6 +146,18 @@ stdio MCP, Streamable HTTP `/mcp`, a REST shim `/api/tools/<name>`
 Exchange contact; a background warmup loop owns connection recovery
 (exponential backoff + jitter, protocol-cache eviction every 3 failures,
 heartbeat re-probe with a REAL network round trip).
+
+## §Multi-user
+
+`EWS_MULTI_USER=true` (HTTP transport only) drops the single shared
+mailbox: every call instead carries its own `X-EWS-Email` /
+`X-EWS-Password` headers, resolved to a per-user `Context` with its own
+`EWSGateway` (`multiuser.UserContextCache`, bounded + idle-evicting).
+Alias DB, audit log, cache mirror, semantic index and the connection
+manager are all per-user state that would otherwise leak between
+identities, so they stay out entirely in this mode — reads go straight
+to EWS. The one thing shared is the tool `registry` itself (stateless,
+built once from the tier-filtered config).
 
 ## §Audit
 
