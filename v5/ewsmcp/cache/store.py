@@ -441,6 +441,7 @@ class CacheStore:
         until_ts: Optional[int] = None,
         is_unread: Optional[bool] = None,
         has_attachments: Optional[bool] = None,
+        categories: Optional[List[str]] = None,
         offset: int = 0,
         limit: int = 20,
     ) -> Tuple[List[sqlite3.Row], int]:
@@ -478,6 +479,17 @@ class CacheStore:
         if has_attachments is not None:
             where.append("m.has_attachments = ?")
             params.append(1 if has_attachments else 0)
+        if categories:
+            # AND semantics (message must carry ALL listed categories), to
+            # match exchangelib's categories__contains behavior on the live
+            # path (mail_read.py) - one EXISTS(json_each(...)) per category,
+            # each requiring an exact (case-sensitive) match against the
+            # JSON array stored in categories_json (see apply_categories()).
+            for cat in categories:
+                where.append(
+                    "EXISTS (SELECT 1 FROM json_each(m.categories_json) "
+                    "WHERE value = ?)")
+                params.append(cat)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         base = f"FROM messages m {joins}{clause}"
         with self._read() as conn:

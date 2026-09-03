@@ -351,6 +351,8 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                            subject: Optional[str] = None, since: Optional[str] = None,
                            until: Optional[str] = None, is_unread: Optional[bool] = None,
                            has_attachments: Optional[bool] = None,
+                           categories: Optional[List[str]] = None,
+                           recursive: bool = False,
                            offset: int = 0, limit: int = 20,
                            mode: str = "keyword",
                            fresh: bool = False) -> Dict[str, Any]:
@@ -378,14 +380,15 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                         "pass `sender` only — `from_` is its deprecated alias.")
     sender = sender or from_
     structured_given = any(
-        v is not None for v in (sender, subject, since, until, is_unread, has_attachments)
+        v is not None for v in
+        (sender, subject, since, until, is_unread, has_attachments, categories)
     )
     if query and structured_given:
         raise ToolError(
             "validation",
             "`query` (AQS) cannot be combined with the structured filters "
-            "(sender/subject/since/until/is_unread/has_attachments) — Exchange "
-            "runs them on different engines.",
+            "(sender/subject/since/until/is_unread/has_attachments/categories) — "
+            "Exchange runs them on different engines.",
             hint="Either fold everything into the AQS string "
                  "(e.g. 'from:ahmed subject:rfp received>=2026-06-01') or drop "
                  "`query` and use only structured filters.",
@@ -393,8 +396,14 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
     tz = ctx.settings.ews_tz
 
     # ---- cache-first: local FTS + SQL filters, exact COUNT(*) total -------
+    # `recursive` always goes live: the mirror only tracks a fixed, flat set
+    # of synced folders (EWS_CACHE_FOLDERS), not "this folder plus whatever
+    # subfolder tree it happens to have" - there's no cheap way to know
+    # which cached folder keys are actually descendants of `folder` without
+    # a live folder-hierarchy lookup, which defeats the point of the cache
+    # path being fast.
     folder_key = _cache_folder_key(ctx, folder)
-    if not fresh and folder_key:
+    if not fresh and not recursive and folder_key:
         as_of = _cache_watermark(ctx, folder_key)
         if as_of:
             try:
@@ -407,6 +416,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                     folders=[folder_key], text=query, sender=sender,
                     subject=subject, since_ts=since_ts, until_ts=until_ts,
                     is_unread=is_unread, has_attachments=has_attachments,
+                    categories=categories,
                     offset=offset, limit=limit,
                 )
                 cards = await asyncio.to_thread(
@@ -422,6 +432,8 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
     filters: Dict[str, Any] = {}
     if subject:
         filters["subject__icontains"] = subject
+    if categories:
+        filters["categories__contains"] = categories
     if since:
         filters["datetime_received__gte"] = parse_when(since, "since", tz)
     if until:
@@ -436,7 +448,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
     def work(account: Any) -> Tuple[List[Any], Optional[int], Optional[int]]:
         target = ctx.gateway.resolve_folder(account, folder, ctx.aliaser)
         total: Optional[int] = None
-        if unfiltered:
+        if unfiltered and not recursive:
             # Exact totals are only cheap for a plain listing: one refreshed
             # folder property instead of a count() full-folder scan.
             try:
@@ -444,8 +456,44 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                 total = getattr(target, "total_count", None)
             except Exception:
                 total = None
-        qs = target.filter(query) if query else target.filter(**filters)
-        page, next_off = paginate(_project(qs), offset=offset, limit=limit)
+        if recursive:
+            # Searches `target` AND every folder under it in ONE EWS request
+            # (exchangelib's FolderCollection.filter() issues a single
+            # FindItem call across all member folders) - the alternative,
+            # discovering subfolders and issuing one search_messages call
+            # per folder from the CALLER's side, doesn't scale: a mailbox
+            # with ~100 inbox subfolders turns one Qx-style "count per
+            # category" refresh into ~900 separate tool calls. Local import:
+            # this is the only place in the tool pack that needs it.
+            from exchangelib import FolderCollection
+            scope = FolderCollection(account=account, folders=[target, *target.walk()])
+        else:
+            scope = target
+        qs = scope.filter(query) if query else scope.filter(**filters)
+        if total is None and categories and not recursive and not query:
+            # Live-verified: qs.count() on a categories__contains restriction
+            # against a SINGLE folder is cheap (server-side count, not a
+            # full fetch) and accurate - worth paying for here since callers
+            # filtering by category are exactly the ones that need a real
+            # total_available (e.g. a Qx dashboard counting messages per
+            # label), not just a page of items to display.
+            #
+            # Deliberately NOT extended to `recursive`: qs.count() on a
+            # multi-folder FolderCollection is live-verified WRONG (returns
+            # roughly the size of a single member folder, not the union) -
+            # this is a known exchangelib limitation, not something fixable
+            # here (see ecederstrand/exchangelib#1022, "multi-folder search"
+            # issues). Per-item results across a recursive scope ARE correct
+            # (ground-truth-verified), just not qs.count(). Leaving total
+            # as None for recursive searches is deliberate: it signals
+            # "don't trust this" to callers rather than returning a
+            # plausible-looking wrong number.
+            try:
+                total = qs.count()
+            except Exception:
+                total = None
+        qs = _project(qs)
+        page, next_off = paginate(qs, offset=offset, limit=limit)
         return page, next_off, total
 
     items, next_offset, total = await ctx.gateway.call(work)
@@ -871,7 +919,7 @@ TOOLS: List[ToolSpec] = [
             "Search mail. TWO ENGINES, mutually exclusive: pass `query` (an "
             "Exchange AQS string, e.g. 'from:ahmed subject:rfp hasattachment:yes') "
             "OR the structured filters (sender/subject/since/until/is_unread/"
-            "has_attachments) — combining `query` with any structured filter is "
+            "has_attachments/categories) — combining `query` with any structured filter is "
             "a validation error. `sender` is matched client-side against the "
             "fetched page's sender email/name, so total_available is unknown "
             "when it is used. Results are compact cards, newest first; their "
@@ -914,6 +962,32 @@ TOOLS: List[ToolSpec] = [
             },
             "is_unread": {"type": "boolean"},
             "has_attachments": {"type": "boolean"},
+            "categories": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Match messages carrying ALL of these Outlook "
+                               "categories (exact names, e.g. ['Q1']). Cannot "
+                               "combine with `query`.",
+            },
+            "recursive": {
+                "type": "boolean", "default": False,
+                "description": "Search `folder` AND every folder under it, in "
+                               "one request (via exchangelib's FolderCollection - "
+                               "not a per-folder loop). Use this instead of "
+                               "discovering subfolders and calling "
+                               "search_messages once per folder, which doesn't "
+                               "scale for a mailbox with many subfolders. "
+                               "Combines with `query` OR the structured filters. "
+                               "Always forces a live read (fresh=true) - the "
+                               "local mirror only tracks a fixed set of synced "
+                               "folders, not arbitrary subtrees. CAVEAT: "
+                               "total_available is always null for a recursive "
+                               "search - counting across multiple folders is "
+                               "unreliable in the underlying library, so this "
+                               "only returns individual items (each still "
+                               "correct), never a trustworthy total. Do not "
+                               "rely on total_available when recursive=true.",
+            },
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
             "mode": {
