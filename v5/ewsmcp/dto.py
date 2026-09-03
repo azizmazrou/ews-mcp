@@ -128,6 +128,8 @@ def msg_full(item: Any, aliaser: IdAliaser, tz: str, body_max_chars: int,
     imid = getattr(item, "message_id", None)
     if imid:
         full["internet_message_id"] = imid
+    if getattr(item, "flag_status", None) == 1:
+        full["flag_complete"] = True
     full.pop("snippet", None)
     return full
 

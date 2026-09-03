@@ -26,8 +26,11 @@ exchangelib 5.0.3 pins honoured here (verified against the installed lib):
   items persisted via ``.save(account.drafts)`` (Exchange quotes the
   original server-side).
 - ``Item.move(folder)`` returns ``None`` and updates ``item.id`` in place.
-- There is NO follow-up-flag parameter anywhere: 5.0.3 has no first-class
-  flag field; pretending would be mock-drift bait (categories instead).
+- Follow-up flag completion IS available, via ExtendedProperty
+  registration (PidTagFlagStatus, tag 0x1090) - see ../flag_property.py
+  for the live-verified read/write/filter proof. update_messages'
+  ``flag_complete`` param uses it; this superseded an earlier assumption
+  here that it was unavailable.
 """
 
 import html as _html
@@ -42,6 +45,10 @@ from exchangelib.items import (
     SEND_TO_CHANGED_AND_SAVE_COPY,
     SEND_TO_NONE,
 )
+
+from ..flag_property import ensure_registered as ensure_flag_status_registered
+
+ensure_flag_status_registered()
 
 from ..dates import parse_when
 from ..errors import ToolError
@@ -312,22 +319,23 @@ async def _delete_draft(ctx: Context, *, draft_id: str) -> Dict[str, Any]:
 async def _update_messages(ctx: Context, *, ids: List[str],
                            set_read: Optional[bool] = None,
                            categories_add: Optional[List[str]] = None,
-                           categories_remove: Optional[List[str]] = None) -> Dict[str, Any]:
-    # NOTE: there is deliberately NO set_flag parameter — exchangelib 5.0.3
-    # exposes no first-class follow-up flag field, and pretending would be
-    # mock-drift bait. Categories are the visible marker (see description).
+                           categories_remove: Optional[List[str]] = None,
+                           flag_complete: Optional[bool] = None) -> Dict[str, Any]:
     _require_bulk(ids)
-    if set_read is None and not categories_add and not categories_remove:
-        raise ToolError("validation",
-                        "nothing to update: pass set_read and/or categories_add/_remove")
+    if (set_read is None and not categories_add and not categories_remove
+            and flag_complete is None):
+        raise ToolError(
+            "validation",
+            "nothing to update: pass set_read, categories_add/_remove, and/or flag_complete")
     remove = set(categories_remove or [])
     ok_ids: List[str] = []
     final_cats: List[tuple] = []
 
     def work(account: Any) -> Dict[str, Any]:
         updated, failed = 0, []
-        fetched = _fetch_many(account, ids,
-                              only=["id", "changekey", "is_read", "categories"])
+        fetched = _fetch_many(
+            account, ids,
+            only=["id", "changekey", "is_read", "categories", "flag_status"])
         for raw_id, item in zip(ids, fetched):
             try:  # per-item isolation: one failure never aborts the batch
                 if isinstance(item, Exception):
@@ -344,6 +352,13 @@ async def _update_messages(ctx: Context, *, ids: List[str],
                     item.categories = cats or None
                     changed.append("categories")
                     final_cats.append((raw_id, cats))
+                if flag_complete is not None:
+                    # 1 = flagged and marked Complete; None = not flagged.
+                    # Deliberately doesn't produce state 2 (flagged, still
+                    # open) - this tool only marks/unmarks completion, it
+                    # doesn't raise a new follow-up flag.
+                    item.flag_status = 1 if flag_complete else None
+                    changed.append("flag_status")
                 item.save(update_fields=changed)
                 updated += 1
                 ok_ids.append(raw_id)
@@ -743,15 +758,18 @@ TOOLS: List[ToolSpec] = [
     ToolSpec(
         name="update_messages",
         description=(
-            "Bulk-update up to 50 messages: set_read and/or categories_add/"
-            "categories_remove. Per-item failures are isolated and reported. "
-            "There is no follow-up-flag support in this backend — use "
-            "categories_add (e.g. ['Follow up']) as the visible marker."
+            "Bulk-update up to 50 messages: set_read, categories_add/"
+            "categories_remove, and/or flag_complete. Per-item failures are "
+            "isolated and reported. flag_complete marks/unmarks the message's "
+            "follow-up flag as Complete (true) or clears completion (false) - "
+            "it does not raise a NEW follow-up flag on an unflagged message, "
+            "only sets/clears the completion state."
         ),
         side_effect_class="write",
         input_schema=_obj({
             "ids": _IDS, "set_read": _BOOL,
             "categories_add": _EMAILS, "categories_remove": _EMAILS,
+            "flag_complete": _BOOL,
         }, required=["ids"]),
         handler=_update_messages,
         confirm=False,
