@@ -260,6 +260,8 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
                 }
                 if r["wk"]:
                     row["wk"] = r["wk"]
+                if r["folder_class"]:
+                    row["folder_class"] = r["folder_class"]
                 rows.append(row)
             as_of = ctx.cache.watermark("events")  # slow-lane watermark
             return _stamp(envelope(rows, total_available=len(rows), offset=0),
@@ -299,6 +301,10 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
                     wk = wk_by_raw_id.get(raw_id)
                     if wk:
                         row["wk"] = wk
+                    # getattr — not every folder object carries a FolderClass
+                    folder_class = getattr(child, "folder_class", None)
+                    if folder_class:
+                        row["folder_class"] = folder_class
                     rows.append(row)
                 walk(child, level + 1, path)
 
@@ -847,8 +853,10 @@ TOOLS: List[ToolSpec] = [
             "{id, name, path, total, unread, children}; `id` is a short folder "
             "alias (f7) reusable as a `folder`/`parent` argument anywhere. "
             "Well-known folders also carry `wk` (e.g. 'f:inbox') — prefer "
-            "passing that stable alias. Set include_empty=false to hide "
-            "folders with zero items."
+            "passing that stable alias. Rows also carry the raw EWS FolderClass "
+            "as `folder_class` when Exchange reports one (e.g. 'IPF.Note' for "
+            "mail, 'IPF.Appointment' for calendar). Set include_empty=false to "
+            "hide folders with zero items."
         ),
         side_effect_class="read",
         requires_ews=True,

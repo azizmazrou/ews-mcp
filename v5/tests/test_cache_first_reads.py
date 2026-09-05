@@ -64,7 +64,11 @@ def seeded_store(tmp_path):
     }])
     store.replace_folders([{
         "ews_id": "F-IN", "name": "Inbox", "path": "Inbox", "wk": "f:inbox",
-        "total": 3, "unread": 1, "children": 0,
+        "total": 3, "unread": 1, "children": 0, "folder_class": "IPF.Note",
+    }, {
+        # no folder_class key at all: Exchange did not report one
+        "ews_id": "F-AR", "name": "Archive", "path": "Archive", "wk": None,
+        "total": 2, "unread": 0, "children": 0,
     }])
     return store
 
@@ -134,8 +138,11 @@ def test_list_folders_from_mirror(tmp_path):
     ctx = _ctx(tmp_path, NoTouchGateway())
     res = _run(ctx, "list_folders")
     assert res["source"] == "cache"
-    assert res["items"][0]["wk"] == "f:inbox"
-    assert res["items"][0]["unread"] == 1
+    by_path = {r["path"]: r for r in res["items"]}
+    assert by_path["Inbox"]["wk"] == "f:inbox"
+    assert by_path["Inbox"]["unread"] == 1
+    assert by_path["Inbox"]["folder_class"] == "IPF.Note"
+    assert "folder_class" not in by_path["Archive"]
 
 
 def test_fresh_true_forces_live(tmp_path):

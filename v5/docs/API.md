@@ -52,7 +52,7 @@ regenerate with `python scripts/dump_tool_table.py --write`.
 
 #### `list_folders` — read (min tier: read)
 
-List mail folders as a depth-limited tree walk. Each row is {id, name, path, total, unread, children}; `id` is a short folder alias (f7) reusable as a `folder`/`parent` argument anywhere. Well-known folders also carry `wk` (e.g. 'f:inbox') — prefer passing that stable alias. Set include_empty=false to hide folders with zero items.
+List mail folders as a depth-limited tree walk. Each row is {id, name, path, total, unread, children}; `id` is a short folder alias (f7) reusable as a `folder`/`parent` argument anywhere. Well-known folders also carry `wk` (e.g. 'f:inbox') — prefer passing that stable alias. Rows also carry the raw EWS FolderClass as `folder_class` when Exchange reports one (e.g. 'IPF.Note' for mail, 'IPF.Appointment' for calendar). Set include_empty=false to hide folders with zero items.
 
 | parameter | type | required | description |
 |---|---|---|---|

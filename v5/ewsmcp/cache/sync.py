@@ -265,6 +265,7 @@ class SyncEngine:
                         "name": name,
                         "path": path,
                         "wk": wk_by_raw.get(raw_id),
+                        "folder_class": getattr(child, "folder_class", None),
                         "total": getattr(child, "total_count", None) or 0,
                         "unread": getattr(child, "unread_count", None) or 0,
                         "children": len(list(getattr(child, "children", None) or [])),

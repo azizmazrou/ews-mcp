@@ -144,11 +144,14 @@ def test_row_from_message_cleans_body_once(tmp_path):
 def test_slow_lane_syncs_folders_calendar_tasks(tmp_path):
     account = _account()
 
-    def folder_node(fid, name, children=(), total=0, unread=0):
+    def folder_node(fid, name, children=(), total=0, unread=0,
+                    folder_class=None):
         return SimpleNamespace(id=fid, name=name, children=list(children),
-                               total_count=total, unread_count=unread)
+                               total_count=total, unread_count=unread,
+                               folder_class=folder_class)
 
-    inbox_node = folder_node("F-IN", "Inbox", total=5, unread=2)
+    inbox_node = folder_node("F-IN", "Inbox", total=5, unread=2,
+                             folder_class="IPF.Note")
     account.msg_folder_root = folder_node("F-ROOT", "root", [inbox_node])
     account.inbox = FakeFolder("inbox")
     account.inbox.id = "F-IN"
@@ -175,6 +178,7 @@ def test_slow_lane_syncs_folders_calendar_tasks(tmp_path):
     engine._sync_slow_lane(account)
     folders = {r["path"]: r for r in store.folder_rows()}
     assert folders["Inbox"]["unread"] == 2
+    assert folders["Inbox"]["folder_class"] == "IPF.Note"
     assert store.events_window(0, 2**40)
     rows, total = store.task_rows()
     assert total == 1

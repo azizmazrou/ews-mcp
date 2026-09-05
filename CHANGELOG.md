@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- `list_folders` rows now expose `folder_class`, the raw EWS
+  FolderClass string (`IPF.Note`, `IPF.Appointment`, `IPF.Contact`,
+  …), on both the cache and live lanes; omitted when Exchange
+  reports none. Existing local mirrors gain the `folders.folder_class`
+  column on open and fill it on the next hierarchy sync.
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all
