@@ -9,7 +9,8 @@ bugs came from three modules re-implementing similar-but-different rules.
 
 import re
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+
+from exchangelib import EWSTimeZone
 
 from .errors import ToolError
 
@@ -18,7 +19,15 @@ GRAMMAR_HINT = "Use 'today', '+Nd' (e.g. '+7d'), YYYY-MM-DD, or an ISO datetime.
 
 
 def parse_when(value, field: str, tz_name: str) -> datetime:
-    tz = ZoneInfo(tz_name)
+    # EWSTimeZone (not the stdlib zoneinfo.ZoneInfo) - it's a ZoneInfo
+    # subclass with the identical single-arg IANA-key constructor, so this
+    # is a drop-in swap, but it also carries the .ms_id attribute exchangelib
+    # needs to build the EWS TimezoneContext/MeetingTimeZone XML. A bare
+    # ZoneInfo here reached check_availability's get_free_busy_info() call
+    # 100% of the time (this function runs before any per-call slot
+    # filtering) and blew up with AttributeError: 'ZoneInfo' object has no
+    # attribute 'ms_id'.
+    tz = EWSTimeZone(tz_name)
     if not isinstance(value, str) or not value.strip():
         raise ToolError(
             "validation", f"{field!r} must be a non-empty date string.",
