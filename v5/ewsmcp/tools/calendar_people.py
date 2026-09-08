@@ -23,6 +23,8 @@ from datetime import datetime, time as dtime, timedelta
 from itertools import islice
 from typing import Any, Dict, List, Optional, Tuple
 
+from exchangelib import EWSTimeZone
+
 from .. import __version__
 from ..bodyclean import clean_body, html_to_text
 from ..dates import parse_when
@@ -192,6 +194,20 @@ async def _check_availability(ctx: Context, attendees: List[str], start: str,
             accounts=requests, start=start_dt, end=end_dt))
 
     views = await ctx.gateway.call(work)
+    # GetUserAvailability's legacy free/busy response returns CalendarEvent
+    # start/end as NAIVE datetimes (confirmed live: exchangelib logs
+    # "Returning naive datetime ... on field start/end") - EWS reports them
+    # in the same timezone the request's MeetingTimeZone specified, i.e.
+    # this same `tz`, so attach (never convert/shift) it here. Without this,
+    # comparing these naive values against start_dt/end_dt (tz-aware, from
+    # parse_when/_window) inside merge_busy_and_find_slots below raised
+    # "TypeError: can't compare offset-naive and offset-aware datetimes" on
+    # every call that actually had a busy block to compare against.
+    server_tz = EWSTimeZone(tz)
+
+    def _localize(dt: datetime) -> datetime:
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=server_tz)
+
     per_attendee: Dict[str, Any] = {}
     busy_by_attendee: Dict[str, List[Tuple[datetime, datetime]]] = {}
     degraded: List[str] = []
@@ -210,6 +226,7 @@ async def _check_availability(ctx: Context, attendees: List[str], start: str,
             ev_end = getattr(ev, "end", None)
             if ev_start is None or ev_end is None:
                 continue
+            ev_start, ev_end = _localize(ev_start), _localize(ev_end)
             status = str(getattr(ev, "busy_type", None) or "Busy")
             entries.append({"start": fmt_dt(ev_start, tz),
                             "end": fmt_dt(ev_end, tz), "status": status})
