@@ -1,4 +1,4 @@
-"""Tool registry: 32 tools in five packs (+find_similar when the semantic
+"""Tool registry: 33 tools in five packs (+find_similar when the semantic
 tier is enabled), tier-filtered. The count is asserted by boot smokes and
 the generated docs — change it DELIBERATELY."""
 

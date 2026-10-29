@@ -32,8 +32,8 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 
 Five packs (see the generated table in `docs/API.md`):
 
-- **mail-read** (6): `list_folders`, `search_messages`, `get_message`,
-  `get_thread`, `get_attachment`, `get_mailbox_overview`.
+- **mail-read** (7): `list_folders`, `search_messages`, `check_messages`,
+  `get_message`, `get_thread`, `get_attachment`, `get_mailbox_overview`.
 - **calendar / people / status** (7): `list_events`, `get_event`,
   `check_availability`, `find_people`, `get_contact`, `get_oof_settings`,
   `get_server_status`.
