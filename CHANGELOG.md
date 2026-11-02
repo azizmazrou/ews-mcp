@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- `v5`: all-day calendar items returned `start`/`end` as null:
+  exchangelib hands back a `date`, not a `datetime`, for them. They now
+  come back as `YYYY-MM-DD`, event cards say `all_day`, and the cache
+  mirror stores midnight in the server timezone.
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all

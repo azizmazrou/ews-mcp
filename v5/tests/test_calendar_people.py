@@ -190,6 +190,24 @@ def test_get_event_attendees_body_and_flags(tmp_path):
     assert event["my_response"] == "Organizer"
 
 
+def test_all_day_event_keeps_its_dates(tmp_path):
+    # exchangelib hands back dates, not datetimes, for all-day items.
+    from datetime import date
+    from ewsmcp.cache.sync import row_from_event
+    from ewsmcp.dto import event_card
+    ev = _event("RAW-ALLDAY", subject="Holiday",
+                start=date(2026, 11, 3), end=date(2026, 11, 4))
+    ev.is_all_day = True
+    card = event_card(ev, get_aliaser(str(tmp_path / "mem")), "Europe/Berlin")
+    assert (card["start"], card["end"]) == ("2026-11-03", "2026-11-04")
+    assert card["all_day"] is True
+    row = row_from_event(ev, "Europe/Berlin")
+    assert row["start_iso"] == "2026-11-03"
+    assert row["start_ts"] == int(
+        datetime(2026, 11, 3, tzinfo=ZoneInfo("Europe/Berlin")).timestamp())
+    assert row["end_ts"] > row["start_ts"]
+
+
 def test_get_event_per_item_exception_maps_to_not_found(tmp_path):
     class ErrorItemNotFound(Exception):
         pass

@@ -1,7 +1,7 @@
 """Token-lean DTO builders (DESIGN.md §DTOs). The model never sees a raw EWS id:
 ``id`` IS the short alias; the aliaser holds the raw id + changekey."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -10,6 +10,9 @@ from .ids import IdAliaser
 
 
 def fmt_dt(value: Any, tz: str) -> Optional[str]:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        # All-day calendar items: exchangelib hands back a date, no time.
+        return value.isoformat()
     if value is None or not hasattr(value, "astimezone"):
         return None
     try:
@@ -140,6 +143,9 @@ def event_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
         "start": fmt_dt(getattr(item, "start", None), tz),
         "end": fmt_dt(getattr(item, "end", None), tz),
     }
+    if getattr(item, "is_all_day", False):
+        # start/end are dates then, and end is the day AFTER the last one.
+        card["all_day"] = True
     location = getattr(item, "location", None)
     if location:
         card["location"] = str(location)
