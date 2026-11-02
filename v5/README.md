@@ -1,7 +1,7 @@
 # ews-mcp 4.5 — Exchange (EWS) as a safe, fast MCP tool surface
 
 An MCP server that turns an on-prem Exchange mailbox into a lean,
-safety-gated tool surface for an LLM assistant: **28 tools**, alias-only
+safety-gated tool surface for an LLM assistant: **32 tools**, alias-only
 ids, token-lean DTOs, a local cache mirror with Arabic-correct full-text
 search, and a two-phase confirm flow that makes autonomous sending
 tamper-evident.

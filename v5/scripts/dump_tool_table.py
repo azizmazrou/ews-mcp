@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ewsmcp.tools import calendar_people, mail_read, tasks, writes  # noqa: E402
+from ewsmcp.tools import calendar_people, mail_read, rules, tasks, writes  # noqa: E402
 from ewsmcp.tools.base import CLASS_TIER  # noqa: E402
 
 API_MD = Path(__file__).resolve().parents[1] / "docs" / "API.md"
@@ -33,6 +33,7 @@ def _packs():
         ("calendar / people / status", calendar_people.TOOLS),
         ("tasks / waiting-on", tasks.TOOLS),
         ("writes", writes.TOOLS),
+        ("rules", rules.TOOLS),
         ("semantic (only when EWS_SEMANTIC_INDEX != none)",
          mail_read.SEMANTIC_TOOLS),
     ]
@@ -48,11 +49,16 @@ def _first_sentence(text: str) -> str:
 
 
 def build_table() -> str:
+    # Semantic pack(s) are identified by name, not position — a fixed
+    # "first N packs are core" slice silently under-counted the summary
+    # line the moment a new pack was inserted before the semantic one
+    # (caught live when the rules pack landed between writes and semantic).
     packs = _packs()
-    core = sum(len(t) for _n, t in packs[:4])
+    core = sum(len(t) for name, t in packs if not name.startswith("semantic"))
+    semantic_count = sum(len(t) for name, t in packs if name.startswith("semantic"))
     lines = [
         f"**{core} tools** in the default registry "
-        f"(+{len(mail_read.SEMANTIC_TOOLS)} with the semantic tier). "
+        f"(+{semantic_count} with the semantic tier). "
         "Capability tiers: read ⊂ draft ⊂ full — a tool is available when "
         "the server tier is at or above its minimum.",
         "",

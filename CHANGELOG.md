@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Added
+- `v5`: Inbox rules (mail filters) — `list_rules`/`create_rule`/
+  `update_rule`/`delete_rule`, 32 tools total (was 28). exchangelib
+  implements neither `GetInboxRules` nor `UpdateInboxRules`, so
+  `ewsmcp/gateway/rules.py` talks the raw EWS XML directly (schema
+  verified against Microsoft's own EWS reference). Conditions cover every
+  predicate Outlook/OWA's own rule editor exposes: from/sent-to
+  addresses, substring matches (`subject_contains`, `body_contains`,
+  `sender_contains`, `recipient_contains`, `subject_or_body_contains`,
+  `header_contains`), attachments, importance, `sensitivity`,
+  `flagged_for_action`, the `is_*` message-type flags, the "my name is"
+  group (`sent_to_me`, `sent_only_to_me`, `sent_cc_me`,
+  `sent_to_or_cc_me`, `not_sent_to_me`), size range and date range.
+  `Categories`/`ItemClasses`/`MessageClassifications`/
+  `FromConnectedAccounts` have no OWA UI and stay out;
+  `unsupported_fields` flags a rule using one of them. Actions:
+  move/copy/forward/redirect/delete/mark/stop. `forward_to`/
+  `redirect_to` re-check `SEND_ENABLED` themselves (same pattern as
+  `create_event`'s invitations) and always require two-phase confirm,
+  same as delete/permanent_delete — a rule is a standing auto-send
+  order, not a one-off. `update_rule` replaces a rule wholesale, matching
+  EWS's own `SetRuleOperation` semantics (not a partial patch).
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all

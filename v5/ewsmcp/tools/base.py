@@ -23,9 +23,13 @@ TIER_RANK = {"read": 0, "draft": 1, "full": 2}
 CLASS_TIER = {"read": "read", "write": "draft", "send": "full", "destructive": "full"}
 ID_KEYS = frozenset({
     "id", "message_id", "draft_id", "event_id", "thread_id", "reply_to", "folder",
+    "rule_id",
 })
 ID_LIST_KEYS = frozenset({"ids"})
-RECIPIENT_KEYS = ("to", "cc", "bcc", "attendees")
+# forward_to/redirect_to (rule actions, tools/rules.py) leave the mailbox
+# on every future match, same as to/cc/bcc/attendees on a single send —
+# the allow/denylist guard below must see them too.
+RECIPIENT_KEYS = ("to", "cc", "bcc", "attendees", "forward_to", "redirect_to")
 
 CONFIRM_TOKEN_PROPERTY = {
     "type": "string",
