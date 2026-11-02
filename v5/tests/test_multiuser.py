@@ -111,6 +111,23 @@ def test_cache_per_user_isolation_of_gateway(tmp_path):
     assert a.settings.ews_email != b.settings.ews_email
 
 
+def test_cache_gives_each_user_own_memory_aliases(tmp_path):
+    cache = UserContextCache(_template(tmp_path))
+    a = cache.get("a@b.com", "pw")
+    b = cache.get("b@b.com", "pw")
+    raw = "AAMkRAW" + "x" * 140
+    alias = a.aliaser.alias_for(raw, "m", changekey="ck", internet_message_id="<i@x>")
+    assert alias.startswith("m") and len(alias) < 10
+    assert a.aliaser.alias_for(raw, "m") == alias
+    assert a.aliaser.resolve(alias) == raw
+    assert a.aliaser.resolve(raw) == raw
+    assert a.aliaser.imid_for(alias) == "<i@x>"
+    with pytest.raises(KeyError):
+        b.aliaser.resolve(alias)
+    assert a.aliaser.rebind(raw, "AAMkNEW") == alias
+    assert a.aliaser.resolve(alias) == "AAMkNEW"
+
+
 # --------------------------------------------------------------- config
 
 def test_ews_email_required_when_not_multi_user():

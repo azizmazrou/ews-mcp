@@ -8,7 +8,8 @@ calls from the same user, since autodiscover + auth is too slow to redo
 on every tool call — while everything that would otherwise leak between
 users (cache mirror, audit log, alias DB, semantic index, connection
 manager) stays out of the picture entirely: the per-user Context is built
-with those set to ``None``/no-op.
+with those set to ``None``/no-op. Short ids come from a MemoryAliaser held
+in that Context only (RAM, per user, gone with the Context).
 
 The tool ``registry`` is the one thing safe to share: ``ToolSpec`` objects
 are stateless (built once from the tier-filtered global config), so every
@@ -24,7 +25,7 @@ from typing import Optional, Tuple
 
 from .errors import ToolError
 from .gateway.client import EWSGateway
-from .ids import NullAliaser
+from .ids import MemoryAliaser
 from .tools.base import Context
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,7 @@ class UserContextCache:
             settings=settings,
             gateway=EWSGateway(settings),
             manager=None,
-            aliaser=NullAliaser(),
+            aliaser=MemoryAliaser(),
             audit=_NullAudit(),
             cache=None,
             sync=None,

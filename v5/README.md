@@ -150,7 +150,9 @@ cached in memory only for reuse across that user's own calls (bounded to
 rather than reusing the old session) and torn down on eviction. Because
 identity is now per-request, this mode also turns off everything that
 would otherwise mix data between users: no cache mirror, no audit log,
-no alias DB, no semantic index — every read is a live EWS call. HTTP
+no alias DB, no semantic index — every read is a live EWS call. Short
+ids come from an in-memory alias map inside that user's cached context,
+never written to disk and gone with the context. HTTP
 transport only (stdio is one already-authenticated local process, with
 no per-request header to attach credentials to).
 
