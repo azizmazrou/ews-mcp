@@ -19,9 +19,19 @@ class Settings(BaseSettings):
 
     # --- Exchange upstream -------------------------------------------------
     ews_server_url: str
-    ews_email: str
+    ews_email: Optional[str] = None  # required unless ews_multi_user (see below)
     ews_username: Optional[str] = None
     ews_password: Optional[str] = None
+
+    # --- Multi-user (per-request credentials, HTTP transport only) ---------
+    # When true, EWS_EMAIL/EWS_USERNAME/EWS_PASSWORD above are ignored: every
+    # tool call instead carries its own X-EWS-Email/X-EWS-Password headers
+    # (e.g. LibreChat customUserVars), resolved to a per-user Context with
+    # its own EWSGateway (see multiuser.py). No shared mailbox, no cache
+    # mirror, no audit log, no semantic index, no alias DB — those are all
+    # per-user state that would otherwise leak between users, so they stay
+    # off entirely in this mode.
+    ews_multi_user: bool = False
     # NEVER pin auth_type against this Exchange: the front door only works
     # via exchangelib auto-negotiation (verified live 2026-06-12; pinning
     # BASIC/NTLM both fail). Escape hatch for a *different* server only.
@@ -75,6 +85,16 @@ class Settings(BaseSettings):
     # --- Response economy ----------------------------------------------------
     default_page_size: int = Field(default=20, le=50)
     body_max_chars: int = 4000
+
+    @model_validator(mode="after")
+    def _validate_identity(self) -> "Settings":
+        if not self.ews_multi_user and not self.ews_email:
+            raise ValueError(
+                "EWS_EMAIL is required unless EWS_MULTI_USER=true — in "
+                "multi-user mode each request supplies its own identity via "
+                "the X-EWS-Email/X-EWS-Password headers instead."
+            )
+        return self
 
     @model_validator(mode="after")
     def _resolve_data_dir(self) -> "Settings":

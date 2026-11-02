@@ -1,16 +1,18 @@
 """MCP wiring: low-level Server, annotations, structured output, lifecycle."""
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mcp.server import Server
 from mcp.types import Tool, ToolAnnotations
 
 from .audit import AuditLog
 from .config import Settings
+from .errors import ToolError
 from .gateway.client import EWSGateway
 from .gateway.connection import ConnectionManager
 from .ids import NullAliaser, get_aliaser
+from .multiuser import UserContextCache, extract_credentials_from_request
 from .tools import build_registry
 from .tools.base import Context, dispatch
 
@@ -34,6 +36,17 @@ class _NullAudit:
 
 
 def build_context(settings: Settings) -> Context:
+    if settings.ews_multi_user:
+        # No shared mailbox in this mode — gateway/aliaser/audit/cache/
+        # semantic are all per-user (see multiuser.UserContextCache). This
+        # Context exists only to hold the (stateless, tier-filtered) tool
+        # registry that every per-user Context then reuses.
+        ctx = Context(
+            settings=settings, gateway=None, manager=None,
+            aliaser=NullAliaser(), audit=_NullAudit(),
+        )
+        build_registry(ctx)
+        return ctx
     gateway = EWSGateway(settings)
     # Aliaser/audit are quality-of-life layers — their storage failing
     # (bad volume, permissions) degrades them to pass-through, never
@@ -78,6 +91,11 @@ def build_context(settings: Settings) -> Context:
 
 
 async def start_connection_manager(ctx: Context) -> None:
+    if ctx.gateway is None:
+        # Multi-user mode: no shared mailbox to warm up — each per-user
+        # gateway (built lazily in multiuser.UserContextCache) connects on
+        # that user's first real tool call instead.
+        return
     manager = ConnectionManager(
         ctx.gateway,
         max_backoff=float(ctx.settings.ews_warmup_max_backoff_seconds),
@@ -103,7 +121,7 @@ async def start_connection_manager(ctx: Context) -> None:
     logger.info("Exchange warmup running in background (see /readyz)")
 
 
-def build_mcp_server(ctx: Context) -> Server:
+def build_mcp_server(ctx: Context, user_cache: Optional[UserContextCache] = None) -> Server:
     server = Server("ews-mcp-v5")
 
     @server.list_tools()
@@ -128,7 +146,18 @@ def build_mcp_server(ctx: Context) -> Server:
                 "message": f"Unknown tool: {name}",
                 "hint": f"Available: {', '.join(sorted(ctx.registry))}",
             }}
-        return await dispatch(ctx, spec, dict(arguments or {}), transport="mcp")
+        active_ctx = ctx
+        if user_cache is not None:
+            try:
+                request = server.request_context.request
+            except LookupError:
+                request = None
+            try:
+                email, password = extract_credentials_from_request(request)
+            except ToolError as err:
+                return err.to_dict()
+            active_ctx = user_cache.get(email, password)
+        return await dispatch(active_ctx, spec, dict(arguments or {}), transport="mcp")
 
     return server
 
@@ -136,6 +165,12 @@ def build_mcp_server(ctx: Context) -> Server:
 async def run_stdio(settings: Settings) -> None:
     from mcp.server.stdio import stdio_server
 
+    if settings.ews_multi_user:
+        raise RuntimeError(
+            "EWS_MULTI_USER=true requires MCP_TRANSPORT=http — stdio is a "
+            "single, already-authenticated local process with no per-request "
+            "identity to attach credentials to."
+        )
     ctx = build_context(settings)
     server = build_mcp_server(ctx)
     await start_connection_manager(ctx)

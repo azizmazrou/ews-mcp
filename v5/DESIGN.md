@@ -131,6 +131,18 @@ Exchange contact; a background warmup loop owns connection recovery
 (exponential backoff + jitter, protocol-cache eviction every 3 failures,
 heartbeat re-probe with a REAL network round trip).
 
+## §Multi-user
+
+`EWS_MULTI_USER=true` (HTTP transport only) drops the single shared
+mailbox: every call instead carries its own `X-EWS-Email` /
+`X-EWS-Password` headers, resolved to a per-user `Context` with its own
+`EWSGateway` (`multiuser.UserContextCache`, bounded + idle-evicting).
+Alias DB, audit log, cache mirror, semantic index and the connection
+manager are all per-user state that would otherwise leak between
+identities, so they stay out entirely in this mode — reads go straight
+to EWS. The one thing shared is the tool `registry` itself (stateless,
+built once from the tier-filtered config).
+
 ## §Audit
 
 Hash-chained JSONL per tool call (no bodies; recipients/subject only for

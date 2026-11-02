@@ -115,6 +115,57 @@ docker build -t ews-mcp:dev .
 docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 ```
 
+### Multi-user mode (one server, per-person Exchange identity)
+
+For a shared deployment (e.g. an MCP gateway behind a chat platform like
+LibreChat) where each person should act as *themselves* against
+Exchange, not a shared service mailbox, set `EWS_MULTI_USER=true`.
+`EWS_EMAIL`/`EWS_USERNAME`/`EWS_PASSWORD` are then ignored (and
+`EWS_EMAIL` is no longer required at boot) — instead, **every** MCP and
+REST call must carry:
+
+```
+X-EWS-Email: person@corp.example
+X-EWS-Password: their-own-exchange-password
+```
+
+A request without both headers gets a clean `auth_failed` (401), not a
+tool error. Credentials are never persisted: each (email, password) pair
+resolves to a short-lived per-user Exchange session (`EWSGateway`),
+cached in memory only for reuse across that user's own calls (bounded to
+64 users, idle-evicted after 15 minutes; a changed password rebuilds
+rather than reusing the old session) and torn down on eviction. Because
+identity is now per-request, this mode also turns off everything that
+would otherwise mix data between users: no cache mirror, no audit log,
+no alias DB, no semantic index — every read is a live EWS call. Short
+ids come from an in-memory alias map inside that user's cached context,
+never written to disk and gone with the context. HTTP
+transport only (stdio is one already-authenticated local process, with
+no per-request header to attach credentials to).
+
+For LibreChat specifically, wire this up with
+[`customUserVars`](https://www.librechat.ai/docs/configuration/librechat_yaml/object_structure/mcp_servers)
+in `librechat.yaml` so each signed-in user enters their own Exchange
+email + password once (via LibreChat's own settings UI), which
+LibreChat then substitutes into the headers on every call:
+
+```yaml
+mcpServers:
+  exchange:
+    type: streamable-http
+    url: http://ews-mcp:8000/mcp
+    headers:
+      X-EWS-Email: "{{EWS_EMAIL}}"
+      X-EWS-Password: "{{EWS_PASSWORD}}"
+    customUserVars:
+      EWS_EMAIL:
+        title: "Exchange email"
+        description: "Your Exchange mailbox address"
+      EWS_PASSWORD:
+        title: "Exchange password"
+        description: "Your Exchange password (stored by LibreChat, sent only to this server)"
+```
+
 ## Why it looks like this
 
 - **Token economy.** One legacy detail call shipped 115 kB of duplicated
@@ -150,6 +201,7 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 | `SEND_CONFIRM_SECRET` | per-process | HMAC secret for confirm tokens (set it to survive restarts) |
 | `CONFIRM_TTL_SECONDS` | `600` | Confirm token lifetime |
 | `MCP_TRANSPORT` / `MCP_HOST` / `MCP_PORT` / `MCP_API_KEY` | stdio | HTTP serving + bearer auth (all unused in stdio mode) |
+| `EWS_MULTI_USER` | `false` | Per-request `X-EWS-Email`/`X-EWS-Password` credentials instead of a shared mailbox (HTTP transport only) — see "Multi-user mode" above |
 | `DATA_DIR` | `~/.ewsmcp` | Aliases, audit chain, cache mirror. Absolute; cloud-synced paths are refused (`DATA_DIR_ALLOW_SYNCED=true` to override) |
 | `EWS_CACHE_ENABLED` | `true` | The mirror; `false` = pure live EWS reads |
 | `EWS_CACHE_FOLDERS` | `inbox,sent` | Delta-synced folders |

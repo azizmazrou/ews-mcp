@@ -9,7 +9,8 @@ import jsonschema
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from . import __version__
-from .errors import HTTP_BY_CODE
+from .errors import HTTP_BY_CODE, ToolError
+from .multiuser import UserContextCache, extract_credentials_from_asgi_headers
 from .server import build_context, build_mcp_server, start_connection_manager
 from .tools.base import dispatch
 
@@ -144,7 +145,8 @@ async def _read_json_body(receive, send) -> Optional[Any]:
         return None
 
 
-def build_app(ctx, settings, streamable: Optional[Any] = None):
+def build_app(ctx, settings, streamable: Optional[Any] = None,
+              user_cache: Optional[UserContextCache] = None):
     """ASGI app closure — separated from serve_http so tests can drive it."""
     api_key = settings.mcp_api_key or ""
 
@@ -207,6 +209,13 @@ def build_app(ctx, settings, streamable: Optional[Any] = None):
             if spec is None:
                 return await _send_json(send, 404, {"ok": False, "error": {
                     "code": "validation", "message": f"Unknown tool: {name}"}})
+            active_ctx = ctx
+            if user_cache is not None:
+                try:
+                    email, password = extract_credentials_from_asgi_headers(scope.get("headers"))
+                except ToolError as err:
+                    return await _send_json(send, err.http_status, err.to_dict())
+                active_ctx = user_cache.get(email, password)
             arguments = await _read_json_body(receive, send)
             if arguments is None:
                 return
@@ -220,7 +229,7 @@ def build_app(ctx, settings, streamable: Optional[Any] = None):
                 return await _send_json(send, 400, {"ok": False, "error": {
                     "code": "validation", "message": error.message,
                     "hint": f"See the {name} schema in /openapi.json."}})
-            result = await dispatch(ctx, spec, arguments, transport="rest")
+            result = await dispatch(active_ctx, spec, arguments, transport="rest")
             status = 200
             if isinstance(result, dict) and result.get("ok") is False:
                 status = HTTP_BY_CODE.get(result.get("error", {}).get("code", ""), 500)
@@ -236,10 +245,11 @@ async def serve_http(settings) -> None:
     import uvicorn
 
     ctx = build_context(settings)
-    mcp_server = build_mcp_server(ctx)
+    user_cache = UserContextCache(ctx) if settings.ews_multi_user else None
+    mcp_server = build_mcp_server(ctx, user_cache=user_cache)
     streamable = StreamableHTTPSessionManager(app=mcp_server, json_response=False,
                                               stateless=True)
-    app = build_app(ctx, settings, streamable)
+    app = build_app(ctx, settings, streamable, user_cache=user_cache)
     config = uvicorn.Config(app, host=settings.mcp_host, port=settings.mcp_port,
                             log_level=settings.log_level.lower(), http="h11")
     async with streamable.run():

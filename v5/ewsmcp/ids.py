@@ -37,9 +37,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
@@ -403,6 +405,99 @@ class IdAliaser:
             _LOG.warning("id_alias: stats failed (%s)", exc)
             return {}
         return {row["kind"]: row["c"] for row in rows}
+
+
+class MemoryAliaser:
+    """Per-user aliaser that lives only in memory, for multi-user mode.
+
+    Multi-user mode keeps no mail-at-rest, so the SQLite aliaser is off.
+    Without aliases the model copies ~150-character ids and garbles them
+    (ErrorInvalidIdMalformed, ErrorCorruptData). This map lives in the
+    user's cached Context only: never shared between users, never written
+    to disk, gone on idle eviction or restart.
+
+    Counters start at a random block per instance, so an alias left in an
+    old chat from a previous instance resolves to nothing (KeyError, the
+    model re-fetches) instead of to another item. Bounded: the least
+    recently seen entries drop first.
+    """
+
+    def __init__(self, max_entries: int = 20000) -> None:
+        self._max = max_entries
+        self._base = (1 + secrets.randbelow(9000)) * 1000
+        self._lock = threading.RLock()
+        self._by_alias: "OrderedDict[str, list]" = OrderedDict()  # alias -> [ews_id, changekey, imid]
+        self._by_id: "dict[str, str]" = {}
+        self._counters: "dict[str, int]" = {}
+
+    def alias_for(self, ews_id: str, kind: str = "m", changekey: Optional[str] = None,
+                  internet_message_id: Optional[str] = None) -> str:
+        if not ews_id:
+            return ews_id
+        if not _KIND_RE.match(kind):
+            kind = "x"
+        with self._lock:
+            alias = self._by_id.get(ews_id)
+            if alias is None:
+                n = self._counters.get(kind, self._base) + 1
+                self._counters[kind] = n
+                alias = f"{kind}{n}"
+                self._by_id[ews_id] = alias
+                self._by_alias[alias] = [ews_id, None, None]
+                while len(self._by_alias) > self._max:
+                    _, (old_id, _, _) = self._by_alias.popitem(last=False)
+                    self._by_id.pop(old_id, None)
+            entry = self._by_alias[alias]
+            if changekey:
+                entry[1] = changekey
+            if internet_message_id:
+                entry[2] = internet_message_id
+            self._by_alias.move_to_end(alias)
+            return alias
+
+    def alias_many(self, entries) -> dict:
+        return {e[0]: self.alias_for(e[0], e[1], e[2], e[3]) for e in entries if e and e[0]}
+
+    def resolve(self, value: str) -> str:
+        if not isinstance(value, str) or not _ALIAS_RE.match(value):
+            return value
+        with self._lock:
+            entry = self._by_alias.get(value)
+        if entry is None:
+            raise KeyError(
+                f"Unknown alias {value!r}: it is stale or from a previous "
+                "session. Re-run the search/list tool to get fresh ids, then retry."
+            )
+        return entry[0]
+
+    def rebind(self, old_ews_id: str, new_ews_id: str, changekey=None) -> Optional[str]:
+        with self._lock:
+            alias = self._by_id.pop(old_ews_id, None)
+            if alias is None:
+                return None
+            duplicate = self._by_id.pop(new_ews_id, None)
+            if duplicate is not None and duplicate != alias:
+                self._by_alias.pop(duplicate, None)
+            self._by_id[new_ews_id] = alias
+            entry = self._by_alias[alias]
+            entry[0] = new_ews_id
+            if changekey:
+                entry[1] = changekey
+            return alias
+
+    def imid_for(self, alias_or_id: str) -> Optional[str]:
+        with self._lock:
+            alias = alias_or_id if alias_or_id in self._by_alias else self._by_id.get(alias_or_id)
+            entry = self._by_alias.get(alias) if alias else None
+        return entry[2] if entry else None
+
+    def stats(self) -> dict:
+        with self._lock:
+            counts: "dict[str, int]" = {}
+            for alias in self._by_alias:
+                kind = alias.rstrip("0123456789")
+                counts[kind] = counts.get(kind, 0) + 1
+            return counts
 
 
 class NullAliaser:
