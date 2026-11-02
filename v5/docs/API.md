@@ -105,7 +105,7 @@ Rebuild the conversation containing the given message id: Inbox and Sent are mer
 
 #### `get_attachment` — read (min tier: read)
 
-Read one attachment of a message. mode='info' → metadata only; 'text' → decoded UTF-8 text (capped at 20000 chars, `truncated` flagged) for text-like attachments (text/* content type or .txt/.csv/.md/.log/.json name); 'save' → write the bytes under the server data dir and return saved_path; 'auto' (default) → text when text-like, otherwise info plus a hint. When the message has several attachments you MUST pick one via `attachment` (a name, or a zero-based index as a string).
+Read one attachment of a message. mode='info' → metadata only; 'text' → decoded UTF-8 text (capped at 20000 chars, `truncated` flagged) for text-like attachments (text/* content type or .txt/.csv/.md/.log/.json name); 'save' → write the bytes under the server data dir and return saved_path; 'auto' (default) → text when text-like, otherwise info plus a hint. An smime.p7m attachment (application/pkcs7-mime) is sniffed and reported as `smime_type: signed|enveloped` — signed is NOT encrypted (auto decodes as text, cert/signature bytes show as replacement chars); enveloped IS encrypted (auto stays info; content is unrecoverable without the recipient's private key). When the message has several attachments you MUST pick one via `attachment` (a name, or a zero-based index as a string).
 
 | parameter | type | required | description |
 |---|---|---|---|

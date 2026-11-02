@@ -57,6 +57,37 @@ def _emails(recipients: Any) -> List[str]:
     ]
 
 
+# ContentInfo.contentType OIDs (RFC 5652), DER-encoded incl. tag+length —
+# unique enough as a byte substring that a prefix scan is reliable without
+# a full ASN.1 parser.
+_PKCS7_OID_SIGNED = bytes.fromhex("06092a864886f70d010702")
+_PKCS7_OID_ENVELOPED = bytes.fromhex("06092a864886f70d010703")
+
+
+def sniff_smime_type(name: Optional[str], content_type: Optional[str],
+                      content: Any) -> Optional[str]:
+    """Best-effort PKCS#7 content-type sniff for smime.p7m attachments.
+
+    application/pkcs7-mime names BOTH signed (opaque-signing) and encrypted
+    S/MIME messages identically, with no way to tell them apart from the
+    filename or content-type alone — the actual answer is the DER
+    ContentInfo.contentType OID at the start of the structure. Returns
+    "signed" / "enveloped" / None (not a p7m, or bytes unavailable).
+    """
+    ct = (content_type or "").lower()
+    nm = (name or "").lower()
+    if "pkcs7-mime" not in ct and not nm.endswith(".p7m"):
+        return None
+    if not isinstance(content, (bytes, bytearray)):
+        return None
+    head = bytes(content[:64])
+    if _PKCS7_OID_SIGNED in head:
+        return "signed"
+    if _PKCS7_OID_ENVELOPED in head:
+        return "enveloped"
+    return None
+
+
 def msg_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
     """MsgCard: the ≤~60-token search/list unit."""
     text = getattr(item, "text_body", None) or ""
@@ -117,12 +148,18 @@ def msg_full(item: Any, aliaser: IdAliaser, tz: str, body_max_chars: int,
         full["body_html"] = raw_html
     attachments = []
     for i, att in enumerate(getattr(item, "attachments", None) or []):
-        attachments.append({
+        name = getattr(att, "name", f"attachment-{i}")
+        content_type = getattr(att, "content_type", None)
+        entry = {
             "idx": i,
-            "name": getattr(att, "name", f"attachment-{i}"),
+            "name": name,
             "size_bytes": getattr(att, "size", None),
-            "content_type": getattr(att, "content_type", None),
-        })
+            "content_type": content_type,
+        }
+        smime_type = sniff_smime_type(name, content_type, getattr(att, "content", None))
+        if smime_type:
+            entry["smime_type"] = smime_type
+        attachments.append(entry)
     if attachments:
         full["attachments"] = attachments
     imid = getattr(item, "message_id", None)
