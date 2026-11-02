@@ -1,4 +1,4 @@
-"""mail_read pack tests — all six read tools driven through dispatch().
+"""mail_read pack tests — all seven read tools driven through dispatch().
 
 No network, no exchangelib objects: a MagicMock account behind a fake
 gateway, list-subclass query doubles, and SimpleNamespace messages with
@@ -120,10 +120,10 @@ def _run(ctx, name, **kwargs):
 # --- pack shape ---------------------------------------------------------------
 
 
-def test_pack_exports_six_read_specs():
-    assert len(mail_read.TOOLS) == 6
+def test_pack_exports_seven_read_specs():
+    assert len(mail_read.TOOLS) == 7
     assert set(SPECS) == {
-        "list_folders", "search_messages", "get_message",
+        "list_folders", "search_messages", "check_messages", "get_message",
         "get_thread", "get_attachment", "get_mailbox_overview",
     }
     for spec in mail_read.TOOLS:
@@ -508,3 +508,20 @@ def test_list_folders_depth_and_include_empty(tmp_path):
     ctx = _ctx(tmp_path, account)
     res = _run(ctx, "list_folders", depth=1, include_empty=False)
     assert [row["name"] for row in res["items"]] == ["Inbox"]
+
+
+def test_check_messages_whole_word_and_missing(monkeypatch):
+    subjects = ["Review RFP-123 draft", "RFP-12 signed", "Lunch"]
+
+    async def fake_search(ctx, subject=None, **kwargs):
+        cards = [{"id": f"m{i}", "subject": s, "from": "a@b", "date": "2026-01-01"}
+                 for i, s in enumerate(subjects) if subject.lower() in s.lower()]
+        return {"ok": True, "items": cards, "count": len(cards)}
+
+    monkeypatch.setattr(mail_read, "_search_messages", fake_search)
+    out = asyncio.run(mail_read._check_messages(None, "RFP-12\nrfp-12, Budget"))
+    assert out["values_checked"] == 2
+    assert out["missing"] == ["Budget"]
+    assert [c["id"] for c in out["found"]["RFP-12"]] == ["m1"]
+    only = asyncio.run(mail_read._check_messages(None, '["Budget", "Lunch"]', only_missing=True))
+    assert only["missing"] == ["Budget"] and "found" not in only

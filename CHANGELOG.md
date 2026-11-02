@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- `v5`: `check_messages` — checks a whole list of subjects or senders
+  (comma or new line separated, or a JSON array) against a folder in one
+  call and returns which values have matching messages and which are
+  missing, instead of one `search_messages` call per value. 29 tools
+  total (was 28).
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all
