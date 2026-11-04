@@ -183,6 +183,7 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             sorted(content.get("cc") or []),
             sorted(content.get("bcc") or []),
             body_text if isinstance(body_text, str) else "",
+            content.get("attachments") or [],
         )
         target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
                         or kwargs.get("id") or "-")
@@ -248,6 +249,7 @@ async def mint_token(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any]) -> st
             sorted(content.get("cc") or []),
             sorted(content.get("bcc") or []),
             body_text if isinstance(body_text, str) else "",
+            content.get("attachments") or [],
         )
         target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
                         or kwargs.get("id") or "-")

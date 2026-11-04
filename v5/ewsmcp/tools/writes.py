@@ -1,4 +1,4 @@
-"""Tool pack: writes — the 12 mutating tools (DESIGN.md §Tools, §Safety).
+"""Tool pack: writes — the 13 mutating tools (DESIGN.md §Tools, §Safety).
 
 Safety lives in the dispatcher (tools/base.py): kill-switch, tier gate,
 recipient guard, two-phase confirm, send rate cap and alias resolution all
@@ -30,13 +30,16 @@ exchangelib 5.0.3 pins honoured here (verified against the installed lib):
   flag field; pretending would be mock-drift bait (categories instead).
 """
 
+import base64
+import binascii
 import html as _html
 import logging
+import mimetypes
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from exchangelib import CalendarItem, HTMLBody, Message, OofSettings
+from exchangelib import CalendarItem, FileAttachment, HTMLBody, Message, OofSettings
 from exchangelib.items import (
     SEND_TO_ALL_AND_SAVE_COPY,
     SEND_TO_CHANGED_AND_SAVE_COPY,
@@ -44,12 +47,14 @@ from exchangelib.items import (
 )
 
 from ..dates import parse_when
-from ..errors import ToolError
+from ..errors import ToolError, map_exception
 from .base import Context, ToolSpec
 
 logger = logging.getLogger(__name__)
 
 MAX_BULK_IDS = 50
+MAX_ATTACHMENTS = 20
+MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024  # per call; http.py sizes its body limit from this
 
 
 def _write_through(ctx: Context, method: str, *args: Any) -> None:
@@ -191,6 +196,61 @@ def _draft_preview(to: List[str], cc: List[str], subject: str,
             "body_snippet": (body or "")[:200]}
 
 
+def _decode_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Validate attachments before anything is written, so a bad one cannot
+    leave a half-finished draft behind."""
+    if len(attachments) > MAX_ATTACHMENTS:
+        raise ToolError("validation",
+                        f"at most {MAX_ATTACHMENTS} attachments per call (got {len(attachments)})")
+    decoded = []
+    total = 0
+    for attachment in attachments:
+        name = str(attachment.get("filename") or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+        if not name:
+            raise ToolError("validation", "an attachment needs a filename")
+        try:
+            content = base64.b64decode("".join(str(attachment.get("content_base64") or "").split()),
+                                       validate=True)
+        except (binascii.Error, ValueError):
+            raise ToolError("validation", f"attachment {name!r}: content_base64 is not valid base64")
+        if not content:
+            raise ToolError("validation", f"attachment {name!r} is empty")
+        total += len(content)
+        if total > MAX_ATTACHMENT_BYTES:
+            raise ToolError("validation",
+                            f"attachments exceed {MAX_ATTACHMENT_BYTES} bytes per call")
+        decoded.append({
+            "name": name, "content": content,
+            "content_type": (attachment.get("content_type")
+                             or mimetypes.guess_type(name)[0] or "application/octet-stream"),
+        })
+    return decoded
+
+
+def _attach_one(msg: Any, attachment: Dict[str, Any]) -> Dict[str, Any]:
+    """Create the attachment server-side; this also moves msg.changekey on."""
+    msg.attach(FileAttachment(name=attachment["name"], content=attachment["content"],
+                              content_type=attachment["content_type"]))
+    return {"name": attachment["name"], "size": len(attachment["content"])}
+
+
+def _attach_all(msg: Any, attachments: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Attach to a draft that already exists: a failure must not hide its id."""
+    added: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for attachment in attachments:
+        try:
+            added.append(_attach_one(msg, attachment))
+        except Exception as exc:
+            failed.append({"name": attachment["name"], "error": map_exception(exc).message})
+    result: Dict[str, Any] = {}
+    if added:
+        result["attachments"] = added
+    if failed:
+        result["attachments_failed"] = failed
+    return result
+
+
 # --- WRITE class (reversible; tier ≥ draft) ----------------------------------
 
 
@@ -200,7 +260,8 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
                         cc: Optional[List[str]] = None,
                         bcc: Optional[List[str]] = None,
                         subject: Optional[str] = None,
-                        importance: Optional[str] = None) -> Dict[str, Any]:
+                        importance: Optional[str] = None,
+                        attachments: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     if mode not in _DRAFT_MODES:
         raise ToolError("validation", f"mode must be one of {_DRAFT_MODES}, got {mode!r}")
     if mode != "new" and not reply_to:
@@ -210,6 +271,7 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
     if importance not in (None, "normal", "high"):
         raise ToolError("validation", "importance must be 'normal' or 'high'")
     html_body = _wrap_html(body)
+    decoded = _decode_attachments(attachments or [])
 
     def work(account: Any) -> Any:
         if mode == "new":
@@ -223,7 +285,9 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
             if importance == "high":
                 msg.importance = "High"
             msg.save()  # SAVE_ONLY into Drafts — nothing leaves the mailbox
-            return msg.id, getattr(msg, "changekey", None), list(to), list(cc or []), subject or ""
+            attached = _attach_all(msg, decoded)
+            return (msg.id, getattr(msg, "changekey", None), list(to), list(cc or []),
+                    subject or "", attached)
         original = _fetch_one(account, reply_to)
         extra: Dict[str, Any] = {}
         if mode == "reply":
@@ -249,15 +313,23 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
         saved = reply.save(account.drafts)
         prev_to = _email_list(getattr(reply, "to_recipients", None)) or list(to or [])
         prev_cc = _email_list(getattr(reply, "cc_recipients", None)) or list(cc or [])
-        return saved.id, getattr(saved, "changekey", None), prev_to, prev_cc, final_subject
+        changekey = getattr(saved, "changekey", None)
+        attached: Dict[str, Any] = {}
+        if decoded:
+            # reply.save() returns a bare id holder that cannot attach.
+            draft = _fetch_one(account, saved.id)
+            attached = _attach_all(draft, decoded)
+            changekey = getattr(draft, "changekey", None)
+        return saved.id, changekey, prev_to, prev_cc, final_subject, attached
 
-    raw_id, changekey, prev_to, prev_cc, prev_subject = await ctx.gateway.call(work)
+    raw_id, changekey, prev_to, prev_cc, prev_subject, attached = await ctx.gateway.call(work)
     alias = ctx.aliaser.alias_for(str(raw_id), "d", changekey=changekey)
     return {
         "ok": True,
         "draft_id": alias,
         "folder": "f:drafts",
         "preview": _draft_preview(prev_to, prev_cc, prev_subject, body),
+        **attached,
         "note": "saved as draft — NOT sent",
     }
 
@@ -297,6 +369,23 @@ async def _update_draft(ctx: Context, *, draft_id: str,
     preview = await ctx.gateway.call(work)
     return {"ok": True, "draft_id": ctx.aliaser.alias_for(draft_id, "d"),
             "preview": preview}
+
+
+async def _add_draft_attachment(ctx: Context, *, draft_id: str, filename: str,
+                                content_base64: str,
+                                content_type: Optional[str] = None) -> Dict[str, Any]:
+    attachment = _decode_attachments([{"filename": filename, "content_base64": content_base64,
+                                       "content_type": content_type}])[0]
+
+    def work(account: Any) -> Any:
+        msg = _fetch_one(account, draft_id)
+        _require_in_drafts(msg, account, "add_draft_attachment")
+        added = _attach_one(msg, attachment)
+        return added, _attachment_list(msg), getattr(msg, "changekey", None)
+
+    added, on_draft, changekey = await ctx.gateway.call(work)
+    return {"ok": True, "draft_id": ctx.aliaser.alias_for(draft_id, "d", changekey=changekey),
+            "added": added, "attachments": on_draft, "note": "saved as draft — NOT sent"}
 
 
 async def _delete_draft(ctx: Context, *, draft_id: str) -> Dict[str, Any]:
@@ -488,6 +577,12 @@ async def _update_event(ctx: Context, *, event_id: str,
 # --- SEND class (leaves the mailbox; tier full, two-phase, kill-switch) ------
 
 
+def _attachment_list(msg: Any) -> List[Dict[str, Any]]:
+    listed = [{"name": getattr(a, "name", None), "size": getattr(a, "size", None)}
+              for a in (getattr(msg, "attachments", None) or [])]
+    return sorted(listed, key=lambda a: str(a["name"]))
+
+
 def _draft_content(msg: Any) -> Dict[str, Any]:
     """The draft fields the confirm token binds and the preview shows.
 
@@ -506,6 +601,7 @@ def _draft_content(msg: Any) -> Dict[str, Any]:
         "bcc": sorted(_email_list(getattr(msg, "bcc_recipients", None))),
         "body_text": body_text,
         "attachment_count": len(getattr(msg, "attachments", None) or []),
+        "attachments": _attachment_list(msg),
     }
 
 
@@ -695,6 +791,14 @@ _BOOL = {"type": "boolean"}
 _EMAILS = {"type": "array", "items": {"type": "string"}}
 _IDS = {"type": "array", "items": {"type": "string"},
         "minItems": 1, "maxItems": MAX_BULK_IDS}
+_ATTACHMENT_FIELDS = {
+    "filename": _STR,
+    "content_base64": {"type": "string", "description": "The file content, base64-encoded."},
+    "content_type": {"type": "string",
+                     "description": "MIME type; derived from the file name if omitted."},
+}
+_ATTACHMENTS = {"type": "array", "maxItems": MAX_ATTACHMENTS,
+                "items": _obj(_ATTACHMENT_FIELDS, required=["filename", "content_base64"])}
 
 
 # --- the pack -----------------------------------------------------------------
@@ -707,7 +811,9 @@ TOOLS: List[ToolSpec] = [
             "reply/reply_all/forward need reply_to (the original message id) "
             "and quote the original server-side; forward also needs to. "
             "body is plain text (the server wraps it in minimal HTML). "
-            "importance applies to mode=new only. Use send_draft to send."
+            "importance applies to mode=new only. attachments adds files; if one "
+            "fails the draft still exists and attachments_failed names it. "
+            "Use send_draft to send."
         ),
         side_effect_class="write",
         input_schema=_obj({
@@ -715,6 +821,7 @@ TOOLS: List[ToolSpec] = [
             "reply_to": _STR, "to": _EMAILS, "cc": _EMAILS, "bcc": _EMAILS,
             "subject": _STR, "body": _STR,
             "importance": {"type": "string", "enum": ["normal", "high"]},
+            "attachments": _ATTACHMENTS,
         }, required=["body"]),
         handler=_create_draft,
         confirm=False,
@@ -729,6 +836,16 @@ TOOLS: List[ToolSpec] = [
             "subject": _STR, "body": _STR,
         }, required=["draft_id"]),
         handler=_update_draft,
+        confirm=False,
+    ),
+    ToolSpec(
+        name="add_draft_attachment",
+        description=("Add one file to an existing draft. Refuses items that are "
+                     "not in f:drafts. Returns all attachments of the draft."),
+        side_effect_class="write",
+        input_schema=_obj({"draft_id": _STR, **_ATTACHMENT_FIELDS},
+                          required=["draft_id", "filename", "content_base64"]),
+        handler=_add_draft_attachment,
         confirm=False,
     ),
     ToolSpec(
@@ -805,7 +922,7 @@ TOOLS: List[ToolSpec] = [
         description=(
             "Send an existing draft (the ONLY way mail leaves this mailbox). "
             "Two-phase: the first call fetches the draft and returns its REAL "
-            "recipients/subject/body as a preview + confirm_token bound to "
+            "recipients/subject/body/attachments as a preview + confirm_token bound to "
             "that content; the second call with the token re-verifies the "
             "content and sends (editing the draft in between invalidates the "
             "token). Optional idempotency_key dedupes retries (replays return "
