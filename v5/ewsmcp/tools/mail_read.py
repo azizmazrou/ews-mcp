@@ -345,6 +345,56 @@ async def _search_semantic(ctx: Context, query: str, folder_key: str,
     return _stamp(out, "cache", _cache_watermark(ctx, folder_key))
 
 
+ALL_FOLDERS = "f:all"
+
+
+async def _search_all_folders(ctx: Context, query: Optional[str],
+                              filters: Dict[str, Any], offset: int,
+                              limit: int) -> Dict[str, Any]:
+    """One search per mail folder, merged newest first.
+
+    A single FindItem over several folders is no substitute: exchangelib returns
+    its hits folder by folder, unsorted across them, and applies the offset to
+    each folder. Each folder therefore delivers its newest offset+limit hits.
+    """
+    folders = await ctx.gateway.call(ctx.gateway.mail_folders)
+    if not folders:
+        raise ToolError("upstream_unavailable", "the folder list is not available.")
+    wanted = offset + limit
+
+    async def one(target: Any) -> Tuple[List[Any], Optional[int]]:
+        def work(_account: Any) -> Tuple[List[Any], Optional[int]]:
+            qs = target.filter(query) if query else target.filter(**filters)
+            return paginate(_project(qs), offset=0, limit=wanted)
+        return await ctx.gateway.call(work)
+
+    results = await asyncio.gather(*(one(f) for _, f in folders),
+                                   return_exceptions=True)
+    errors = [r for r in results if isinstance(r, BaseException)]
+    if len(errors) == len(folders):
+        raise errors[0]
+    hits: List[Tuple[str, Any]] = []
+    failed: List[str] = []
+    truncated = False
+    for (path, _), result in zip(folders, results):
+        if isinstance(result, BaseException):
+            logger.warning("search failed in a folder: %s", type(result).__name__)
+            failed.append(path)
+            continue
+        page, more = result
+        truncated = truncated or more is not None
+        hits.extend((path, item) for item in page)
+    hits.sort(key=lambda hit: getattr(hit[1], "datetime_received", None)
+              or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return {
+        "hits": hits[offset:wanted],
+        "total": None if truncated or failed else len(hits),
+        "next_offset": wanted if truncated or len(hits) > wanted else None,
+        "searched": len(folders) - len(failed),
+        "failed": failed,
+    }
+
+
 async def _search_messages(ctx: Context, query: Optional[str] = None,
                            folder: str = "f:inbox", sender: Optional[str] = None,
                            from_: Optional[str] = None,
@@ -433,6 +483,10 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
 
     unfiltered = not query and not filters and not sender
 
+    whole_mailbox = (folder or "").strip().lower() == ALL_FOLDERS
+    found: Dict[str, Any] = {}
+    item_paths: Dict[int, str] = {}
+
     def work(account: Any) -> Tuple[List[Any], Optional[int], Optional[int]]:
         target = ctx.gateway.resolve_folder(account, folder, ctx.aliaser)
         total: Optional[int] = None
@@ -448,7 +502,13 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
         page, next_off = paginate(_project(qs), offset=offset, limit=limit)
         return page, next_off, total
 
-    items, next_offset, total = await ctx.gateway.call(work)
+    if whole_mailbox:
+        found = await _search_all_folders(ctx, query, filters, offset, limit)
+        items = [item for _, item in found["hits"]]
+        item_paths = {id(item): path for path, item in found["hits"]}
+        next_offset, total = found["next_offset"], found["total"]
+    else:
+        items, next_offset, total = await ctx.gateway.call(work)
     if sender:
         needle = sender.strip().lower()
 
@@ -461,8 +521,16 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
         items = [it for it in items if hit(it)]
         total = None  # client-side post-filter: the upstream total no longer applies
     cards = await _cards_off_loop(ctx, items, tz)
-    return _stamp(envelope(cards, total_available=total, offset=offset,
-                           next_offset=next_offset), "live")
+    if whole_mailbox:
+        for item, card in zip(items, cards):
+            card["folder"] = item_paths[id(item)]
+    out = envelope(cards, total_available=total, offset=offset,
+                   next_offset=next_offset)
+    if whole_mailbox:
+        out["folders_searched"] = found["searched"]
+        if found["failed"]:
+            out["folders_failed"] = found["failed"]
+    return _stamp(out, "live")
 
 
 # --------------------------------------------------------------------------
@@ -889,7 +957,10 @@ TOOLS: List[ToolSpec] = [
             },
             "folder": {
                 "type": "string", "default": "f:inbox",
-                "description": "Folder alias (f:inbox, f:sent, f7), path, or raw id.",
+                "description": "Folder alias (f:inbox, f:sent, f7), path, raw id, or "
+                               "f:all for the whole mailbox: all mail folders with "
+                               "their subfolders, without deleted items, junk, drafts "
+                               "and outbox; each hit then names its folder.",
             },
             "sender": {
                 "type": "string",

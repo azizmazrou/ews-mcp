@@ -68,7 +68,7 @@ Search mail. TWO ENGINES, mutually exclusive: pass `query` (an Exchange AQS stri
 | parameter | type | required | description |
 |---|---|---|---|
 | `query` | string | no | AQS query string — cannot be combined with the structured filters below. |
-| `folder` | string | no | Folder alias (f:inbox, f:sent, f7), path, or raw id. (default `f:inbox`) |
+| `folder` | string | no | Folder alias (f:inbox, f:sent, f7), path, raw id, or f:all for the whole mailbox: all mail folders with their subfolders, without deleted items, junk, drafts and outbox; each hit then names its folder. (default `f:inbox`) |
 | `sender` | string | no | Sender substring, matched client-side on the fetched page (email or display name). |
 | `from_` | string | no | DEPRECATED alias of `sender` — do not combine the two. |
 | `subject` | string | no | Subject substring. |

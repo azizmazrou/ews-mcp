@@ -153,6 +153,23 @@ class EWSGateway:
             self._folder_cache_ts = now
         return cache
 
+    def mail_folders(self, account: Account) -> List[Tuple[str, Any]]:
+        """(path, folder) of every mail folder, without deleted items, junk,
+        drafts, outbox and what lies below them (sync)."""
+        skip = {f.id for f in (account.trash, account.junk,
+                               account.drafts, account.outbox)}
+        out: List[Tuple[str, Any]] = []
+        for key, folder in self._folder_map(account).items():
+            if key != getattr(folder, "id", None):
+                continue  # the same folder under its path key
+            if not str(getattr(folder, "folder_class", "") or "").startswith("IPF.Note"):
+                continue
+            parts = list(folder.parts)
+            if any(getattr(p, "id", None) in skip for p in parts):
+                continue
+            out.append(("/".join(p.name for p in parts[2:]) or folder.name, folder))
+        return out
+
     def resolve_folder(self, account: Account, ref: Optional[str], aliaser) -> Any:
         """well-known alias | folder alias (f12) | path | raw id → Folder (sync)."""
         if not ref:

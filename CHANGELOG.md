@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `v5`: `search_messages` accepts `folder: f:all` for the whole mailbox: one
+  search per mail folder with subfolders, merged newest first, without deleted
+  items, junk, drafts and outbox. Each hit names its folder, and the result
+  reports `folders_searched` and any `folders_failed`.
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all

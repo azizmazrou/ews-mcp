@@ -21,6 +21,32 @@ def _gateway_with_mock_account():
     return gw, account
 
 
+def test_mail_folders_skips_other_classes_and_excluded_trees(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    gw, account = _gateway_with_mock_account()
+    root, top = NS(id="root", name="root"), NS(id="top", name="Top")
+
+    def folder(raw_id, name, parents=(), cls="IPF.Note"):
+        made = NS(id=raw_id, name=name, folder_class=cls)
+        made.parts = [root, top, *parents, made]
+        return made
+
+    inbox = folder("in", "Inbox")
+    child = folder("ch", "Projects", [inbox])
+    trash = folder("tr", "Deleted")
+    below_trash = folder("bt", "Old", [trash])
+    calendar = folder("ca", "Calendar", cls="IPF.Appointment")
+    account.trash, account.junk = trash, NS(id="ju")
+    account.drafts, account.outbox = NS(id="dr"), NS(id="ou")
+    monkeypatch.setattr(gw, "_folder_map", lambda _a: {
+        "in": inbox, "inbox": inbox, "ch": child, "tr": trash, "bt": below_trash, "ca": calendar,
+    })
+    assert [(p, f.id) for p, f in gw.mail_folders(account)] == [
+        ("Inbox", "in"), ("Inbox/Projects", "ch"),
+    ]
+
+
 def test_probe_round_trips_on_every_call():
     gw, account = _gateway_with_mock_account()
     assert gw.test_connection() is True
