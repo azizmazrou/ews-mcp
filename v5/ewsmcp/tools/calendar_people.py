@@ -172,6 +172,10 @@ async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
     my_response = getattr(item, "my_response_type", None)
     if my_response:
         event["my_response"] = str(my_response)
+    if getattr(item, "reminder_is_set", None) is True:
+        event["reminder_minutes"] = item.reminder_minutes_before_start
+    elif getattr(item, "reminder_is_set", None) is False:
+        event["reminder_minutes"] = None
     return {"ok": True, "event": event}
 
 
@@ -507,7 +511,8 @@ TOOLS: List[ToolSpec] = [
             "Fetch one calendar event in full by id (a short alias like 'e3' "
             "from list_events, or a raw EWS id). Returns organizer, every "
             "attendee with their response (Accept/Decline/Tentative/…), the "
-            "cleaned body text, a recurring flag, and your own response."
+            "cleaned body text, a recurring flag, the reminder (null if none) and "
+            "your own response."
         ),
         side_effect_class="read",
         input_schema={

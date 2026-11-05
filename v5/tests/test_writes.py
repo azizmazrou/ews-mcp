@@ -546,6 +546,49 @@ def test_update_event_silent_edit_uses_send_to_none(tmp_path):
                                     send_meeting_invitations=SEND_TO_NONE)
 
 
+def test_create_event_sets_a_reminder(tmp_path, monkeypatch):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
+    res = call(ctx, "create_event", {"subject": "Sync", "start": "2026-07-01", "end": "2026-07-01T01:00",
+                                     "reminder_minutes": 15})
+    ev = FakeCalendarItem.last
+    assert ev.reminder_is_set is True and ev.reminder_minutes_before_start == 15
+    assert res["reminder_minutes"] == 15
+
+    res = call(ctx, "create_event", {"subject": "Sync", "start": "2026-07-01", "end": "2026-07-01T01:00"})
+    assert not hasattr(FakeCalendarItem.last, "reminder_is_set")
+    assert "reminder_minutes" not in res
+
+
+@pytest.mark.parametrize("minutes", [-1, 1.5, "15", True])
+def test_create_event_rejects_a_bad_reminder(tmp_path, monkeypatch, minutes):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
+    FakeCalendarItem.last = None
+    res = call(ctx, "create_event", {"subject": "Sync", "start": "2026-07-01", "end": "2026-07-01T01:00",
+                                     "reminder_minutes": minutes})
+    assert res["ok"] is False and res["error"]["code"] == "validation"
+    assert FakeCalendarItem.last is None
+
+
+def test_update_event_sets_and_removes_a_reminder(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    ev = MagicMock()
+    account._by_id["RAW-E3"] = ev
+    res = call(ctx, "update_event", {"event_id": "RAW-E3", "reminder_minutes": 30})
+    assert res["updated_fields"] == ["reminder_is_set", "reminder_minutes_before_start"]
+    assert ev.reminder_is_set is True and ev.reminder_minutes_before_start == 30
+
+    ev = MagicMock()
+    account._by_id["RAW-E3"] = ev
+    res = call(ctx, "update_event", {"event_id": "RAW-E3", "reminder_minutes": -1})
+    assert res["updated_fields"] == ["reminder_is_set"]
+    assert ev.reminder_is_set is False
+
+
 def test_update_event_notify_blocked_by_kill_switch(tmp_path):
     account = make_account()
     ctx = make_ctx(tmp_path, account)  # send_enabled False

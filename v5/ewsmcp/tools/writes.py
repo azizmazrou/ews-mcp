@@ -402,10 +402,16 @@ async def _move_messages(ctx: Context, *, ids: List[str],
     return result
 
 
+def _check_reminder(minutes: Any, minimum: int) -> None:
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes < minimum:
+        raise ToolError("validation", f"reminder_minutes must be a whole number of at least {minimum}")
+
+
 async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
                         attendees: Optional[List[str]] = None,
                         location: Optional[str] = None,
                         body: Optional[str] = None,
+                        reminder_minutes: Optional[int] = None,
                         send_invitations: bool = False) -> Dict[str, Any]:
     # The ONE handler-side safety check in this pack, by design: this tool is
     # class "write" so a no-invite event stays available at draft tier, but
@@ -424,6 +430,8 @@ async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
     end_dt = parse_when(end, "end", ctx.settings.ews_tz)
     if end_dt <= start_dt:
         raise ToolError("validation", "end must be after start")
+    if reminder_minutes is not None:
+        _check_reminder(reminder_minutes, 0)
 
     def work(account: Any) -> str:
         item = CalendarItem(account=account, folder=account.calendar,
@@ -435,13 +443,19 @@ async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
             item.location = location
         if body is not None:
             item.body = _wrap_html(body)
+        if reminder_minutes is not None:
+            item.reminder_is_set = True
+            item.reminder_minutes_before_start = reminder_minutes
         item.save(send_meeting_invitations=SEND_TO_ALL_AND_SAVE_COPY
                   if send_invitations else SEND_TO_NONE)
         return str(item.id)
 
     raw_id = await ctx.gateway.call(work)
-    return {"ok": True, "event_id": ctx.aliaser.alias_for(raw_id, "e"),
-            "invitations_sent": bool(send_invitations)}
+    result: Dict[str, Any] = {"ok": True, "event_id": ctx.aliaser.alias_for(raw_id, "e"),
+                              "invitations_sent": bool(send_invitations)}
+    if reminder_minutes is not None:
+        result["reminder_minutes"] = reminder_minutes
+    return result
 
 
 async def _update_event(ctx: Context, *, event_id: str,
@@ -450,6 +464,7 @@ async def _update_event(ctx: Context, *, event_id: str,
                         end: Optional[str] = None,
                         location: Optional[str] = None,
                         body: Optional[str] = None,
+                        reminder_minutes: Optional[int] = None,
                         notify_attendees: bool = False) -> Dict[str, Any]:
     # Same documented exception as create_event: write-class for tier, but
     # notifications leave the org → the send kill-switch applies.
@@ -460,9 +475,11 @@ async def _update_event(ctx: Context, *, event_id: str,
             "SEND_ENABLED=false on this server.",
             hint="Update without notifying, or have the operator flip SEND_ENABLED.",
         )
-    if all(v is None for v in (subject, start, end, location, body)):
+    if all(v is None for v in (subject, start, end, location, body, reminder_minutes)):
         raise ToolError("validation",
-                        "nothing to update: pass subject/start/end/location/body")
+                        "nothing to update: pass subject/start/end/location/body/reminder_minutes")
+    if reminder_minutes is not None:
+        _check_reminder(reminder_minutes, -1)
     start_dt = parse_when(start, "start", ctx.settings.ews_tz) if start else None
     end_dt = parse_when(end, "end", ctx.settings.ews_tz) if end else None
 
@@ -477,6 +494,12 @@ async def _update_event(ctx: Context, *, event_id: str,
         if body is not None:
             item.body = _wrap_html(body)
             changed.append("body")
+        if reminder_minutes is not None:
+            item.reminder_is_set = reminder_minutes >= 0
+            changed.append("reminder_is_set")
+            if reminder_minutes >= 0:
+                item.reminder_minutes_before_start = reminder_minutes
+                changed.append("reminder_minutes_before_start")
         item.save(update_fields=changed,
                   send_meeting_invitations=SEND_TO_CHANGED_AND_SAVE_COPY
                   if notify_attendees else SEND_TO_NONE)
@@ -773,12 +796,16 @@ TOOLS: List[ToolSpec] = [
             "Create a calendar event. Default send_invitations=false saves a "
             "placeholder WITHOUT emailing attendees (no confirm needed). With "
             "send_invitations=true, invitations leave the org: two-phase "
-            "confirm + send kill-switch apply."
+            "confirm + send kill-switch apply. Without reminder_minutes the event "
+            "has no reminder."
         ),
         side_effect_class="write",  # tier: draft; invite path confirm-gated below
         input_schema=_obj({
             "subject": _STR, "start": _STR, "end": _STR,
             "attendees": _EMAILS, "location": _STR, "body": _STR,
+            "reminder_minutes": {"type": "integer", "minimum": 0,
+                                 "description": "Remind this many minutes before the start; "
+                                                "0 is at the start."},
             "send_invitations": {"type": "boolean", "default": False},
         }, required=["subject", "start", "end"]),
         handler=_create_event,
@@ -787,7 +814,7 @@ TOOLS: List[ToolSpec] = [
     ToolSpec(
         name="update_event",
         description=(
-            "Update event fields (subject/start/end/location/body). Default "
+            "Update event fields (subject/start/end/location/body/reminder). Default "
             "notify_attendees=false is a silent metadata edit; true notifies "
             "changed attendees → two-phase confirm + send kill-switch apply."
         ),
@@ -795,6 +822,9 @@ TOOLS: List[ToolSpec] = [
         input_schema=_obj({
             "event_id": _STR, "subject": _STR, "start": _STR, "end": _STR,
             "location": _STR, "body": _STR,
+            "reminder_minutes": {"type": "integer", "minimum": -1,
+                                 "description": "Remind this many minutes before the start; "
+                                                "0 is at the start, -1 removes the reminder."},
             "notify_attendees": {"type": "boolean", "default": False},
         }, required=["event_id"]),
         handler=_update_event,

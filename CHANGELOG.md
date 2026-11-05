@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+- `v5`: reminders. `create_event` and `update_event` take `reminder_minutes`
+  (`-1` removes a reminder), and `get_event` returns it.
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all
