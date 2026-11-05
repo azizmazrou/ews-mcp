@@ -59,6 +59,8 @@ PINS = {
     Item.delete: ["self", "send_meeting_cancellations",
                   "affected_task_occurrences", "suppress_read_receipts"],
     # --- calendar (writes._create_event / _respond_to_event / _cancel_event)
+    CalendarItem.recurring_master: ["self"],
+    Item.refresh: ["self"],
     CalendarItem.save: ["self", "update_fields", "conflict_resolution",
                         "send_meeting_invitations"],
     # --- free/busy + GAL (calendar_people)

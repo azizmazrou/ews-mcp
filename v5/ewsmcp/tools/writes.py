@@ -26,6 +26,8 @@ exchangelib 5.0.3 pins honoured here (verified against the installed lib):
   items persisted via ``.save(account.drafts)`` (Exchange quotes the
   original server-side).
 - ``Item.move(folder)`` returns ``None`` and updates ``item.id`` in place.
+- ``CalendarItem.recurring_master()`` sends no query and returns an item
+  holding a ``RecurringMasterItemId``; ``refresh()`` loads the master.
 - There is NO follow-up-flag parameter anywhere: 5.0.3 has no first-class
   flag field; pretending would be mock-drift bait (categories instead).
 """
@@ -34,13 +36,21 @@ import html as _html
 import logging
 import threading
 import time
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from exchangelib import CalendarItem, HTMLBody, Message, OofSettings
 from exchangelib.items import (
     SEND_TO_ALL_AND_SAVE_COPY,
     SEND_TO_CHANGED_AND_SAVE_COPY,
     SEND_TO_NONE,
+)
+from exchangelib.recurrence import (
+    AbsoluteMonthlyPattern,
+    DailyPattern,
+    Recurrence,
+    WeeklyPattern,
 )
 
 from ..dates import parse_when
@@ -66,6 +76,9 @@ def _write_through(ctx: Context, method: str, *args: Any) -> None:
         logger.warning("write-through %s failed (sync will repair): %s",
                        method, exc)
 _DRAFT_MODES = ("new", "reply", "reply_all", "forward")
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_SERIES_TYPE = "RecurringMaster"
+_OCCURRENCE_TYPES = ("Occurrence", "Exception")
 _RESPONSE_METHOD = {"accept": "accept", "tentative": "tentatively_accept", "decline": "decline"}
 _OOF_STATE = {
     "disabled": OofSettings.DISABLED,
@@ -402,10 +415,74 @@ async def _move_messages(ctx: Context, *, ids: List[str],
     return result
 
 
+def _series_time(value: datetime, tz_name: str) -> datetime:
+    """A series keeps its wall-clock time only in a named zone. A fixed offset
+    such as +01:00 would move every occurrence by an hour across a DST change."""
+    return value.astimezone(ZoneInfo(tz_name))
+
+
+def _build_recurrence(spec: Dict[str, Any], start: datetime) -> Recurrence:
+    """Translate the tool's ``recurrence`` argument. ``start`` is the first
+    occurrence, in the series' zone; the series begins on that date."""
+    frequency = spec.get("frequency")
+    interval = spec.get("interval", 1)
+    weekdays = spec.get("weekdays")
+    until = spec.get("until")
+    count = spec.get("count")
+    first_day = start.date()
+
+    if not isinstance(interval, int) or not 1 <= interval <= 99:
+        raise ToolError("validation", "recurrence.interval must be between 1 and 99")
+    if weekdays and frequency != "weekly":
+        raise ToolError("validation", "recurrence.weekdays requires frequency 'weekly'")
+
+    if frequency == "daily":
+        pattern = DailyPattern(interval=interval)
+    elif frequency == "weekly":
+        names = [str(day).lower() for day in weekdays or [_WEEKDAYS[first_day.weekday()]]]
+        unknown = [name for name in names if name not in _WEEKDAYS]
+        if unknown:
+            raise ToolError("validation", f"recurrence.weekdays: unknown day {unknown[0]!r}")
+        if _WEEKDAYS[first_day.weekday()] not in names:
+            raise ToolError(
+                "validation",
+                f"start falls on a {_WEEKDAYS[first_day.weekday()]}, which is not in "
+                "recurrence.weekdays",
+                hint="Use the date of the first occurrence as start.",
+            )
+        # exchangelib weekdays are ISO numbers, 1 = Monday.
+        pattern = WeeklyPattern(interval=interval,
+                                weekdays=sorted({_WEEKDAYS.index(n) + 1 for n in names}),
+                                first_day_of_week=1)
+    elif frequency == "monthly":
+        pattern = AbsoluteMonthlyPattern(interval=interval, day_of_month=first_day.day)
+    else:
+        raise ToolError("validation",
+                        "recurrence.frequency must be 'daily', 'weekly' or 'monthly'")
+
+    if until is not None and count is not None:
+        raise ToolError("validation", "pass recurrence.until or recurrence.count, not both")
+    if count is not None:
+        if not isinstance(count, int) or count < 1:
+            raise ToolError("validation", "recurrence.count must be at least 1")
+        return Recurrence(pattern=pattern, start=first_day, number=count)
+    if until is not None:
+        try:
+            end_day = date.fromisoformat(str(until))
+        except ValueError:
+            raise ToolError("validation",
+                            f"recurrence.until: cannot parse {until!r} as YYYY-MM-DD") from None
+        if end_day < first_day:
+            raise ToolError("validation", "recurrence.until is before the first occurrence")
+        return Recurrence(pattern=pattern, start=first_day, end=end_day)
+    return Recurrence(pattern=pattern, start=first_day)
+
+
 async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
                         attendees: Optional[List[str]] = None,
                         location: Optional[str] = None,
                         body: Optional[str] = None,
+                        recurrence: Optional[Dict[str, Any]] = None,
                         send_invitations: bool = False) -> Dict[str, Any]:
     # The ONE handler-side safety check in this pack, by design: this tool is
     # class "write" so a no-invite event stays available at draft tier, but
@@ -417,13 +494,19 @@ async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
             "kill_switch",
             "create_event with send_invitations=true is blocked: "
             "SEND_ENABLED=false on this server.",
-            hint="Save the event without invitations, or have the operator "
-                 "flip SEND_ENABLED.",
+            hint="Save the event without invitations: the attendees stay on it and "
+                 "the organizer can send it from Outlook. Or have the operator flip "
+                 "SEND_ENABLED.",
         )
     start_dt = parse_when(start, "start", ctx.settings.ews_tz)
     end_dt = parse_when(end, "end", ctx.settings.ews_tz)
     if end_dt <= start_dt:
         raise ToolError("validation", "end must be after start")
+    rule = None
+    if recurrence is not None:
+        start_dt = _series_time(start_dt, ctx.settings.ews_tz)
+        end_dt = _series_time(end_dt, ctx.settings.ews_tz)
+        rule = _build_recurrence(recurrence, start_dt)
 
     def work(account: Any) -> str:
         item = CalendarItem(account=account, folder=account.calendar,
@@ -435,13 +518,24 @@ async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
             item.location = location
         if body is not None:
             item.body = _wrap_html(body)
+        if rule is not None:
+            item.recurrence = rule
         item.save(send_meeting_invitations=SEND_TO_ALL_AND_SAVE_COPY
                   if send_invitations else SEND_TO_NONE)
         return str(item.id)
 
     raw_id = await ctx.gateway.call(work)
-    return {"ok": True, "event_id": ctx.aliaser.alias_for(raw_id, "e"),
-            "invitations_sent": bool(send_invitations)}
+    result: Dict[str, Any] = {"ok": True, "event_id": ctx.aliaser.alias_for(raw_id, "e"),
+                              "invitations_sent": bool(send_invitations)}
+    if rule is not None:
+        result["recurring"] = True
+    if attendees and not send_invitations:
+        result["invitations_pending"] = True
+        result["note"] = (
+            "Saved like a draft: the attendees are on the event, but nobody was invited. "
+            "The organizer can open it in Outlook and send it."
+        )
+    return result
 
 
 async def _update_event(ctx: Context, *, event_id: str,
@@ -450,6 +544,7 @@ async def _update_event(ctx: Context, *, event_id: str,
                         end: Optional[str] = None,
                         location: Optional[str] = None,
                         body: Optional[str] = None,
+                        scope: Optional[str] = None,
                         notify_attendees: bool = False) -> Dict[str, Any]:
     # Same documented exception as create_event: write-class for tier, but
     # notifications leave the org → the send kill-switch applies.
@@ -463,11 +558,38 @@ async def _update_event(ctx: Context, *, event_id: str,
     if all(v is None for v in (subject, start, end, location, body)):
         raise ToolError("validation",
                         "nothing to update: pass subject/start/end/location/body")
+    if scope not in (None, "occurrence", "series"):
+        raise ToolError("validation", "scope must be 'occurrence' or 'series'")
     start_dt = parse_when(start, "start", ctx.settings.ews_tz) if start else None
     end_dt = parse_when(end, "end", ctx.settings.ews_tz) if end else None
+    if scope == "series":
+        start_dt = _series_time(start_dt, ctx.settings.ews_tz) if start_dt else None
+        end_dt = _series_time(end_dt, ctx.settings.ews_tz) if end_dt else None
 
     def work(account: Any) -> Dict[str, Any]:
         item = _fetch_one(account, event_id)
+        kind = getattr(item, "type", None)
+        if scope == "series":
+            if kind in _OCCURRENCE_TYPES:
+                item = item.recurring_master()
+                item.refresh()
+            elif kind != _SERIES_TYPE:
+                raise ToolError("validation", "this event is not part of a series",
+                                hint="Omit scope to update a single event.")
+            # A master's start and end are those of its first occurrence.
+            first_day = item.start.astimezone(ZoneInfo(ctx.settings.ews_tz)).date()
+            for value, field in ((start_dt, "start"), (end_dt, "end")):
+                if value is not None and value.date() != first_day:
+                    raise ToolError(
+                        "validation",
+                        f"{field} must be on the series' first date, {first_day.isoformat()}, "
+                        "to change the time of all occurrences",
+                        hint="get_event shows it as recurrence.first_date.",
+                    )
+        elif kind == _SERIES_TYPE:
+            raise ToolError("validation", "this id is the whole series",
+                            hint="Pass scope='series', or an occurrence id from list_events "
+                                 "to change a single occurrence.")
         changed: List[str] = []
         for value, field in ((subject, "subject"), (start_dt, "start"),
                              (end_dt, "end"), (location, "location")):
@@ -693,6 +815,25 @@ def _obj(props: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[st
 _STR = {"type": "string"}
 _BOOL = {"type": "boolean"}
 _EMAILS = {"type": "array", "items": {"type": "string"}}
+_RECURRENCE = {
+    "type": "object",
+    "description": (
+        "Repeat the event. start and end are the first occurrence; the time of day "
+        "stays the same across DST changes. Without until or count the series has no end."
+    ),
+    "properties": {
+        "frequency": {"type": "string", "enum": ["daily", "weekly", "monthly"]},
+        "interval": {"type": "integer", "minimum": 1, "maximum": 99, "default": 1,
+                     "description": "Every N days, weeks or months."},
+        "weekdays": {"type": "array", "items": {"type": "string", "enum": list(_WEEKDAYS)},
+                     "description": "Weekly only; must include the weekday of start. "
+                                    "Default: the weekday of start."},
+        "until": {"type": "string", "description": "Last possible date, YYYY-MM-DD."},
+        "count": {"type": "integer", "minimum": 1, "description": "Number of occurrences."},
+    },
+    "required": ["frequency"],
+    "additionalProperties": False,
+}
 _IDS = {"type": "array", "items": {"type": "string"},
         "minItems": 1, "maxItems": MAX_BULK_IDS}
 
@@ -770,15 +911,17 @@ TOOLS: List[ToolSpec] = [
     ToolSpec(
         name="create_event",
         description=(
-            "Create a calendar event. Default send_invitations=false saves a "
-            "placeholder WITHOUT emailing attendees (no confirm needed). With "
-            "send_invitations=true, invitations leave the org: two-phase "
-            "confirm + send kill-switch apply."
+            "Create a calendar event or, with recurrence, a recurring series. "
+            "Default send_invitations=false saves it like a draft WITHOUT emailing "
+            "attendees (no confirm needed): they stay on the event, and the organizer "
+            "can send it from Outlook. With send_invitations=true, invitations leave "
+            "the org: two-phase confirm + send kill-switch apply."
         ),
         side_effect_class="write",  # tier: draft; invite path confirm-gated below
         input_schema=_obj({
             "subject": _STR, "start": _STR, "end": _STR,
             "attendees": _EMAILS, "location": _STR, "body": _STR,
+            "recurrence": _RECURRENCE,
             "send_invitations": {"type": "boolean", "default": False},
         }, required=["subject", "start", "end"]),
         handler=_create_event,
@@ -787,14 +930,20 @@ TOOLS: List[ToolSpec] = [
     ToolSpec(
         name="update_event",
         description=(
-            "Update event fields (subject/start/end/location/body). Default "
-            "notify_attendees=false is a silent metadata edit; true notifies "
-            "changed attendees → two-phase confirm + send kill-switch apply."
+            "Update event fields (subject/start/end/location/body). An occurrence id "
+            "from list_events changes that occurrence only; scope='series' changes "
+            "the whole series and overwrites those fields on occurrences changed "
+            "individually before. Default notify_attendees=false is a silent metadata "
+            "edit; true notifies changed attendees → two-phase confirm + send "
+            "kill-switch apply."
         ),
         side_effect_class="write",
         input_schema=_obj({
             "event_id": _STR, "subject": _STR, "start": _STR, "end": _STR,
             "location": _STR, "body": _STR,
+            "scope": {"type": "string", "enum": ["occurrence", "series"],
+                      "description": "For recurring events. With 'series', start and end "
+                                     "must be on the series' first date."},
             "notify_attendees": {"type": "boolean", "default": False},
         }, required=["event_id"]),
         handler=_update_event,

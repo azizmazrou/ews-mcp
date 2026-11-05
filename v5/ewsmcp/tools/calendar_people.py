@@ -23,6 +23,15 @@ from datetime import datetime, time as dtime, timedelta
 from itertools import islice
 from typing import Any, Dict, List, Optional, Tuple
 
+from exchangelib.fields import WEEKDAY_NAMES
+from exchangelib.recurrence import (
+    AbsoluteMonthlyPattern,
+    DailyPattern,
+    EndDatePattern,
+    NumberedPattern,
+    WeeklyPattern,
+)
+
 from .. import __version__
 from ..bodyclean import clean_body, html_to_text
 from ..dates import parse_when
@@ -145,6 +154,45 @@ def _attendee_entries(item: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _describe_recurrence(rule: Any) -> Dict[str, Any]:
+    """The rule of a series. Patterns create_event cannot write are still reported."""
+    pattern = rule.pattern
+    if isinstance(pattern, DailyPattern):
+        described: Dict[str, Any] = {"frequency": "daily", "interval": pattern.interval}
+    elif isinstance(pattern, WeeklyPattern):
+        described = {
+            "frequency": "weekly", "interval": pattern.interval,
+            "weekdays": [
+                (WEEKDAY_NAMES[day - 1] if isinstance(day, int) else str(day)).lower()
+                for day in pattern.weekdays
+            ],
+        }
+    elif isinstance(pattern, AbsoluteMonthlyPattern):
+        described = {"frequency": "monthly", "interval": pattern.interval,
+                     "day_of_month": pattern.day_of_month}
+    else:
+        described = {"frequency": "other", "pattern": str(pattern)}
+    boundary = rule.boundary
+    described["first_date"] = str(boundary.start)
+    if isinstance(boundary, EndDatePattern):
+        described["until"] = str(boundary.end)
+    elif isinstance(boundary, NumberedPattern):
+        described["count"] = boundary.number
+    return described
+
+
+def _series_rule(item: Any) -> Any:
+    """An occurrence carries no rule, only its master does."""
+    kind = getattr(item, "type", None)
+    if kind == "RecurringMaster":
+        return item.recurrence
+    if kind in ("Occurrence", "Exception"):
+        master = item.recurring_master()
+        master.refresh()
+        return master.recurrence
+    return None
+
+
 async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
     tz = ctx.settings.ews_tz
 
@@ -156,9 +204,9 @@ async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
         if item is None:
             raise ToolError("not_found", f"No event found for id {id!r}.",
                             hint="Re-run list_events and use a fresh event id.")
-        return item
+        return item, _series_rule(item)
 
-    item = await ctx.gateway.call(work)
+    item, rule = await ctx.gateway.call(work)
     event = event_card(item, ctx.aliaser, tz)
     event["attendees"] = _attendee_entries(item)
     source = getattr(item, "text_body", None) or ""
@@ -169,9 +217,17 @@ async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
     event["body"] = clean_body(source, max_chars=2000)["text"]
     event["recurring"] = bool(getattr(item, "is_recurring", False)
                               or getattr(item, "recurrence", None))
+    if rule is not None:
+        event["recurrence"] = _describe_recurrence(rule)
+    kind = getattr(item, "type", None)
+    if isinstance(kind, str):
+        event["type"] = kind
     my_response = getattr(item, "my_response_type", None)
     if my_response:
         event["my_response"] = str(my_response)
+    # Only the organizer's copy says whether the invitations went out.
+    if my_response == "Organizer" and event["attendees"]:
+        event["invitations_sent"] = bool(getattr(item, "meeting_request_was_sent", False))
     return {"ok": True, "event": event}
 
 
@@ -507,7 +563,8 @@ TOOLS: List[ToolSpec] = [
             "Fetch one calendar event in full by id (a short alias like 'e3' "
             "from list_events, or a raw EWS id). Returns organizer, every "
             "attendee with their response (Accept/Decline/Tentative/…), the "
-            "cleaned body text, a recurring flag, and your own response."
+            "cleaned body text, a recurring flag, the rule of a series, your own "
+            "response and, for an event you organize, whether invitations were sent."
         ),
         side_effect_class="read",
         input_schema={
