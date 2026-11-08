@@ -13,7 +13,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from exchangelib import Account, Configuration, Credentials, DELEGATE, EWSTimeZone
+from exchangelib import (
+    Account, Configuration, Credentials, DELEGATE, EWSTimeZone, IMPERSONATION, OAUTH2,
+    OAuth2AuthorizationCodeCredentials,
+)
 from exchangelib.protocol import (
     BaseProtocol,
     CachingProtocol,
@@ -61,23 +64,46 @@ class EWSGateway:
     def _build_account(self) -> Account:
         s = self.settings
         BaseProtocol.TIMEOUT = s.request_timeout
+        return Account(
+            primary_smtp_address=s.ews_email,
+            config=self._configuration(),
+            autodiscover=False,
+            access_type=self._access_type(),
+            default_timezone=EWSTimeZone(s.ews_tz),
+        )
+
+    def _access_type(self) -> str:
+        # Impersonation: the service account's credentials, the requested
+        # mailbox as primary_smtp_address (multiuser.py).
+        return IMPERSONATION if self.settings.impersonation else DELEGATE
+
+    def _configuration(self) -> Configuration:
+        """Connection settings without touching the network (an Account
+        built from them asks Exchange for its version right away)."""
+        s = self.settings
+        if s.ews_access_token:
+            # Token mode (multiuser.py): the caller's own access token, used
+            # as is. No client id/secret, so exchangelib never refreshes it
+            # itself; the gateway in front gets a new one and the per-user
+            # Context is rebuilt with it.
+            token: Dict[str, Any] = {"access_token": s.ews_access_token, "token_type": "Bearer"}
+            if s.ews_access_token_expires_at:
+                token["expires_at"] = s.ews_access_token_expires_at
+            credentials: Any = OAuth2AuthorizationCodeCredentials(access_token=token)
+        else:
+            credentials = Credentials(s.ews_username or s.ews_email, s.ews_password or "")
         kwargs: Dict[str, Any] = dict(
             service_endpoint=s.ews_server_url,
-            credentials=Credentials(s.ews_username or s.ews_email, s.ews_password or ""),
+            credentials=credentials,
             retry_policy=FaultTolerance(max_wait=s.ews_retry_max_wait_seconds),
         )
-        if s.ews_auth_type_force:  # escape hatch for a DIFFERENT Exchange only
+        if s.ews_access_token:
+            kwargs["auth_type"] = OAUTH2
+        elif s.ews_auth_type_force:  # escape hatch for a DIFFERENT Exchange only
             logger.warning("auth_type FORCED to %s — the primary Exchange requires auto-negotiation",
                            s.ews_auth_type_force)
             kwargs["auth_type"] = s.ews_auth_type_force
-        config = Configuration(**kwargs)
-        return Account(
-            primary_smtp_address=s.ews_email,
-            config=config,
-            autodiscover=False,
-            access_type=DELEGATE,
-            default_timezone=EWSTimeZone(s.ews_tz),
-        )
+        return Configuration(**kwargs)
 
     def reset(self) -> None:
         """Drop the cached account AND exchangelib's protocol-cache entry.
@@ -104,8 +130,21 @@ class EWSGateway:
 
     def close(self) -> None:
         """Tear down this gateway for good (multi-user eviction only —
-        the process-wide single-mailbox gateway just lives until exit)."""
-        self.reset()
+        the process-wide single-mailbox gateway just lives until exit).
+
+        Under impersonation every per-user gateway runs on the same
+        service-account credentials, so exchangelib hands them all the same
+        cached Protocol: closing it, or clearing the protocol cache, would
+        cut the sessions of every other user. Only this gateway's own
+        account and folder cache go then.
+        """
+        if self.settings.impersonation:
+            with self._account_lock:
+                self._account = None
+            self._folder_cache.clear()
+            self._folder_cache_ts = 0.0
+        else:
+            self.reset()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def test_connection(self) -> bool:

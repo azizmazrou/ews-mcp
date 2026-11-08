@@ -8,6 +8,7 @@ HTTP_BY_CODE = {
     "auth_failed": 401,
     "tier_blocked": 403,
     "kill_switch": 403,
+    "forbidden": 403,
     "recipient_blocked": 403,
     "confirm_invalid": 409,
     "not_found": 404,

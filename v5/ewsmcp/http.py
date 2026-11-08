@@ -10,7 +10,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from . import __version__
 from .errors import HTTP_BY_CODE, ToolError
-from .multiuser import UserContextCache, extract_credentials_from_asgi_headers
+from .multiuser import AUTHORIZATION_HEADER, UserContextCache, asgi_header, token_transport_error
 from .server import build_context, build_mcp_server, start_connection_manager
 from .tools.base import dispatch
 
@@ -182,6 +182,22 @@ def build_app(ctx, settings, streamable: Optional[Any] = None,
             return await _send_json(send, 401, {"ok": False, "error": {
                 "code": "auth_failed", "message": "missing or invalid bearer token"}})
 
+        if user_cache is not None and user_cache.token_auth and (
+                path == "/mcp" or path.startswith("/api/tools/")):
+            # Token mode: a missing or expired token is a 401 from the
+            # endpoint itself, so the MCP client refreshes or starts OAuth.
+            problem = token_transport_error(asgi_header(scope.get("headers"), AUTHORIZATION_HEADER))
+            if problem is not None:
+                challenge, message = problem
+                body = json.dumps({"ok": False, "error": {
+                    "code": "auth_failed", "message": message}}).encode()
+                await send({"type": "http.response.start", "status": 401, "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(body)).encode()],
+                    [b"www-authenticate", challenge.encode()],
+                ]})
+                return await send({"type": "http.response.body", "body": body})
+
         if path == "/mcp":
             if streamable is None:
                 return await _send_json(send, 503, {"ok": False, "error": {
@@ -212,7 +228,7 @@ def build_app(ctx, settings, streamable: Optional[Any] = None,
             active_ctx = ctx
             if user_cache is not None:
                 try:
-                    email, password = extract_credentials_from_asgi_headers(scope.get("headers"))
+                    email, password = user_cache.credentials_from_asgi_headers(scope.get("headers"))
                 except ToolError as err:
                     return await _send_json(send, err.http_status, err.to_dict())
                 active_ctx = user_cache.get(email, password)

@@ -12,6 +12,19 @@
   `v5/DESIGN.md` §Multi-user. Ids stay short: each user context holds an
   in-memory alias map that is never shared and is dropped with the
   context.
+- `v5`: `EWS_MULTI_USER_AUTH=impersonation` as an alternative to per-user
+  passwords in multi-user mode: one service account with the
+  ApplicationImpersonation role (`EWS_USERNAME`/`EWS_PASSWORD`) opens the
+  mailbox named in `X-EWS-Email`; no user password is sent or held.
+  Requires `MCP_API_KEY`, refuses requests that still send
+  `X-EWS-Password`, and `EWS_IMPERSONATION_ALLOWED_DOMAINS` restricts the
+  mailboxes a request may name (new error code `forbidden`, 403).
+- `v5`: `EWS_MULTI_USER_AUTH=token`: each request's own OAuth access token
+  for Exchange (`Authorization: Bearer`), passed to exchangelib as is; the
+  mailbox comes from `X-EWS-Email` or the token's address claim. A missing
+  or expired token (`exp` within 30 s) gets HTTP 401 with
+  `WWW-Authenticate` from `/mcp` and `/api/tools/*`, so MCP clients start
+  OAuth or refresh. `MCP_API_KEY` is then sent as `X-API-Key`.
 
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door

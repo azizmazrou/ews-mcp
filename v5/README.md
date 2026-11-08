@@ -166,6 +166,99 @@ mcpServers:
         description: "Your Exchange password (stored by LibreChat, sent only to this server)"
 ```
 
+#### Choosing how users authenticate (`EWS_MULTI_USER_AUTH`)
+
+| | `password` (default) | `impersonation` | `token` |
+|---|---|---|---|
+| Request carries | the user's Exchange password | only the mailbox address | the user's OAuth access token |
+| Stored on the gateway | each user's password | nothing per user | a refresh token per user (gateway's OAuth client) |
+| Server holds | nothing | one account that can open every mailbox in its scope | nothing |
+| Password change | the user re-enters it | nothing to do | nothing to do |
+| Revocation | per user, by changing the password | central, one account | per user, at the identity provider |
+| Needs from Exchange | nothing | an admin granting `ApplicationImpersonation` | OAuth for EWS: Exchange Online, or Exchange Server with hybrid modern auth / AD FS |
+| Fits when | the gateway is internal and trusted, and Exchange is run by someone else (a hoster, another company's AD) | the Exchange admins also run the gateway | Exchange and the gateway trust the same identity provider |
+
+#### Impersonation: one service account instead of user passwords
+
+`EWS_MULTI_USER_AUTH=impersonation` keeps multi-user mode but takes the
+password out of the request: a service account holding Exchange's
+`ApplicationImpersonation` role signs in (`EWS_USERNAME`/`EWS_PASSWORD`)
+and opens the mailbox named in `X-EWS-Email`. Requests must not send
+`X-EWS-Password` (they are refused if they do).
+
+With impersonation the gateway is the only thing vouching for who the
+user is, so:
+
+- **`MCP_API_KEY` is required** — boot fails without it. Only the gateway
+  may reach the server.
+- **The gateway must set `X-EWS-Email` from its own authenticated
+  session**, never from a value the user types in. In LibreChat use the
+  signed-in user's address, not `customUserVars`:
+
+  ```yaml
+  mcpServers:
+    exchange:
+      type: streamable-http
+      url: http://ews-mcp:8000/mcp
+      headers:
+        X-API-Key: "${EWS_MCP_API_KEY}"
+        X-EWS-Email: "{{LIBRECHAT_USER_EMAIL}}"
+  ```
+
+- **Narrow it twice:** `EWS_IMPERSONATION_ALLOWED_DOMAINS=corp.example`
+  rejects any other mailbox here (`forbidden`, 403), and a management
+  scope limits the role in Exchange itself (Exchange Management Shell):
+
+  ```powershell
+  New-ManagementScope -Name "EWS-MCP-Scope" `
+      -RecipientRestrictionFilter "Department -eq 'Sales'"
+  New-ManagementRoleAssignment -Name "EWS-MCP-Impersonation" `
+      -Role "ApplicationImpersonation" -User "DOMAIN\svc-ews-mcp" `
+      -CustomRecipientWriteScope "EWS-MCP-Scope"
+  ```
+
+#### Token: the user's own OAuth access token
+
+`EWS_MULTI_USER_AUTH=token`: every request carries the user's access token
+for Exchange as `Authorization: Bearer <token>`, and Exchange validates
+it. No password and no service account are involved; the gateway's OAuth
+client obtains and refreshes the tokens.
+
+- **Mailbox:** `X-EWS-Email` if sent, otherwise the token's `upn`,
+  `email`, `preferred_username` or `unique_name` claim. Exchange only
+  opens what the token's user may open.
+- **Missing or expired token → HTTP 401 from the endpoint itself**, with
+  `WWW-Authenticate: Bearer error="invalid_token"` for an expired one
+  (`exp` passed or less than 30 s away). An MCP client starts OAuth or
+  refreshes its token only on such a 401; a tool error saying "401" would
+  leave it sending the expired token. A token Exchange rejects for another
+  reason (revoked) still comes back as `auth_failed` in the tool result.
+- **`MCP_API_KEY`** keeps working, sent as `X-API-Key`, since
+  `Authorization` now carries the user's token.
+- **Exchange must accept OAuth for EWS.** Exchange Online does; Exchange
+  Server only with hybrid modern authentication or AD FS. The token's
+  audience must be the Exchange EWS resource of that setup.
+
+In LibreChat, the server's `oauth` block does the OAuth flow per user
+(authorization and token URL of the identity provider Exchange trusts):
+
+```yaml
+mcpServers:
+  exchange:
+    type: streamable-http
+    url: http://ews-mcp:8000/mcp
+    requiresOAuth: true
+    headers:
+      X-API-Key: "${EWS_MCP_API_KEY}"
+    oauth:
+      authorization_url: https://idp.corp.example/oauth2/authorize
+      token_url: https://idp.corp.example/oauth2/token
+      client_id: ${EWS_MCP_CLIENT_ID}
+      client_secret: ${EWS_MCP_CLIENT_SECRET}
+      # Exchange Online; for Exchange Server, the EWS resource of its AD FS / hybrid setup
+      scope: "https://outlook.office365.com/EWS.AccessAsUser.All offline_access"
+```
+
 ## Why it looks like this
 
 - **Token economy.** One legacy detail call shipped 115 kB of duplicated

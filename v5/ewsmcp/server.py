@@ -12,7 +12,7 @@ from .errors import ToolError
 from .gateway.client import EWSGateway
 from .gateway.connection import ConnectionManager
 from .ids import NullAliaser, get_aliaser
-from .multiuser import UserContextCache, extract_credentials_from_request
+from .multiuser import UserContextCache
 from .tools import build_registry
 from .tools.base import Context, dispatch
 
@@ -153,7 +153,7 @@ def build_mcp_server(ctx: Context, user_cache: Optional[UserContextCache] = None
             except LookupError:
                 request = None
             try:
-                email, password = extract_credentials_from_request(request)
+                email, password = user_cache.credentials_from_request(request)
             except ToolError as err:
                 return err.to_dict()
             active_ctx = user_cache.get(email, password)

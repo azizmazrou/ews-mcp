@@ -32,6 +32,28 @@ class Settings(BaseSettings):
     # per-user state that would otherwise leak between users, so they stay
     # off entirely in this mode.
     ews_multi_user: bool = False
+    # How a multi-user request authenticates against Exchange:
+    #   password      -- the request's own X-EWS-Email/X-EWS-Password
+    #                    (the user's credentials; nothing stored server-side)
+    #   impersonation -- one service account (EWS_USERNAME/EWS_PASSWORD) with
+    #                    the ApplicationImpersonation role opens the mailbox the
+    #                    request names in X-EWS-Email; no user passwords at all.
+    #                    The gateway in front is then the only thing vouching
+    #                    for that identity, so MCP_API_KEY is required.
+    #   token         -- the request's own OAuth access token for Exchange in
+    #                    "Authorization: Bearer"; Exchange itself checks it.
+    #                    Needs an Exchange that accepts OAuth for EWS (Exchange
+    #                    Online, or Exchange Server with hybrid modern auth /
+    #                    AD FS). MCP_API_KEY, if set, then goes in X-API-Key.
+    ews_multi_user_auth: Literal["password", "impersonation", "token"] = "password"
+    # impersonation only: comma-separated domains a request may name, e.g.
+    # "corp.example,sub.corp.example". Empty = any mailbox the service
+    # account's management scope allows (scope it in Exchange as well).
+    ews_impersonation_allowed_domains: str = ""
+    # token mode only: set per request on the per-user copy of these
+    # settings (multiuser.py), not meant to come from the environment.
+    ews_access_token: Optional[str] = None
+    ews_access_token_expires_at: Optional[float] = None
     # NEVER pin auth_type against this Exchange: the front door only works
     # via exchangelib auto-negotiation (verified live 2026-06-12; pinning
     # BASIC/NTLM both fail). Escape hatch for a *different* server only.
@@ -94,7 +116,37 @@ class Settings(BaseSettings):
                 "multi-user mode each request supplies its own identity via "
                 "the X-EWS-Email/X-EWS-Password headers instead."
             )
+        if self.ews_multi_user and self.ews_multi_user_auth == "impersonation":
+            if not self.ews_username or not self.ews_password:
+                raise ValueError(
+                    "EWS_MULTI_USER_AUTH=impersonation needs the service "
+                    "account in EWS_USERNAME and EWS_PASSWORD."
+                )
+            if not self.mcp_api_key:
+                raise ValueError(
+                    "EWS_MULTI_USER_AUTH=impersonation requires MCP_API_KEY: "
+                    "the X-EWS-Email header alone picks the mailbox, so only "
+                    "the trusted gateway may reach this server."
+                )
         return self
+
+    @property
+    def impersonation(self) -> bool:
+        """Multi-user mode with a service account impersonating each mailbox."""
+        return self.ews_multi_user and self.ews_multi_user_auth == "impersonation"
+
+    @property
+    def token_auth(self) -> bool:
+        """Multi-user mode with each request's own OAuth access token."""
+        return self.ews_multi_user and self.ews_multi_user_auth == "token"
+
+    @property
+    def impersonation_domains(self) -> frozenset:
+        return frozenset(
+            d.strip().lower().lstrip("@")
+            for d in self.ews_impersonation_allowed_domains.split(",")
+            if d.strip()
+        )
 
     @model_validator(mode="after")
     def _resolve_data_dir(self) -> "Settings":
