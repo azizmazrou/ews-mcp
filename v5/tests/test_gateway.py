@@ -61,3 +61,36 @@ def test_reset_survives_close_and_clear_failures(monkeypatch):
     account.protocol.close.side_effect = OSError("socket gone")
     gw.reset()  # must not raise
     assert gw._account is None
+
+
+def _response(status, content=b""):
+    from types import SimpleNamespace as NS
+    return NS(status_code=status, content=content, url="https://mail.corp.example/EWS/Exchange.asmx",
+              headers={}, text=content.decode())
+
+
+def test_multi_user_reports_401_at_once_instead_of_backing_off():
+    import pytest
+    from exchangelib.errors import ErrorInternalServerTransientError, UnauthorizedError
+    from ewsmcp.errors import map_exception
+
+    gw = EWSGateway(make_settings(ews_multi_user=True, ews_email=None, mcp_transport="http"))
+    policy = gw._retry_policy()
+    assert isinstance(policy, client_mod.RejectingFaultTolerance)
+    with pytest.raises(UnauthorizedError) as exc:
+        policy.raise_response_errors(_response(401))
+    assert map_exception(exc.value).code == "auth_failed"
+    with pytest.raises(UnauthorizedError, match="locked out"):
+        policy.raise_response_errors(_response(401, b"The referenced account is currently locked out"))
+    with pytest.raises(ErrorInternalServerTransientError):
+        policy.raise_response_errors(_response(503))
+
+
+def test_single_mailbox_keeps_retrying_401():
+    import pytest
+    from exchangelib.errors import ErrorServerBusy
+
+    policy = EWSGateway(make_settings())._retry_policy()
+    assert not isinstance(policy, client_mod.RejectingFaultTolerance)
+    with pytest.raises(ErrorServerBusy):
+        policy.raise_response_errors(_response(401))

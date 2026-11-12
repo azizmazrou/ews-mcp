@@ -17,6 +17,7 @@ from exchangelib import (
     Account, Configuration, Credentials, DELEGATE, EWSTimeZone, IMPERSONATION, OAUTH2,
     OAuth2AuthorizationCodeCredentials,
 )
+from exchangelib.errors import UnauthorizedError
 from exchangelib.protocol import (
     BaseProtocol,
     CachingProtocol,
@@ -34,6 +35,23 @@ WELL_KNOWN = {
     "f:trash": "trash", "f:junk": "junk", "f:outbox": "outbox",
     "f:calendar": "calendar", "f:contacts": "contacts", "f:tasks": "tasks",
 }
+
+
+class RejectingFaultTolerance(FaultTolerance):
+    """FaultTolerance that does not retry an HTTP 401.
+
+    exchangelib treats a 401 as throttling ("EWS sometimes throws 401's when
+    it wants us to throttle connections") and backs off 10, 20, 40, ... s
+    until max_wait. With per-request credentials a 401 is almost always a
+    wrong password: the call then hangs for minutes, the client times out
+    first, and every retry is one more failed login on the account.
+    """
+
+    def raise_response_errors(self, response):
+        if response.status_code == 401 and b"currently locked out" not in response.content:
+            raise UnauthorizedError(
+                f"Exchange rejected the credentials (HTTP 401) for {response.url}")
+        return super().raise_response_errors(response)
 
 
 class EWSGateway:
@@ -77,6 +95,12 @@ class EWSGateway:
         # mailbox as primary_smtp_address (multiuser.py).
         return IMPERSONATION if self.settings.impersonation else DELEGATE
 
+    def _retry_policy(self) -> FaultTolerance:
+        # Multi-user: the credentials come from the caller, so a 401 is
+        # reported at once instead of being retried as throttling.
+        cls = RejectingFaultTolerance if self.settings.ews_multi_user else FaultTolerance
+        return cls(max_wait=self.settings.ews_retry_max_wait_seconds)
+
     def _configuration(self) -> Configuration:
         """Connection settings without touching the network (an Account
         built from them asks Exchange for its version right away)."""
@@ -95,7 +119,7 @@ class EWSGateway:
         kwargs: Dict[str, Any] = dict(
             service_endpoint=s.ews_server_url,
             credentials=credentials,
-            retry_policy=FaultTolerance(max_wait=s.ews_retry_max_wait_seconds),
+            retry_policy=self._retry_policy(),
         )
         if s.ews_access_token:
             kwargs["auth_type"] = OAUTH2

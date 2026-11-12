@@ -66,7 +66,11 @@ def map_exception(exc: Exception) -> ToolError:
             hint="The item id is stale (items move). Re-run search_messages and use a fresh id.",
         )
     if "unauthorized" in lowered or "401" in lowered or "invalid credentials" in lowered:
-        return ToolError("auth_failed", text, hint="Upstream Exchange rejected our credentials.")
+        return ToolError(
+            "auth_failed", text,
+            hint="Exchange rejected the credentials or the account is locked. Retrying will not "
+                 "help: check the e-mail address and password configured for this server first.",
+        )
     if any(k in lowered for k in ("connection", "timeout", "timed out", "transport", "auth type")):
         return ToolError(
             "upstream_unavailable", text,
