@@ -1855,3 +1855,38 @@ def test_replace_preserves_omitted_priority_and_enabled_and_lists_changes(
     assert p2["ok"] is True
     assert p2["rule"]["priority"] == 7
     assert p2["rule"]["enabled"] is False
+
+
+# --- Input that would fail only after the token is consumed --------------------
+
+
+@pytest.mark.parametrize(
+    "overrides, fragment",
+    [
+        ({"priority": 10**30}, "priority"),
+        ({"priority": 0}, "priority"),
+        ({"name": "Bad" + chr(0) + "name"}, "name"),
+        ({"name": "Bad" + chr(0xD800) + "name"}, "name"),
+        ({"conditions": {"subject_contains": ["tab" + chr(9) + "here"]}}, "subject_contains"),
+        ({"actions": {"assign_categories": ["line" + chr(10) + "break"]}}, "assign_categories"),
+    ],
+)
+def test_unsendable_input_is_refused_before_a_token_is_issued(
+    tmp_path, offline_account, monkeypatch, overrides, fragment
+):
+    backend = FakeRulesBackend(offline_account, blob_exists=False)
+    _wire_backend(monkeypatch, backend)
+    ctx = _make_ctx(tmp_path, backend)
+    args = {
+        "name": "Plain",
+        "conditions": {"subject_contains": ["x"]},
+        "actions": {"mark_as_read": True},
+    }
+    args.update(overrides)
+
+    out = _call(ctx, "save_rule", **args)
+    assert out["ok"] is False
+    assert out["error"]["code"] == "validation"
+    assert fragment in out["error"]["message"]
+    assert "confirm_token" not in out
+    assert backend.create_calls == []
