@@ -7,6 +7,16 @@
   exchangelib hands back a `date`, not a `datetime`, for them. They now
   come back as `YYYY-MM-DD`, event cards say `all_day`, and the cache
   mirror stores midnight in the server timezone.
+- `v5`: OAuth discovery paths (`/.well-known/oauth-*`, `/register`) now
+  404 instead of inheriting the `MCP_API_KEY` gate's 401. This server
+  implements no OAuth; a 401 there reads to a spec-compliant MCP client
+  as "OAuth required, no metadata available" — LibreChat surfaced this
+  as a dead-end OAuth prompt on a plain header-auth connection. 404 is
+  the correct "not supported" signal. This does not make `MCP_API_KEY`
+  safe to combine with a non-OAuth LibreChat MCP connection: LibreChat
+  still attempts OAuth on any 401 from the first `/mcp` request. See
+  README "HTTP transport" — omit `MCP_API_KEY` for that connection; the
+  REST shim's `x-api-key` is unaffected.
 
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
