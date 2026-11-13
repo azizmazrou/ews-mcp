@@ -59,6 +59,9 @@ Four packs (see the generated table in `docs/API.md`):
 
 Every list-shaped result ships exactly the canonical envelope
 `{items, count, total_available, next_offset}` (contract-tested).
+Multi-folder `search_messages` calls (`folder="f:all"` and
+`recursive=true`) cap fan-out at `200` folders per call (extras reported
+as `folders_skipped`) and `offset + limit <= 500`.
 
 ## §Safety — one gate chain
 
@@ -77,11 +80,15 @@ without two model decisions):
   recipients inside `send_draft`'s confirm gate.
 - **Two-phase confirm**: phase 1 returns a preview + HMAC token; phase 2
   must echo it. For `send_draft` the token binds the draft's CONTENT
-  (subject + sorted recipients + full body, refetched and re-verified at
-  phase 2), so editing the draft between preview and confirm kills the
-  token. Tokens are single-use; idempotent replays (same
-  `idempotency_key` + draft) return the cached receipt without a fresh
-  token — that is what makes retry-after-timeout safe (Stripe semantics).
+  (subject + sorted recipients + full body + attachments with ids,
+  names, and sizes); phase 2 fetches the draft once, re-verifies the
+  hash on that object, and sends that same object, so any edit between
+  preview and confirm fails with `confirm_invalid`. Draft tools
+  (`update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft`)
+  are serialised per draft (`_draft_lock`). Tokens are single-use;
+  idempotent replays (same `idempotency_key` + draft) return the cached
+  receipt without a fresh token — that is what makes retry-after-timeout
+  safe (Stripe semantics).
 - **Send rate cap** `EWS_MAX_SENDS_PER_HOUR`.
 - The one documented handler-side check: `create_event`/`update_event`
   are write-class for tier purposes, but invitations leave the org, so
@@ -136,9 +143,13 @@ LLM-directed `hint` and `retry_after_s` where meaningful. Handler
 ## §Transports
 
 stdio MCP, Streamable HTTP `/mcp`, a REST shim `/api/tools/<name>`
-(jsonschema-validated against the public tool schema, 1 MiB body cap),
-`/openapi.json`, public health (`/livez`, `/readyz`, `/health`,
-`/version`) and `/metrics` (Prometheus, behind the API key).
+(jsonschema-validated against the public tool schema), `/openapi.json`,
+public health (`/livez`, `/readyz`, `/health`, `/version`) and `/metrics`
+(Prometheus, behind the API key). Both `/api/tools/<name>` and `/mcp`
+cap request bodies at `max_body_bytes(settings)` —
+`(EWS_MAX_ATTACHMENT_MB * 1024 * 1024) * 4 // 3 + 1_048_576` bytes
+(base64 expansion of the attachment ceiling plus 1 MiB for JSON
+arguments).
 **Never-exit boot**: tools register and transports bind before any
 Exchange contact; a background warmup loop owns connection recovery
 (exponential backoff + jitter and protocol-cache eviction every 3

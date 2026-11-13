@@ -7,37 +7,47 @@ and how to engage with it productively.
 
 ```
 v5/                      the 4.5 server (current line)
+  ewsmcp/                Python package (`ewsmcp` entry point)
+  tests/                 offline unit, contract, and structural suite
+  scripts/               boot_smoke.py, dump_tool_table.py, verify_audit_chain.py
+  docs/                  API.md (generated tool tables + hand-written contracts)
 src/                     legacy 4.0 source (ships as :latest)
 docs/                    documentation map; docs/legacy/ = 4.0 docs
-.github/workflows/       CI: docker-publish.yml + docker-build-test.yml
-Dockerfile               container build
-docker-compose.yml       reference docker-compose for local dev
-requirements.txt         runtime Python deps
-setup.py                 distribution metadata
+examples/                example assistant skill on top of 4.5
+.github/workflows/       CI: v5-tests.yml, v5-publish.yml,
+                             docker-build-test.yml, docker-publish.yml
+Dockerfile               legacy 4.0 container build (4.5: v5/Dockerfile)
+docker-compose.yml       legacy 4.0 compose file (4.5: v5/docker-compose.example.yml)
+requirements.txt         legacy 4.0 runtime deps (4.5: v5/pyproject.toml)
+setup.py                 legacy 4.0 distribution metadata
 README.md                product landing page
 CHANGELOG.md             version history
 ```
 
-There is no `tests/` directory in this repository. Test development
-happens out-of-tree against the maintainer's live mailbox; the public
-repo intentionally ships only the production product. The CI workflows
-verify Dockerfile build + Python import correctness — that's the gate
-PRs need to pass.
+The 4.5 line ships a full offline test suite under `v5/tests` that runs
+without an Exchange server, gated in CI by `v5-tests.yml` (ruff,
+`pytest` on Python 3.11 and 3.12, `dump_tool_table.py --check`,
+`boot_smoke.py`, and a Docker import smoke). Only the legacy 4.0 tree
+(`src/`) has no in-repo test suite and relies on `docker-build-test.yml`
+for Dockerfile build and Python import checks.
 
 ## Filing issues
 
-- **Bug reports**: please include the Exchange auth type (`oauth2` /
-  `basic` / `ntlm`), the exchangelib version, the relevant tool name,
-  and the verbatim error message + a redacted version of the input
-  arguments. **Do not paste real email addresses, internal hostnames,
-  or message bodies** — the maintainer will reproduce against their
-  own mailbox once the shape of the bug is clear.
+- **Bug reports**: please include the server line (`4.5` or legacy
+  `4.0`), the Exchange auth type (auto-negotiated / `basic` / `ntlm` /
+  `digest`, or `oauth2` on legacy 4.0), the exchangelib version, the
+  relevant tool name, and the verbatim error message + a redacted
+  version of the input arguments. **Do not paste real email addresses,
+  internal hostnames, or message bodies** — the maintainer will
+  reproduce against their own mailbox once the shape of the bug is
+  clear.
 - **Feature requests**: describe the workflow first, the proposed API
   second. The maintainer's bias is to keep the MCP doing deterministic
-  data work and push reasoning to the consuming agent — see the README
-  "MCP / skill boundary" section for context. Reasoning-shaped tools
-  ("classify this", "summarise that") are unlikely to be added because
-  the consuming LLM does them better in-prompt.
+  data work and push reasoning to the consuming agent — see
+  [`v5/DESIGN.md`](v5/DESIGN.md) ("The law" #1) for context.
+  Reasoning-shaped tools ("classify this", "summarise that") are
+  unlikely to be added because the consuming LLM does them better
+  in-prompt.
 
 ## Submitting pull requests
 
@@ -56,7 +66,13 @@ verify the fix.
 
 If you'd rather your code merged verbatim, the bar is higher:
 - The PR must apply cleanly on top of `main`
-- The Dockerfile + import check (`docker-build-test.yml`) must pass
+- For `v5/`, all four checks from the root README's Development section
+  must pass (`python -m pytest v5/tests -q`, `python -m ruff check v5`,
+  `python v5/scripts/boot_smoke.py full`, and
+  `python v5/scripts/dump_tool_table.py --check`), new behaviour must
+  come with a test under `v5/tests`, and any user-visible change must
+  add a line to `CHANGELOG.md` under `[Unreleased]` (for legacy `src/`
+  changes, `docker-build-test.yml` must pass)
 - The change must not introduce a new external service dependency
   (e.g. a vector database) without prior discussion in an issue
 - The change must not re-add LLM-reasoning tools removed in v4.0
@@ -64,38 +80,61 @@ If you'd rather your code merged verbatim, the bar is higher:
 
 ## Local development
 
+### 4.5 (`v5/`, current line)
+
 ```bash
 git clone https://github.com/<owner>/<repo>.git
 cd <repo>
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
+pip install -e ./v5[dev]
+python -m pytest v5/tests -q
+python -m ruff check v5
+python v5/scripts/boot_smoke.py full
+python v5/scripts/dump_tool_table.py --check
+```
+
+To run against a mailbox, copy `v5/.env.example` to `.env`, fill in
+credentials, and run `ewsmcp` (or build the container with
+`docker build -t ews-mcp:dev v5`).
+
+### Legacy 4.0 (`src/`)
+
+```bash
 pip install -r requirements.txt
 cp .env.example .env  # edit with your credentials
 python -m src.main
 ```
 
-Or via Docker:
+Or via the legacy Docker image:
 
 ```bash
-docker build -t ews-mcp:dev .
-docker run -i --rm --env-file .env ews-mcp:dev
+docker build -t ews-mcp:legacy .
+docker run -i --rm --env-file .env ews-mcp:legacy
 ```
 
 ## Code style
 
-- Plain Python, no specific formatter enforced. Match surrounding style.
+- For `v5/`, `python -m ruff check v5` with the rule set pinned in
+  `v5/pyproject.toml` is a blocking CI gate. Match surrounding style in
+  both trees.
 - Comments should explain *why*, not *what*.
 - Don't add docstrings that just restate the function name.
 - Avoid try/except that swallows failures silently — log and re-raise
   with context.
 - Don't introduce a new dependency without justifying it in the PR
-  description. Pure-stdlib solutions are preferred for everything
-  except the document-extraction libraries already in `requirements.txt`.
+  description. Pure-stdlib solutions are preferred beyond the packages
+  already listed in `v5/pyproject.toml` (or `requirements.txt` for
+  legacy 4.0).
 
 ## Security
 
 If you find a vulnerability that affects production deployments
-(credential leak, RCE, AuthZ bypass, etc.), **please don't open a
-public issue**. Email the maintainer directly via the address in
-`setup.py` and they'll coordinate a fix.
+(credential leak, RCE, AuthZ bypass, etc.), **do not post details
+publicly**. Use the repository's Security tab ("Report a vulnerability")
+when it is offered; otherwise open an issue that states only that you
+have a security report, with no details, and a private channel will be
+arranged.
 
 ## License
 

@@ -16,13 +16,20 @@
 | **4.5 — current** | [`v5/`](v5/) | Active development. **Recommended for all new setups.** | `ghcr.io/azizmazrou/ews-mcp:v4.5*` |
 | 4.0 — legacy | [`src/`](src/) | Maintenance only. | `ghcr.io/azizmazrou/ews-mcp:latest` |
 
-The 4.5 line is a greenfield rewrite: a consolidated **28-tool** surface,
+The 4.5 line is a greenfield rewrite: a consolidated **30-tool** surface,
 short alias ids the model can actually copy, token-lean responses (~60-token
 result cards instead of raw Outlook HTML), a cache-first local mirror with
 Arabic-correct full-text search, and a safety model enforced in one place.
 The legacy line keeps `:latest` stable for existing deployments until 4.5
 is promoted. **If you are new here, use 4.5 and read
 [`v5/README.md`](v5/README.md).**
+
+Legacy 4.0 (`:latest`) users: stop the server before or right after an
+Exchange password change, update the password, and start it again — 4.0
+retries HTTP 401 responses as throttling and can trigger a directory
+lockout (see
+[`docs/legacy/TROUBLESHOOTING.md`](docs/legacy/TROUBLESHOOTING.md#authentication-issues);
+4.5 stops on the first rejection).
 
 ## Quick start — 4.5 locally over stdio (recommended)
 
@@ -73,32 +80,44 @@ single-service Compose example. Legacy transport docs:
 
 ## What the assistant can do (4.5)
 
-- **Read fast** — `get_mailbox_overview` (morning brief in one call),
-  `search_messages` (FTS over a local mirror, Arabic-correct, semantic
-  mode optional), `get_message`, `get_thread`, `get_attachment`.
+- **Read fast** — `list_folders` (with `folder_class`),
+  `get_mailbox_overview`, `search_messages` (local FTS with Arabic
+  normalization or live EWS; `folder="f:all"`, `recursive`,
+  `categories`, `flag_complete`, optional `semantic` mode),
+  `check_messages`, `get_message` and `get_attachment` (with S/MIME
+  `smime_type` detection), `get_thread` (plus `find_similar` when
+  `EWS_SEMANTIC_INDEX=pgvector`).
 - **Calendar & people** — `list_events`, `get_event`,
-  `check_availability`, `find_people`, `get_contact`.
+  `check_availability`, `find_people`, `get_contact`,
+  `get_oof_settings`; writes: `create_event` and `update_event` (with
+  `recurrence` and `reminder_minutes`), `respond_to_event`,
+  `cancel_event`, `set_oof`.
 - **Tasks & follow-ups** — `list_tasks`, `update_task`, `waiting_on`
   (sent threads nobody answered).
-- **Write safely** — `create_draft` / `update_draft` (never send),
-  labels, move; `send_draft` only exists at the `full` tier, behind a
-  kill-switch, recipient allowlists, an hourly cap, and a two-phase
-  **content-bound** confirmation that goes stale if the draft changes.
-- **Operate** — `get_server_status` (connection, tier, cache watermarks —
-  works even while Exchange is unreachable).
+- **Write safely** — `create_draft` (with `attachments`),
+  `update_draft`, `add_draft_attachment` (`content_base64` or relative
+  `path` in `EWS_ATTACHMENT_DIR`), `delete_draft`, `update_messages`,
+  `move_messages`. `delete_messages` and `send_draft` exist only at the
+  `full` tier; `send_draft` sits behind the kill-switch, recipient
+  lists, an hourly cap, and a two-phase **content-bound** confirmation
+  that goes stale if the draft changes.
+- **Operate** — `get_server_status` (connection and auth-breaker state,
+  tier, cache watermarks — works even while Exchange is unreachable).
 
-The complete, generated reference — every tool with its parameters,
-envelope, error codes, and the v3→4.5 rename map — is
-[`v5/docs/API.md`](v5/docs/API.md).
+Capability tiers expose **16** (`read`), **25** (`draft`, default), or
+**30** (`full`) tools. The complete, generated reference — every tool
+with its parameters, envelope, error codes, and the v3→4.5 rename map —
+is [`v5/docs/API.md`](v5/docs/API.md).
 
 ## The safety model (4.5)
 
 | Mechanism | What it does |
 |---|---|
-| Capability tiers | `read` ⊂ `draft` ⊂ `full` — above-tier tools are not even registered |
+| Capability tiers | `read` (16) ⊂ `draft` (25) ⊂ `full` (30) — above-tier tools are not even registered |
 | Kill-switch | `SEND_ENABLED=false` (default) refuses every send-class call |
+| Lockout guard | Fails immediately on HTTP 401, opens for `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` (default `900` s), and stays open until restart after `EWS_AUTH_MAX_REJECTIONS` (default `3`) |
 | Recipient guards | Allow/deny globs on argument **and** draft-resolved recipients |
-| Two-phase confirm | Preview + HMAC token bound to the draft's actual content; single-use |
+| Two-phase confirm | Preview + single-use HMAC token bound to the draft's subject, recipients, body, and attachments (ids, names, sizes) |
 | Rate cap | `EWS_MAX_SENDS_PER_HOUR` |
 | Audit chain | Hash-chained log, verifier script, persists across restarts |
 

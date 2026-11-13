@@ -11,6 +11,26 @@ Common issues and solutions for the EWS MCP Server.
 
 ## Authentication Issues
 
+### Problem: After a password change, the 4.0 server keeps submitting the old password
+
+**Cause:**
+The 4.0 server reads `EWS_PASSWORD` at startup and configures its
+Exchange `Account` with exchangelib's `FaultTolerance(max_wait=30)`
+(`src/ews_client.py`). That policy treats an HTTP `401` response as
+server-busy throttling, so a rejected password is retried with back-off
+inside each call and again on every later call. Where a directory
+lockout policy is in place, those repeated submissions can lock the
+account.
+
+**Solution:**
+1. Stop the 4.0 server process or container before or right after an
+   Exchange password change.
+2. Update `EWS_PASSWORD` in `.env` or your client configuration.
+3. Start the server again.
+
+The 4.5 line ([`v5/README.md`](../../v5/README.md)) stops after the
+first HTTP `401` rejection instead of retrying.
+
 ### Problem: "Authentication failed" error
 
 **Symptoms:**
