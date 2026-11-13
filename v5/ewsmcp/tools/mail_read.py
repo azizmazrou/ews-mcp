@@ -472,6 +472,80 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
 
 
 # --------------------------------------------------------------------------
+# 2b. check_messages: a whole list in one call
+# --------------------------------------------------------------------------
+
+CHECK_MAX_VALUES = 200
+CHECK_MAX_HITS = 5
+
+
+def _parse_values(raw: Any) -> List[str]:
+    """JSON array or values separated by commas, semicolons or new lines;
+    empty entries and duplicates are dropped, the order is kept."""
+    if isinstance(raw, list):
+        items = [str(item) for item in raw]
+    else:
+        text = str(raw or "").strip()
+        items = []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                items = [str(item) for item in parsed] if isinstance(parsed, list) else []
+            except ValueError:
+                items = []
+        if not items:
+            items = re.split(r"[,;\n]+", text)
+    seen: set = set()
+    out: List[str] = []
+    for item in (i.strip() for i in items):
+        if item and item.lower() not in seen:
+            seen.add(item.lower())
+            out.append(item)
+    return out
+
+
+def _word_match(term: str, text: str) -> bool:
+    """Whole word: "RFP-12" does not match inside "RFP-123"."""
+    return re.search(r"(?i)(^|[^\w])" + re.escape(term) + r"($|[^\w])", text or "") is not None
+
+
+async def _check_messages(ctx: Context, values: Any, field: str = "subject",
+                          folder: str = "f:inbox", since: Optional[str] = None,
+                          until: Optional[str] = None,
+                          only_missing: bool = False) -> Dict[str, Any]:
+    terms = _parse_values(values)
+    if not terms:
+        raise ToolError("validation", "`values` is empty.")
+    if len(terms) > CHECK_MAX_VALUES:
+        raise ToolError("validation",
+                        f"at most {CHECK_MAX_VALUES} values per call, got {len(terms)}.")
+    if field not in ("subject", "sender"):
+        raise ToolError("validation", "`field` must be 'subject' or 'sender'.")
+
+    gate = asyncio.Semaphore(4)
+
+    async def one(term: str) -> List[Dict[str, Any]]:
+        async with gate:
+            result = await _search_messages(
+                ctx, folder=folder, since=since, until=until, limit=50,
+                **({"subject": term} if field == "subject" else {"sender": term}))
+        cards = result.get("items") or []
+        if field == "subject":
+            cards = [c for c in cards if _word_match(term, c.get("subject", ""))]
+        return [{k: c.get(k) for k in ("id", "subject", "from", "date")}
+                for c in cards[:CHECK_MAX_HITS]]
+
+    hits = await asyncio.gather(*(one(term) for term in terms))
+    found = {term: h for term, h in zip(terms, hits) if h}
+    missing = [term for term in terms if term not in found]
+    out: Dict[str, Any] = {"values_checked": len(terms), "found_count": len(found),
+                           "missing_count": len(missing), "missing": missing}
+    if not only_missing:
+        out["found"] = found
+    return out
+
+
+# --------------------------------------------------------------------------
 # 3. get_message
 # --------------------------------------------------------------------------
 
@@ -951,6 +1025,33 @@ TOOLS: List[ToolSpec] = [
             "fresh": dict(_FRESH_PROPERTY),
         }),
         handler=_search_messages,
+    ),
+    ToolSpec(
+        name="check_messages",
+        description=(
+            "Check a whole list of values against one mail folder in one call: "
+            "which values occur as a whole word in a message subject (or in the "
+            "sender name/address) and which are missing. Returns up to 5 matching "
+            "cards per value. Use this instead of one search_messages call per value."
+        ),
+        side_effect_class="read",
+        requires_ews=True,
+        input_schema=_schema({
+            "values": {
+                "type": "string",
+                "description": "Values separated by commas or new lines; a JSON "
+                               "array of strings is accepted too. At most 200.",
+            },
+            "field": {"type": "string", "enum": ["subject", "sender"],
+                      "description": "Where to look for each value (default subject)."},
+            "folder": {"type": "string",
+                       "description": "Folder alias, e.g. f:inbox (default) or f:sent."},
+            "since": {"type": "string", "description": "Received at or after (ISO date)."},
+            "until": {"type": "string", "description": "Received at or before (ISO date)."},
+            "only_missing": {"type": "boolean",
+                             "description": "Return only the values without a match."},
+        }, ["values"]),
+        handler=_check_messages,
     ),
     ToolSpec(
         name="get_message",
