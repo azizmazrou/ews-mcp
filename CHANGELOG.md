@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Only one `ewsmcp` process per `DATA_DIR` runs the background `SyncEngine`: the leader holds a non-blocking OS file lock on `cache/sync.lock` for the life of the process while other processes on the same `DATA_DIR` read the shared SQLite mirror as followers (`get_server_status.cache.sync.role`: `"leader"` | `"follower"`), skip `EWS_CACHE_PURGE_ON_BOOT` with a warning, and retry the lock every 30 seconds to take over when the leader exits instead of multiplying Exchange delta syncs and triggering server throttling (degrading to running sync with a single logged error if `sync.lock` cannot be opened).
+
 ## [4.5.0a2] - 2026-11-13
 
 ### Added

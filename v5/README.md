@@ -295,12 +295,23 @@ stdio too). Audit chain:
 
 ## Several clients on one machine
 
-Each `ewsmcp` stdio process with caching enabled starts its own
-background `SyncEngine` against `DATA_DIR`; there is no cross-process
-sync lease yet. If multiple clients on the same machine use one mailbox,
-either run a single HTTP server on loopback (`MCP_TRANSPORT=http`,
-`MCP_HOST=127.0.0.1`) and point every client at it, or set a separate
-`DATA_DIR` per stdio instance.
+Several `ewsmcp` stdio processes can share one `DATA_DIR`. At startup, the
+first process acquires a non-blocking OS file lock on `cache/sync.lock`
+(`get_server_status.cache.sync.role == "leader"`) and runs the background
+`SyncEngine`; additional processes on the same `DATA_DIR` run as full
+servers (`role == "follower"`) that serve cache-first reads from the shared
+SQLite mirror without duplicating delta syncs against Exchange. When the
+leader exits (cleanly or abruptly), the OS releases `sync.lock` and a
+follower acquires the lease on its 30-second retry timer and starts
+`SyncEngine` once its Exchange connection is warm. `EWS_CACHE_PURGE_ON_BOOT`
+runs only in the leader and is skipped with a warning by followers.
+
+What the processes do not share: each one keeps its own Exchange session
+and its own lockout guard. After a password change, every process submits
+the old password once before its guard opens, so with several processes
+the directory sees several failed logins at once. A single HTTP server on
+loopback (`MCP_TRANSPORT=http`, `MCP_HOST=127.0.0.1`) that every client
+connects to avoids that, and shares one warm EWS session.
 
 ## Upgrading from 4.5.0a1
 

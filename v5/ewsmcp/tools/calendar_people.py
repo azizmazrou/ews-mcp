@@ -540,7 +540,9 @@ async def _get_server_status(ctx: Context) -> Dict[str, Any]:
         except Exception as exc:
             cache_block["error"] = str(exc)
     if ctx.sync is not None:
-        cache_block["sync"] = ctx.sync.status()
+        cache_block["sync"] = {**ctx.sync.status(), "role": "leader"}
+    elif ctx.lease is not None:
+        cache_block["sync"] = {"role": "leader" if ctx.lease.held else "follower"}
     return {
         "ok": True,
         "version": __version__,

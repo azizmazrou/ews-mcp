@@ -490,8 +490,11 @@ Reads served by the local mirror carry `source: "cache"` and `as_of`
 (the folder's last sync watermark; delta cadence
 `EWS_CACHE_SYNC_SECONDS`, default 45 s). `fresh: true` forces live.
 `get_server_status.cache` exposes per-folder watermarks, row counts, DB
-size and sync health. `mode: "semantic"` on `search_messages` (and the
-`find_similar` tool) exist only when `EWS_SEMANTIC_INDEX` is enabled.
+size and sync health, including `sync.role` (`"leader"` for the process
+holding `cache/sync.lock` and running `SyncEngine`, or `"follower"` for
+additional processes reading the shared mirror without running background
+sync). `mode: "semantic"` on `search_messages` (and the `find_similar`
+tool) exist only when `EWS_SEMANTIC_INDEX` is enabled.
 
 ## Searching several folders
 
