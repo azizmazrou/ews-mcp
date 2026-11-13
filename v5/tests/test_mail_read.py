@@ -264,7 +264,19 @@ def test_get_message_full_shape_and_alias_roundtrip(tmp_path):
     assert message["body"].startswith("Body line.")
     assert message["to"] == []
     assert message["attachments"][0]["name"] == "contract.pdf"
+    assert "smime_type" not in message["attachments"][0]
     assert "snippet" not in message
+
+
+def test_get_message_flags_smime_signed_attachment_in_inventory(tmp_path):
+    item = _msg("RAW-2=", subject="Signed mail", has_attachments=True,
+                attachments=[_att("smime.p7m", _P7M_SIGNED_HEAD,
+                                  "application/pkcs7-mime")])
+    account = _account()
+    account.fetch = MagicMock(return_value=[item])
+    ctx = _ctx(tmp_path, account)
+    res = _run(ctx, "get_message", id="RAW-2=")
+    assert res["message"]["attachments"][0]["smime_type"] == "signed"
 
 
 def test_get_message_concise_returns_card(tmp_path):
@@ -435,6 +447,58 @@ def test_get_attachment_save_writes_sanitized_file(tmp_path):
     assert "?" not in saved and " " not in saved.rsplit("attachments", 1)[1]
     with open(saved, "rb") as fh:
         assert fh.read() == b"a,b\n1,2\n"
+
+
+# --- get_attachment: S/MIME smime.p7m sniff ---------------------------------
+
+# Minimal DER ContentInfo prefixes: SEQUENCE { OID contentType, ... } — real
+# messages carry certs/signature bytes after this, but the sniff only scans
+# the head, so a short synthetic prefix is enough to exercise it.
+_P7M_SIGNED_HEAD = bytes.fromhex("3082") + bytes.fromhex("06092a864886f70d010702") + b"REST-OF-SIGNED-DATA-including-original-mime"
+_P7M_ENVELOPED_HEAD = bytes.fromhex("3082") + bytes.fromhex("06092a864886f70d010703") + b"opaque-encrypted-bytes"
+
+
+def test_get_attachment_smime_signed_is_auto_decoded_as_text(tmp_path):
+    item = _msg("RAW-A=", attachments=[
+        _att("smime.p7m", _P7M_SIGNED_HEAD, "application/pkcs7-mime"),
+    ])
+    account = _account()
+    account.fetch = MagicMock(return_value=[item])
+    ctx = _ctx(tmp_path, account)
+    res = _run(ctx, "get_attachment", message_id="RAW-A=")
+    assert res["ok"] is True
+    assert res["smime_type"] == "signed"
+    assert res["mode"] == "text"
+    assert "original-mime" in res["text"]
+    assert "not encrypted" in res["hint"]
+
+
+def test_get_attachment_smime_enveloped_stays_info_with_hint(tmp_path):
+    item = _msg("RAW-A=", attachments=[
+        _att("smime.p7m", _P7M_ENVELOPED_HEAD, "application/pkcs7-mime"),
+    ])
+    account = _account()
+    account.fetch = MagicMock(return_value=[item])
+    ctx = _ctx(tmp_path, account)
+    res = _run(ctx, "get_attachment", message_id="RAW-A=")
+    assert res["ok"] is True
+    assert res["smime_type"] == "enveloped"
+    assert res["mode"] == "info"
+    assert "text" not in res
+    assert "private key" in res["hint"]
+
+
+def test_get_attachment_smime_undetermined_falls_back_to_binary_info(tmp_path):
+    item = _msg("RAW-A=", attachments=[
+        _att("smime.p7m", b"not-a-recognizable-der-prefix", "application/pkcs7-mime"),
+    ])
+    account = _account()
+    account.fetch = MagicMock(return_value=[item])
+    ctx = _ctx(tmp_path, account)
+    res = _run(ctx, "get_attachment", message_id="RAW-A=")
+    assert res["ok"] is True
+    assert "smime_type" not in res
+    assert res["mode"] == "info"
 
 
 # --- get_mailbox_overview ----------------------------------------------------------

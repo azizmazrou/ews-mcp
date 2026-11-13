@@ -23,6 +23,18 @@
   …), on both the cache and live lanes; omitted when Exchange
   reports none. Existing local mirrors gain the `folders.folder_class`
   column on open and fill it on the next hierarchy sync.
+### Added
+- `v5`: `get_attachment` and `get_message` now sniff `smime.p7m`
+  (`application/pkcs7-mime`) attachments and report `smime_type:
+  signed|enveloped` — that content-type/filename names both opaque-signed
+  and encrypted S/MIME identically, so the calling model had to guess
+  from an empty body and the filename. The answer is the DER
+  `ContentInfo.contentType` OID at the start of the PKCS#7 structure
+  (RFC 5652), read off the already-fetched attachment bytes, no new
+  dependency. `get_attachment(mode='auto')` now decodes `signed` as text
+  (the original MIME is embedded in cleartext inside the SignedData
+  wrapper) and leaves `enveloped` as `info` with a hint that the content
+  cannot be recovered without the recipient's private key.
 
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
