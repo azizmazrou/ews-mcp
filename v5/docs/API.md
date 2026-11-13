@@ -416,7 +416,7 @@ _No parameters._
 
 #### `save_rule` — write (min tier: draft)
 
-Create a server-side Inbox rule or wholesale-replace an existing editable rule (pass rule_id to replace). Only mailbox-internal actions are allowed (move_to_folder, copy_to_folder, assign_categories, mark_as_read, mark_importance, stop_processing_rules); sending/forwarding/deleting actions are refused, and rules with editable=false cannot be replaced. Always two-phase confirmed; warns when conditions are empty or Outlook-only rules would be lost.
+Create a server-side Inbox rule or wholesale-replace an existing editable rule (pass rule_id to replace). Only mailbox-internal actions are allowed (move_to_folder, copy_to_folder, assign_categories, mark_as_read, mark_importance, stop_processing_rules); sending/forwarding/deleting actions and Deleted Items/Junk targets are refused, and rules with editable=false cannot be replaced. Always two-phase confirmed; warns when conditions are empty or Outlook-only rules would be lost.
 
 > Two-phase confirm: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 
@@ -425,8 +425,8 @@ Create a server-side Inbox rule or wholesale-replace an existing editable rule (
 | `name` | string | yes |  |
 | `actions` | object | yes | Mailbox-internal rule actions (at least one must be enabled). Sending, forwarding, redirecting, server replies, and deleting are never writable. |
 | `conditions` | object | no | Predicates an incoming message must match. Omitting conditions or passing {} matches every incoming message (warned in preview). |
-| `priority` | integer | no | Execution order (1 runs first). (default `1`) |
-| `enabled` | boolean | no | (default `True`) |
+| `priority` | integer | no | Execution order (1 runs first; defaults to 1 on create, or keeps the current priority on replace). |
+| `enabled` | boolean | no | Whether the rule is active (defaults to true on create, or keeps the current state on replace). |
 | `rule_id` | string | no | Existing r-alias to wholesale-replace; omit to create. |
 
 #### `delete_rule` — write (min tier: draft)
@@ -511,13 +511,20 @@ attendees) run in two phases:
    Nothing executes. For `send_draft` the preview shows the draft's REAL
    `to`, `cc`, `bcc`, `subject`, `body_snippet`, `attachment_count`, and
    `attachments`, and the token is HMAC-bound to subject, sorted
-   recipients, body, and attachments (ids, names, and sizes).
+   recipients, body, and attachments (ids, names, and sizes). For
+   `save_rule` and `delete_rule`, the token binds the planned rule
+   (including raw target folder ids), the rule it replaces or deletes
+   (including a SHA-256 fingerprint of its serialised XML), and the
+   `outlook_only_rules` flag; unrelated rules changing in between do not
+   invalidate it.
 2. Call again with identical arguments plus `confirm_token` → executes
    once. For `send_draft`, phase 2 fetches the draft once under the
    per-draft lock, re-checks its content hash against the verified hash,
    and sends that same object; a draft (or attachment list) changed
-   after the preview is refused with `confirm_invalid`. Tokens also die
-   on argument changes, on TTL expiry (`CONFIRM_TTL_SECONDS`, default
+   after the preview is refused with `confirm_invalid`. For `save_rule`
+   and `delete_rule`, phase 2 runs under the in-process `_rules_lock` and
+   re-verifies the bound rule state before mutating Exchange. Tokens also
+   die on argument changes, on TTL expiry (`CONFIRM_TTL_SECONDS`, default
    600 s), and after one use. `send_draft` retries with the same
    `idempotency_key` replay the cached receipt instead of sending twice.
 
@@ -559,29 +566,54 @@ merged `offset..offset + limit` page, so a page can contain fewer than
 ## Inbox rules
 
 Three tools manage Exchange's server-side Inbox rules (`list_rules` at
-`read`; `save_rule` and `delete_rule` at `draft`, both always two-phase
-confirmed):
+`read`, stamped `source: "live"`; `save_rule` and `delete_rule` at `draft`,
+both class `write` on purpose so a `draft`-tier caller can undo its own rule,
+with audit records keeping the dispatcher's standard format, and both always
+two-phase confirmed):
 
-- **Safety contract (mailbox-internal only).** `save_rule` builds `Actions`
-  strictly from six allow-listed fields: `move_to_folder`, `copy_to_folder`,
-  `assign_categories`, `mark_as_read`, `mark_importance`, and
-  `stop_processing_rules`. Actions that send, forward, redirect, auto-reply,
-  send SMS alerts, or delete mail are never writable. `move_to_folder` and
-  `copy_to_folder` refuse Deleted Items, Junk Email and any folder below
-  them: filing every match there is a deleting rule under another name.
-- **Read-only reporting for complex rules.** `list_rules` returns every rule
-  with an `r`-alias id. Any rule that uses a non-writable action, an
-  exception, a condition outside the writable set (`from_addresses`,
-  `sent_to_addresses`, `subject_contains`, `body_contains`,
-  `subject_or_body_contains`, `sender_contains`, `recipient_contains`,
-  `has_attachments`, `importance`, `sent_to_me`, `sent_cc_me`,
-  `sent_only_to_me`, `sent_to_or_cc_me`, `not_sent_to_me`), or
-  `is_not_supported` is reported with `editable: false` and the field names in
-  `unsupported` (plus `sends_mail: true` and `recipients` when it sends or
-  forwards mail, and `in_error: true` when Exchange flags a broken rule).
-  `save_rule` refuses to replace any rule with `editable: false` so
-  unsupported fields are never silently dropped; `delete_rule` may delete any
-  rule.
+- **Safety contract (mailbox-internal only, fail-closed folder verification).**
+  `save_rule` builds `Actions` strictly from six allow-listed fields:
+  `move_to_folder`, `copy_to_folder`, `assign_categories`, `mark_as_read`,
+  `mark_importance`, and `stop_processing_rules`. Actions that send, forward,
+  redirect, auto-reply, send SMS alerts, or delete mail are never writable.
+  `move_to_folder` and `copy_to_folder` refuse Deleted Items, Junk Email, and
+  any folder below them (matched by `DeletedItems` / `JunkEmail` class,
+  `DISTINGUISHED_FOLDER_ID`, `WELL_KNOWN` name, or raw id), fail closed if the
+  Deleted Items or Junk Email ids cannot be determined (unless Exchange reports
+  `ErrorFolderNotFound`), verify the target folder's live `parent_folder_id`
+  ancestry up to `msg_folder_root` (bounded to 25 levels) in both phases, and
+  always send a real `FolderId`.
+- **Read-only reporting for complex or unreadable rules.** `list_rules` returns
+  every rule with an `r`-alias id (never minting `r` aliases for nonexistent
+  rule ids, and resolving each distinct target folder at most once per call).
+  Any rule that uses a non-writable action, an exception, a condition outside
+  the writable set (`from_addresses`, `sent_to_addresses`, `subject_contains`,
+  `body_contains`, `subject_or_body_contains`, `sender_contains`,
+  `recipient_contains`, `has_attachments`, `importance`, `sent_to_me`,
+  `sent_cc_me`, `sent_only_to_me`, `sent_to_or_cc_me`, `not_sent_to_me`), a
+  present-but-unreadable XML element, a move/copy target without a readable
+  folder id or resolvable label, or `is_not_supported` is reported with
+  `editable: false` and the field names in `unsupported` (plus `sends_mail:
+  true` and `recipients` when it sends or forwards mail, and `in_error: true`
+  when Exchange flags a broken rule). `save_rule` refuses to replace any rule
+  with `editable: false` so unsupported fields are never silently dropped. On a
+  replace (`rule_id` provided), omitting `priority` or `enabled` preserves the
+  current rule's value, and the phase-1 preview includes `changes` (the list of
+  top-level rule field names that differ between `current` and `rule`).
+- **Token binding, serialisation, write verification, and disabled-rule
+  deletion.** `save_rule` and `delete_rule` are serialised in-process under one
+  lock. Their confirmation token binds the planned rule (including raw target
+  folder ids), the rule being replaced or deleted (including a SHA-256
+  fingerprint of its serialised XML), and the `outlook_only_rules` flag;
+  unrelated rules changing in between do not invalidate the token. Rule writes
+  call `CreateInboxRule`, `SetInboxRule`, and `DeleteInboxRule` directly and
+  treat read-back as a separate step: if the write succeeded on Exchange and
+  read-back failed, `save_rule` returns `ok: true` with `verified: false`, the
+  planned rule (`id: null` on create), and a `note` instructing the caller to
+  run `list_rules`. When `delete_rule` targets a disabled rule and Exchange
+  answers `ErrorItemNotFound`, it neutralises the rule into an enabled no-match
+  rule (a fresh 48-character random `contains_subject_strings` token and
+  `stop_processing_rules` only) before deleting it.
 - **Outlook rule-blob caveat.** Modifying or deleting rules via EWS
   `UpdateInboxRules` sends `RemoveOutlookRuleBlob=true`, which deletes
   client-side send rules and can cause rules disabled via the Outlook UI to be

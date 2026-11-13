@@ -95,12 +95,18 @@ without two model decisions):
   allow-list of mailbox-internal actions (`move_to_folder`,
   `copy_to_folder`, `assign_categories`, `mark_as_read`, `mark_importance`,
   `stop_processing_rules`) — no argument path can create a rule that sends,
-  forwards, redirects, replies, or deletes, and a move or copy target in
-  Deleted Items or Junk (or below them) is refused for the same reason.
-  Existing rules using any
-  non-writable field are reported `editable: false` and refused on replace.
-  Both `save_rule` and `delete_rule` are always two-phase confirmed with
-  content-bound tokens and `OutlookRuleBlobExists` / catch-all warnings.
+  forwards, redirects, replies, or deletes. Move and copy targets are
+  verified fail-closed against Deleted Items and Junk Email (by folder
+  class, distinguished id, well-known name, raw id, and live `GetFolder`
+  ancestry up to `msg_folder_root`, bounded to 25 levels) and always carry a
+  real `FolderId`. Existing rules using any non-writable field, unreadable
+  XML element, or unnameable target folder are reported `editable: false`
+  and refused on replace. Both `save_rule` and `delete_rule` stay `write`
+  class (`draft` tier, so a draft-tier caller can undo its own rule), are
+  serialised in-process under `_rules_lock`, and are always two-phase
+  confirmed with tokens bound to the planned rule (including raw target
+  folder ids), the replaced or deleted rule (including its serialised XML
+  SHA-256 fingerprint), and the `outlook_only_rules` flag.
 - The one documented handler-side check: `create_event`/`update_event`
   are write-class for tier purposes, but invitations leave the org, so
   they re-check the kill-switch when (and only when) they would notify.

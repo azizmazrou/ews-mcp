@@ -34,9 +34,21 @@ from exchangelib import (
     Message,
     OofSettings,
 )
-from exchangelib.errors import ErrorServerBusy, UnauthorizedError
-from exchangelib.fields import IntegerField
-from exchangelib.folders import Folder
+from exchangelib.errors import (
+    ErrorFolderNotFound,
+    ErrorItemNotFound,
+    ErrorServerBusy,
+    UnauthorizedError,
+)
+from exchangelib.fields import BooleanField, IntegerField
+from exchangelib.folders import (
+    DeletedItems,
+    Folder,
+    JunkEmail,
+    MsgFolderRoot,
+    Root,
+    SingleFolderQuerySet,
+)
 from exchangelib.folders.collections import FolderCollection
 from exchangelib.items import Item, ReplyToItem
 from exchangelib.properties import (
@@ -46,6 +58,7 @@ from exchangelib.properties import (
     ConversationId,
     CopyToFolder,
     Exceptions,
+    FolderId,
     InboxRules,
     Mailbox,
     MoveToFolder,
@@ -53,6 +66,7 @@ from exchangelib.properties import (
 )
 from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
+from exchangelib.services import GetFolder
 from exchangelib.services.common import EWSAccountService
 from exchangelib.services.inbox_rules import (
     CreateInboxRule,
@@ -116,6 +130,13 @@ PINS = {
     # --- reliability (gateway)
     FaultTolerance.__init__: ["self", "max_wait"],
     FaultTolerance.raise_response_errors: ["self", "response"],
+    # --- live folder ancestry & discard verification (gateway.rules)
+    SingleFolderQuerySet.__init__: ["self", "account", "folder"],
+    SingleFolderQuerySet.resolve: ["self"],
+    FolderCollection.resolve: ["self"],
+    FolderCollection.get_folders: ["self", "additional_fields"],
+    Root.get_default_folder: ["self", "folder_cls"],
+    Root.get_folder: ["self", "folder"],
     # --- inbox rules (gateway.rules + tools.rules; exchangelib 5.6.0)
     Account.create_rule: ["self", "rule"],
     Account.set_rule: ["self", "rule"],
@@ -376,14 +397,30 @@ def test_writes_draft_field_projections_match_real_message_fields():
 
 
 def test_account_rules_property_and_service_override():
-    """Pin Account.rules as a property and verify GetInboxRulesWithBlob matches
-    GetInboxRules's hook signature and instantiates with account= without I/O."""
+    """Pin Account.rules as a property and verify GetInboxRulesWithBlob,
+    CreateInboxRule, SetInboxRule, DeleteInboxRule, and SingleFolderQuerySet
+    match exchangelib 5.6.0 signatures and instantiate offline without I/O."""
     assert isinstance(Account.rules, property)
     assert Account.rules.fget is not None
     assert _params(Account.rules.fget) == ["self"]
+    for attr in ("trash", "junk", "msg_folder_root", "root"):
+        assert hasattr(Account, attr), attr
+    assert DeletedItems.DISTINGUISHED_FOLDER_ID == "deleteditems"
+    assert JunkEmail.DISTINGUISHED_FOLDER_ID == "junkemail"
+    assert MsgFolderRoot.DISTINGUISHED_FOLDER_ID == "msgfolderroot"
+    assert issubclass(ErrorFolderNotFound, Exception)
+    assert issubclass(ErrorItemNotFound, Exception)
+    assert isinstance(Rule.is_enabled, BooleanField)
+    assert {"self", "folders", "additional_fields", "shape"}.issubset(
+        _params(GetFolder.call)
+    )
+
     assert issubclass(GetInboxRulesWithBlob, GetInboxRules)
     assert _params(GetInboxRulesWithBlob._get_element_container) == _params(
         GetInboxRules._get_element_container
+    )
+    assert _params(GetInboxRulesWithBlob._elem_to_obj) == _params(
+        GetInboxRules._elem_to_obj
     )
     CachingProtocol.clear_cache()
     try:
@@ -401,6 +438,26 @@ def test_account_rules_property_and_service_override():
         )
         svc = GetInboxRulesWithBlob(account=account)
         assert svc.outlook_rule_blob_exists is None
+
+        sample_rule = Rule(
+            id="RAW-PIN-1",
+            display_name="Pin Rule",
+            priority=1,
+            is_enabled=True,
+            actions=Actions(mark_as_read=True),
+        )
+        for write_cls in (CreateInboxRule, SetInboxRule, DeleteInboxRule):
+            wsvc = write_cls(account=account)
+            assert callable(wsvc.get)
+            payload = wsvc.get_payload(rule=sample_rule)
+            assert payload is not None
+
+        sfqs = SingleFolderQuerySet(
+            account=account, folder=FolderId(id="RAWID-PIN-FOLDER")
+        )
+        assert list(sfqs.folder_collection.folders) == [
+            FolderId(id="RAWID-PIN-FOLDER")
+        ]
     finally:
         CachingProtocol.clear_cache()
 
