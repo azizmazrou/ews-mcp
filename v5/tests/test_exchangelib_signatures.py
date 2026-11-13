@@ -21,7 +21,7 @@ together with the pins, never the pins alone.
 import inspect
 
 import pytest
-from exchangelib import Account, CalendarItem, Message, OofSettings
+from exchangelib import Account, CalendarItem, EWSDateTime, Message, OofSettings
 from exchangelib.fields import IntegerField
 from exchangelib.folders import Folder
 from exchangelib.folders.collections import FolderCollection
@@ -30,6 +30,7 @@ from exchangelib.properties import ConversationId
 from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
 from exchangelib.version import EXCHANGE_2016, Version
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 
 def _params(func):
@@ -175,4 +176,25 @@ def test_flag_status_extended_property_pin():
     ensure_registered()
     ensure_registered()
     assert [f.name for f in Message.FIELDS].count("flag_status") == 1
+
+
+def test_streamable_http_session_manager_accepts_max_request_body_size():
+    """http.serve_http passes max_request_body_size (added in mcp 1.30); pin
+    against the real class so an older mcp fails here instead of at runtime."""
+    sig = inspect.signature(StreamableHTTPSessionManager.__init__)
+    for param in ("app", "json_response", "stateless", "max_request_body_size"):
+        assert param in sig.parameters, param
+    sig.bind(
+        None,
+        app=None,
+        json_response=False,
+        stateless=True,
+        max_request_body_size=1024,
+    )
+
+
+def test_ewsdatetime_from_datetime_pin():
+    """writes._set_oof converts stdlib ZoneInfo datetimes via EWSDateTime.from_datetime."""
+    assert callable(getattr(EWSDateTime, "from_datetime", None))
+    assert _params(EWSDateTime.from_datetime) == ["d"]
 

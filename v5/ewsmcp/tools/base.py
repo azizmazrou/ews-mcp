@@ -104,14 +104,45 @@ def _split(raw: str) -> List[str]:
     return [p.strip().lower() for p in (raw or "").split(",") if p.strip()]
 
 
-def _recipients(kwargs: Dict[str, Any]) -> List[str]:
+def _normalise_recipient(raw: str) -> Optional[str]:
+    s = raw.strip()
+    if "<" in s or ">" in s:
+        if s.count("<") != 1 or s.count(">") != 1 or not s.endswith(">"):
+            return None
+        s = s[s.index("<") + 1 : -1].strip()
+    s = s.lower()
+    if not s or any(ch.isspace() for ch in s) or "<" in s or ">" in s:
+        return None
+    parts = s.split("@")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return s
+
+
+def _recipients(kwargs: Dict[str, Any], *, strict: bool = False) -> List[str]:
     out: List[str] = []
     for key in RECIPIENT_KEYS:
         value = kwargs.get(key)
         if isinstance(value, str):
             value = [value]
         if isinstance(value, list):
-            out.extend(r.lower() for r in value if isinstance(r, str) and "@" in r)
+            for item in value:
+                if not isinstance(item, str):
+                    if strict:
+                        raise ToolError(
+                            "validation",
+                            f"invalid recipient in {key!r}: expected string",
+                        )
+                    continue
+                addr = _normalise_recipient(item)
+                if addr is None:
+                    if strict:
+                        raise ToolError(
+                            "validation",
+                            f"invalid recipient in {key!r}: {item!r}",
+                        )
+                    continue
+                out.append(addr)
     return out
 
 
@@ -120,7 +151,7 @@ def _recipient_guard(ctx: Context, kwargs: Dict[str, Any]) -> None:
     allow = _split(ctx.settings.ews_recipient_allowlist)
     if not deny and not allow:
         return
-    for r in _recipients(kwargs):
+    for r in _recipients(kwargs, strict=True):
         if any(fnmatch.fnmatch(r, p) for p in deny):
             raise ToolError("recipient_blocked",
                             f"recipient '{r}' is denylisted (EWS_RECIPIENT_DENYLIST)")
@@ -183,7 +214,7 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             sorted(content.get("cc") or []),
             sorted(content.get("bcc") or []),
             body_text if isinstance(body_text, str) else "",
-            content.get("attachments") or [],
+            content.get("_attachments") or content.get("attachments") or [],
         )
         target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
                         or kwargs.get("id") or "-")
@@ -196,7 +227,10 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             chash=chash, ttl_seconds=ctx.settings.confirm_ttl_seconds, secret=secret,
         )
         if content is not None:
-            preview = {k: v for k, v in content.items() if k != "body_text"}
+            preview = {
+                k: v for k, v in content.items()
+                if k != "body_text" and not k.startswith("_")
+            }
             body_text = content.get("body_text")
             if isinstance(body_text, str):
                 preview["body_snippet"] = body_text[:1000]
@@ -249,7 +283,7 @@ async def mint_token(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any]) -> st
             sorted(content.get("cc") or []),
             sorted(content.get("bcc") or []),
             body_text if isinstance(body_text, str) else "",
-            content.get("attachments") or [],
+            content.get("_attachments") or content.get("attachments") or [],
         )
         target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
                         or kwargs.get("id") or "-")

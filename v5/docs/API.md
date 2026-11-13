@@ -30,7 +30,7 @@ the registry is the single source of truth for what exists.
 | `waiting_on` | read | read | Deterministic mirror query: messages YOU sent whose thread has received no inbound reply after `days` days — the 'what am I waiting on?' list. |
 | `create_draft` | write | draft | Author mail as a DRAFT (never sends). |
 | `update_draft` | write | draft | Update fields of an existing draft (to/cc/bcc/subject/body). |
-| `add_draft_attachment` | write | draft | Add one file to an existing draft. |
+| `add_draft_attachment` | write | draft | Add one file to an existing draft (via content_base64 or path inside EWS_ATTACHMENT_DIR). |
 | `delete_draft` | write | draft | Move a draft to trash (recoverable). |
 | `update_messages` | write | draft | Bulk-update up to 50 messages: set_read, categories_add/categories_remove, and/or flag_complete. |
 | `move_messages` | write | draft | Move up to 50 messages to a folder (id, f:alias or path). |
@@ -269,13 +269,14 @@ Update fields of an existing draft (to/cc/bcc/subject/body). Only the supplied f
 
 #### `add_draft_attachment` — write (min tier: draft)
 
-Add one file to an existing draft. Refuses items that are not in f:drafts. Returns all attachments of the draft.
+Add one file to an existing draft (via content_base64 or path inside EWS_ATTACHMENT_DIR). Refuses items that are not in f:drafts. Returns all attachments of the draft.
 
 | parameter | type | required | description |
 |---|---|---|---|
 | `draft_id` | string | yes |  |
-| `filename` | string | yes |  |
-| `content_base64` | string | yes | The file content, base64-encoded. |
+| `filename` | string | no | File name; required with content_base64, defaults to the file's own name when path is given. |
+| `content_base64` | string | no | The file content, base64-encoded (mutually exclusive with path). |
+| `path` | string | no | Relative file path inside EWS_ATTACHMENT_DIR (mutually exclusive with content_base64). |
 | `content_type` | string | no | MIME type; derived from the file name if omitted. |
 
 #### `delete_draft` — write (min tier: draft)

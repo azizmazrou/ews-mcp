@@ -160,6 +160,8 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 | `SEND_ENABLED` | `false` | Global send kill-switch (blocks every send-class tool) |
 | `EWS_RECIPIENT_ALLOWLIST` / `EWS_RECIPIENT_DENYLIST` | — | Glob lists enforced on argument-borne AND draft-resolved recipients |
 | `EWS_MAX_SENDS_PER_HOUR` | `10` | Send rate cap |
+| `EWS_ATTACHMENT_DIR` | `""` (off) | Single directory from which `create_draft` / `add_draft_attachment` may read relative `path` attachments |
+| `EWS_MAX_ATTACHMENT_MB` | `25` | Per-call attachment ceiling in MiB (`1`–`50`); HTTP request body limit is derived from this at start-up |
 | `SEND_CONFIRM_SECRET` | per-process | HMAC secret for confirm tokens (set it to survive restarts) |
 | `CONFIRM_TTL_SECONDS` | `600` | Confirm token lifetime |
 | `MCP_TRANSPORT` / `MCP_HOST` / `MCP_PORT` / `MCP_API_KEY` | stdio | HTTP serving + bearer auth (all unused in stdio mode) |

@@ -646,3 +646,32 @@ def test_check_availability_treats_naive_busy_events_as_requested_zone(
         "end": f"2026-06-15T10:30{expected_offset}",
     }]
 
+
+@pytest.mark.parametrize("kind, fail_mode", [
+    ("Occurrence", "refresh"),
+    ("Exception", "refresh"),
+    ("Occurrence", "master_call"),
+])
+def test_get_event_returns_occurrence_when_master_cannot_be_loaded(
+    tmp_path, kind, fail_mode,
+):
+    ev = _series_event(kind)
+    ev.is_recurring = True
+    ev.recurrence = None
+    if fail_mode == "refresh":
+        ev.recurring_master.return_value.refresh.side_effect = RuntimeError(
+            "ErrorItemNotFound: recurring master not in attendee mailbox"
+        )
+    else:
+        ev.recurring_master.side_effect = RuntimeError("ErrorAccessDenied")
+    account = MagicMock()
+    account.fetch.return_value = iter([ev])
+    ctx = _ctx(tmp_path, account)
+    alias = ctx.aliaser.alias_for("RAW-OCC", "e")
+    res = _run(ctx, "get_event", {"id": alias})
+    assert res["ok"] is True
+    event = res["event"]
+    assert event["recurring"] is True
+    assert event["type"] == kind
+    assert "recurrence" not in event
+

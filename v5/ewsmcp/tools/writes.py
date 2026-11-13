@@ -40,13 +40,24 @@ import binascii
 import html as _html
 import logging
 import mimetypes
+import os
+import stat
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from exchangelib import CalendarItem, FileAttachment, HTMLBody, Message, OofSettings
+from exchangelib import (
+    UTC,
+    CalendarItem,
+    EWSDateTime,
+    FileAttachment,
+    HTMLBody,
+    Message,
+    OofSettings,
+)
 from exchangelib.items import (
     SEND_TO_ALL_AND_SAVE_COPY,
     SEND_TO_CHANGED_AND_SAVE_COPY,
@@ -60,6 +71,7 @@ from exchangelib.recurrence import (
 )
 
 from ..dates import parse_when
+from ..dto import fmt_dt
 from ..errors import ToolError, map_exception
 from ..flag_property import ensure_registered as ensure_flag_status_registered
 from .base import Context, ToolSpec
@@ -70,7 +82,10 @@ logger = logging.getLogger(__name__)
 
 MAX_BULK_IDS = 50
 MAX_ATTACHMENTS = 20
-MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024  # per call; http.py sizes its body limit from this
+
+
+def max_attachment_bytes(settings: Any) -> int:
+    return int(settings.ews_max_attachment_mb) * 1024 * 1024
 
 
 def _write_through(ctx: Context, method: str, *args: Any) -> None:
@@ -149,6 +164,83 @@ def _email_list(recipients: Any) -> List[str]:
     return out
 
 
+def _addr_key(entry: Any) -> str:
+    raw = getattr(entry, "email_address", None)
+    text = (raw if isinstance(raw, str) else str(entry)).strip()
+    if "<" in text and text.endswith(">"):
+        text = text[text.find("<") + 1 : -1].strip()
+    return text.lower()
+
+
+def _merge_reply_all_recipients(
+    reply: Any,
+    own_email: str,
+    to: Optional[List[str]],
+    cc: Optional[List[str]],
+    bcc: Optional[List[str]],
+) -> tuple[List[Any], List[Any]]:
+    own = (own_email or "").strip().lower()
+    orig_to = list(getattr(reply, "to_recipients", None) or [])
+    orig_cc = list(getattr(reply, "cc_recipients", None) or [])
+    orig_bcc = list(getattr(reply, "bcc_recipients", None) or [])
+
+    final_to: List[Any] = []
+    seen_to: set[str] = set()
+    for entry in orig_to:
+        key = _addr_key(entry)
+        if not key or key == own or key in seen_to:
+            continue
+        seen_to.add(key)
+        final_to.append(entry)
+    for entry in to or []:
+        key = _addr_key(entry)
+        if not key or key in seen_to:
+            continue
+        seen_to.add(key)
+        final_to.append(entry)
+    if not final_to:
+        own_entry = next((r for r in orig_to if _addr_key(r) == own), None)
+        fallback = own_entry if own_entry is not None else own_email
+        if fallback:
+            final_to.append(fallback)
+            seen_to.add(_addr_key(fallback))
+
+    final_cc: List[Any] = []
+    seen_cc: set[str] = set()
+    for entry in orig_cc:
+        key = _addr_key(entry)
+        if not key or key == own or key in seen_to or key in seen_cc:
+            continue
+        seen_cc.add(key)
+        final_cc.append(entry)
+    for entry in cc or []:
+        key = _addr_key(entry)
+        if not key or key in seen_to or key in seen_cc:
+            continue
+        seen_cc.add(key)
+        final_cc.append(entry)
+
+    final_bcc: List[Any] = []
+    seen_bcc: set[str] = set()
+    for entry in orig_bcc:
+        key = _addr_key(entry)
+        if not key or key == own or key in seen_to or key in seen_cc or key in seen_bcc:
+            continue
+        seen_bcc.add(key)
+        final_bcc.append(entry)
+    for entry in bcc or []:
+        key = _addr_key(entry)
+        if not key or key in seen_to or key in seen_cc or key in seen_bcc:
+            continue
+        seen_bcc.add(key)
+        final_bcc.append(entry)
+
+    reply.to_recipients = final_to
+    reply.cc_recipients = final_cc or None
+    reply.bcc_recipients = final_bcc or None
+    return final_to, final_cc
+
+
 def _prefixed(prefix: str, original_subject: Any) -> str:
     base = original_subject if isinstance(original_subject, str) else ""
     if base.lower().startswith(prefix.strip().lower()):
@@ -215,33 +307,141 @@ def _draft_preview(to: List[str], cc: List[str], subject: str,
             "body_snippet": (body or "")[:200]}
 
 
-def _decode_attachments(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _clean_filename(raw_name: Any) -> str:
+    return str(raw_name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+
+
+def _read_path_attachment(
+    attachment: Dict[str, Any], settings: Any, max_bytes: int, used_bytes: int
+) -> tuple[str, bytes]:
+    raw_dir = (getattr(settings, "ews_attachment_dir", "") or "").strip()
+    if not raw_dir:
+        raise ToolError(
+            "validation",
+            "attachment path is disabled: set EWS_ATTACHMENT_DIR to enable file paths",
+            hint="Configure EWS_ATTACHMENT_DIR on the server, or pass content_base64.",
+        )
+    raw_path = attachment.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
+        raise ToolError("validation", "attachment path must be a non-empty relative path")
+    win_p = PureWindowsPath(raw_path)
+    posix_p = PurePosixPath(raw_path)
+    if (
+        raw_path.startswith(("/", "\\"))
+        or posix_p.is_absolute()
+        or win_p.is_absolute()
+        or bool(win_p.drive)
+        or bool(win_p.root)
+    ):
+        raise ToolError("validation", "attachment path must be a relative path")
+    parts = [p for p in raw_path.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        raise ToolError(
+            "validation",
+            "attachment path must stay within the attachment directory",
+        )
+    if attachment.get("filename") is not None:
+        name = _clean_filename(attachment.get("filename"))
+    else:
+        name = parts[-1].strip()
+    if not name:
+        raise ToolError("validation", "an attachment needs a filename")
+
+    base_dir = Path(os.path.realpath(Path(raw_dir).expanduser()))
+    if not base_dir.is_dir():
+        raise ToolError("validation", "configured attachment directory is unavailable")
+    candidate = base_dir.joinpath(*parts)
+    real_file = Path(os.path.realpath(candidate))
+    if real_file == base_dir or not real_file.is_relative_to(base_dir):
+        raise ToolError(
+            "validation",
+            "attachment path resolves outside the attachment directory",
+        )
+    try:
+        st = real_file.stat()
+    except FileNotFoundError:
+        raise ToolError("validation", f"attachment {name!r} was not found") from None
+    except OSError:
+        raise ToolError("validation", f"attachment {name!r} cannot be read") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise ToolError("validation", f"attachment {name!r} is not a regular file")
+    if st.st_size == 0:
+        raise ToolError("validation", f"attachment {name!r} is empty")
+    if used_bytes + st.st_size > max_bytes:
+        raise ToolError("validation", f"attachments exceed {max_bytes} bytes per call")
+    try:
+        with real_file.open("rb") as fh:
+            content = fh.read(max_bytes - used_bytes + 1)
+    except OSError:
+        raise ToolError("validation", f"attachment {name!r} cannot be read") from None
+    if not content:
+        raise ToolError("validation", f"attachment {name!r} is empty")
+    return name, content
+
+
+def _decode_attachments(
+    attachments: List[Dict[str, Any]], settings: Any
+) -> List[Dict[str, Any]]:
     """Validate attachments before anything is written, so a bad one cannot
     leave a half-finished draft behind."""
     if len(attachments) > MAX_ATTACHMENTS:
-        raise ToolError("validation",
-                        f"at most {MAX_ATTACHMENTS} attachments per call (got {len(attachments)})")
-    decoded = []
+        raise ToolError(
+            "validation",
+            f"at most {MAX_ATTACHMENTS} attachments per call (got {len(attachments)})",
+        )
+    max_bytes = max_attachment_bytes(settings)
+    decoded: List[Dict[str, Any]] = []
     total = 0
     for attachment in attachments:
-        name = str(attachment.get("filename") or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
-        if not name:
-            raise ToolError("validation", "an attachment needs a filename")
-        try:
-            content = base64.b64decode("".join(str(attachment.get("content_base64") or "").split()),
-                                       validate=True)
-        except (binascii.Error, ValueError):
-            raise ToolError("validation", f"attachment {name!r}: content_base64 is not valid base64")
-        if not content:
-            raise ToolError("validation", f"attachment {name!r} is empty")
+        if not isinstance(attachment, dict):
+            raise ToolError("validation", "each attachment must be an object")
+        has_b64 = attachment.get("content_base64") is not None
+        has_path = attachment.get("path") is not None
+        if has_b64 and has_path:
+            raise ToolError(
+                "validation",
+                "pass either content_base64 or path per attachment, not both",
+            )
+        if not has_b64 and not has_path:
+            raise ToolError(
+                "validation",
+                "each attachment requires content_base64 or path",
+            )
+        if has_path:
+            name, content = _read_path_attachment(attachment, settings, max_bytes, total)
+        else:
+            name = _clean_filename(attachment.get("filename"))
+            if not name:
+                raise ToolError("validation", "an attachment needs a filename")
+            raw_b64 = attachment.get("content_base64")
+            if not isinstance(raw_b64, str):
+                raise ToolError(
+                    "validation",
+                    f"attachment {name!r}: content_base64 must be a base64 string",
+                )
+            try:
+                content = base64.b64decode("".join(raw_b64.split()), validate=True)
+            except (binascii.Error, ValueError):
+                raise ToolError(
+                    "validation",
+                    f"attachment {name!r}: content_base64 is not valid base64",
+                ) from None
+            if not content:
+                raise ToolError("validation", f"attachment {name!r} is empty")
         total += len(content)
-        if total > MAX_ATTACHMENT_BYTES:
-            raise ToolError("validation",
-                            f"attachments exceed {MAX_ATTACHMENT_BYTES} bytes per call")
+        if total > max_bytes:
+            raise ToolError(
+                "validation",
+                f"attachments exceed {max_bytes} bytes per call",
+            )
         decoded.append({
-            "name": name, "content": content,
-            "content_type": (attachment.get("content_type")
-                             or mimetypes.guess_type(name)[0] or "application/octet-stream"),
+            "name": name,
+            "content": content,
+            "content_type": (
+                attachment.get("content_type")
+                or mimetypes.guess_type(name)[0]
+                or "application/octet-stream"
+            ),
         })
     return decoded
 
@@ -290,7 +490,7 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
     if importance not in (None, "normal", "high"):
         raise ToolError("validation", "importance must be 'normal' or 'high'")
     html_body = _wrap_html(body)
-    decoded = _decode_attachments(attachments or [])
+    decoded = _decode_attachments(attachments or [], ctx.settings)
 
     def work(account: Any) -> Any:
         if mode == "new":
@@ -309,6 +509,8 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
                     subject or "", attached)
         original = _fetch_one(account, reply_to)
         extra: Dict[str, Any] = {}
+        reply_all_to: Optional[List[Any]] = None
+        reply_all_cc: Optional[List[Any]] = None
         if mode == "reply":
             final_subject = subject or _prefixed("Re: ", getattr(original, "subject", None))
             if to:
@@ -321,6 +523,9 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
         elif mode == "reply_all":
             final_subject = subject or _prefixed("Re: ", getattr(original, "subject", None))
             reply = original.create_reply_all(final_subject, html_body)
+            reply_all_to, reply_all_cc = _merge_reply_all_recipients(
+                reply, ctx.settings.ews_email, to, cc, bcc
+            )
         else:  # forward — create_forward REQUIRES to_recipients (5.0.3)
             final_subject = subject or _prefixed("Fwd: ", getattr(original, "subject", None))
             reply = original.create_forward(
@@ -330,8 +535,12 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
             )
         # Exchange quotes the original server-side, keeping threading headers.
         saved = reply.save(account.drafts)
-        prev_to = _email_list(getattr(reply, "to_recipients", None)) or list(to or [])
-        prev_cc = _email_list(getattr(reply, "cc_recipients", None)) or list(cc or [])
+        if reply_all_to is not None and reply_all_cc is not None:
+            prev_to = _email_list(reply_all_to)
+            prev_cc = _email_list(reply_all_cc)
+        else:
+            prev_to = _email_list(getattr(reply, "to_recipients", None)) or list(to or [])
+            prev_cc = _email_list(getattr(reply, "cc_recipients", None)) or list(cc or [])
         changekey = getattr(saved, "changekey", None)
         attached: Dict[str, Any] = {}
         if decoded:
@@ -390,11 +599,23 @@ async def _update_draft(ctx: Context, *, draft_id: str,
             "preview": preview}
 
 
-async def _add_draft_attachment(ctx: Context, *, draft_id: str, filename: str,
-                                content_base64: str,
-                                content_type: Optional[str] = None) -> Dict[str, Any]:
-    attachment = _decode_attachments([{"filename": filename, "content_base64": content_base64,
-                                       "content_type": content_type}])[0]
+async def _add_draft_attachment(
+    ctx: Context,
+    *,
+    draft_id: str,
+    filename: Optional[str] = None,
+    content_base64: Optional[str] = None,
+    path: Optional[str] = None,
+    content_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    raw_item: Dict[str, Any] = {"content_type": content_type}
+    if filename is not None:
+        raw_item["filename"] = filename
+    if content_base64 is not None:
+        raw_item["content_base64"] = content_base64
+    if path is not None:
+        raw_item["path"] = path
+    attachment = _decode_attachments([raw_item], ctx.settings)[0]
 
     def work(account: Any) -> Any:
         msg = _fetch_one(account, draft_id)
@@ -696,9 +917,16 @@ async def _update_event(ctx: Context, *, event_id: str,
                 raise ToolError("validation", "this event is not part of a series",
                                 hint="Omit scope to update a single event.")
             # A master's start and end are those of its first occurrence.
-            first_day = item.start.astimezone(ZoneInfo(ctx.settings.ews_tz)).date()
+            if isinstance(item.start, datetime):
+                first_day: Optional[date] = item.start.astimezone(
+                    ZoneInfo(ctx.settings.ews_tz)
+                ).date()
+            elif isinstance(item.start, date):
+                first_day = date(item.start.year, item.start.month, item.start.day)
+            else:
+                first_day = None
             for value, field in ((start_dt, "start"), (end_dt, "end")):
-                if value is not None and value.date() != first_day:
+                if first_day is not None and value is not None and value.date() != first_day:
                     raise ToolError(
                         "validation",
                         f"{field} must be on the series' first date, {first_day.isoformat()}, "
@@ -735,10 +963,37 @@ async def _update_event(ctx: Context, *, event_id: str,
 # --- SEND class (leaves the mailbox; tier full, two-phase, kill-switch) ------
 
 
+def _attachment_id(att: Any) -> Optional[str]:
+    raw = getattr(att, "attachment_id", None)
+    if isinstance(raw, str) and raw:
+        return raw
+    nested = getattr(raw, "id", None) if raw is not None else None
+    if isinstance(nested, str) and nested:
+        return nested
+    direct = getattr(att, "id", None)
+    if isinstance(direct, str) and direct:
+        return direct
+    return None
+
+
 def _attachment_list(msg: Any) -> List[Dict[str, Any]]:
     listed = [{"name": getattr(a, "name", None), "size": getattr(a, "size", None)}
               for a in (getattr(msg, "attachments", None) or [])]
     return sorted(listed, key=lambda a: str(a["name"]))
+
+
+def _bound_attachments(msg: Any) -> List[Dict[str, Any]]:
+    bound: List[Dict[str, Any]] = []
+    for a in getattr(msg, "attachments", None) or []:
+        entry: Dict[str, Any] = {
+            "name": getattr(a, "name", None),
+            "size": getattr(a, "size", None),
+        }
+        att_id = _attachment_id(a)
+        if att_id is not None:
+            entry["id"] = att_id
+        bound.append(entry)
+    return sorted(bound, key=lambda a: (str(a["name"]), str(a.get("id") or "")))
 
 
 def _draft_content(msg: Any) -> Dict[str, Any]:
@@ -760,6 +1015,7 @@ def _draft_content(msg: Any) -> Dict[str, Any]:
         "body_text": body_text,
         "attachment_count": len(getattr(msg, "attachments", None) or []),
         "attachments": _attachment_list(msg),
+        "_attachments": _bound_attachments(msg),
     }
 
 
@@ -864,10 +1120,23 @@ async def _set_oof(ctx: Context, *, state: str,
                         f"state must be one of {sorted(_OOF_STATE)}, got {state!r}")
     if state != "disabled" and not internal_reply:
         raise ToolError("validation", f"internal_reply is required when state={state!r}")
-    if state == "scheduled" and not (start and end):
-        raise ToolError("validation", "start and end are required when state='scheduled'")
+    if state == "scheduled":
+        if not start or not str(start).strip():
+            raise ToolError("validation", "'start' is required when state='scheduled'")
+        if not end or not str(end).strip():
+            raise ToolError("validation", "'end' is required when state='scheduled'")
     start_dt = parse_when(start, "start", ctx.settings.ews_tz) if start else None
     end_dt = parse_when(end, "end", ctx.settings.ews_tz) if end else None
+    if start_dt is not None and end_dt is not None and start_dt >= end_dt:
+        raise ToolError("validation", "'start' must be before 'end'")
+    if state == "scheduled" and end_dt is not None and end_dt <= datetime.now(timezone.utc):
+        raise ToolError("validation", "'end' must be in the future")
+    # from_datetime() accepts only a plain datetime, and astimezone() onto an
+    # EWSTimeZone already returns an EWSDateTime: convert first, then shift.
+    oof_start = EWSDateTime.from_datetime(start_dt).astimezone(UTC) if start_dt else None
+    oof_end = EWSDateTime.from_datetime(end_dt).astimezone(UTC) if end_dt else None
+    start_iso = fmt_dt(start_dt, ctx.settings.ews_tz) if state == "scheduled" else None
+    end_iso = fmt_dt(end_dt, ctx.settings.ews_tz) if state == "scheduled" else None
 
     def work(account: Any) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {"state": target_state}
@@ -876,12 +1145,16 @@ async def _set_oof(ctx: Context, *, state: str,
             kwargs["internal_reply"] = internal_reply
             # OofSettings.clean requires BOTH replies when state != disabled.
             kwargs["external_reply"] = external_reply or internal_reply
-        if start_dt is not None:
-            kwargs["start"] = start_dt
-        if end_dt is not None:
-            kwargs["end"] = end_dt
+        if oof_start is not None:
+            kwargs["start"] = oof_start
+        if oof_end is not None:
+            kwargs["end"] = oof_end
         account.oof_settings = OofSettings(**kwargs)
-        return {"state": state}
+        result: Dict[str, Any] = {"state": state}
+        if state == "scheduled":
+            result["start"] = start_iso
+            result["end"] = end_iso
+        return result
 
     return await ctx.gateway.call(work)
 
@@ -969,13 +1242,25 @@ _RECURRENCE = {
 _IDS = {"type": "array", "items": {"type": "string"},
         "minItems": 1, "maxItems": MAX_BULK_IDS}
 _ATTACHMENT_FIELDS = {
-    "filename": _STR,
-    "content_base64": {"type": "string", "description": "The file content, base64-encoded."},
+    "filename": {
+        "type": "string",
+        "description": "File name; required with content_base64, defaults to the "
+                       "file's own name when path is given.",
+    },
+    "content_base64": {
+        "type": "string",
+        "description": "The file content, base64-encoded (mutually exclusive with path).",
+    },
+    "path": {
+        "type": "string",
+        "description": "Relative file path inside EWS_ATTACHMENT_DIR "
+                       "(mutually exclusive with content_base64).",
+    },
     "content_type": {"type": "string",
                      "description": "MIME type; derived from the file name if omitted."},
 }
 _ATTACHMENTS = {"type": "array", "maxItems": MAX_ATTACHMENTS,
-                "items": _obj(_ATTACHMENT_FIELDS, required=["filename", "content_base64"])}
+                "items": _obj(_ATTACHMENT_FIELDS)}
 
 
 # --- the pack -----------------------------------------------------------------
@@ -1017,11 +1302,12 @@ TOOLS: List[ToolSpec] = [
     ),
     ToolSpec(
         name="add_draft_attachment",
-        description=("Add one file to an existing draft. Refuses items that are "
+        description=("Add one file to an existing draft (via content_base64 or "
+                     "path inside EWS_ATTACHMENT_DIR). Refuses items that are "
                      "not in f:drafts. Returns all attachments of the draft."),
         side_effect_class="write",
         input_schema=_obj({"draft_id": _STR, **_ATTACHMENT_FIELDS},
-                          required=["draft_id", "filename", "content_base64"]),
+                          required=["draft_id"]),
         handler=_add_draft_attachment,
         confirm=False,
     ),

@@ -12,13 +12,16 @@ from . import __version__
 from .errors import HTTP_BY_CODE
 from .server import build_context, build_mcp_server, start_connection_manager
 from .tools.base import dispatch
-from .tools.writes import MAX_ATTACHMENT_BYTES
+from .tools.writes import max_attachment_bytes
 
 logger = logging.getLogger(__name__)
 
 PUBLIC_PATHS = {"/health", "/livez", "/readyz", "/version"}
-# Tool arguments carry attachments as base64 (4/3 of their size).
-MAX_BODY_BYTES = MAX_ATTACHMENT_BYTES * 4 // 3 + 1_048_576
+
+
+def max_body_bytes(settings: Any) -> int:
+    """Tool arguments carry attachments as base64 (4/3 of their size)."""
+    return max_attachment_bytes(settings) * 4 // 3 + 1_048_576
 
 
 def _validator_for(spec) -> Any:
@@ -114,7 +117,7 @@ def _openapi(ctx) -> Dict[str, Any]:
             "paths": paths}
 
 
-async def _read_json_body(receive, send) -> Optional[Any]:
+async def _read_json_body(receive, send, max_bytes: int) -> Optional[Any]:
     """Drain the request body (bounded) and parse JSON.
 
     Returns the parsed value, or None after having already sent an error
@@ -130,10 +133,10 @@ async def _read_json_body(receive, send) -> Optional[Any]:
         if message["type"] == "http.request":
             body = message.get("body", b"")
             size += len(body)
-            if size > MAX_BODY_BYTES:
+            if size > max_bytes:
                 await _send_json(send, 413, {"ok": False, "error": {
                     "code": "validation",
-                    "message": f"request body exceeds {MAX_BODY_BYTES} bytes"}})
+                    "message": f"request body exceeds {max_bytes} bytes"}})
                 return None
             chunks.append(body)
             if not message.get("more_body"):
@@ -149,6 +152,7 @@ async def _read_json_body(receive, send) -> Optional[Any]:
 def build_app(ctx, settings, streamable: Optional[Any] = None):
     """ASGI app closure — separated from serve_http so tests can drive it."""
     api_key = settings.mcp_api_key or ""
+    body_limit = max_body_bytes(settings)
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -220,7 +224,7 @@ def build_app(ctx, settings, streamable: Optional[Any] = None):
             if spec is None:
                 return await _send_json(send, 404, {"ok": False, "error": {
                     "code": "validation", "message": f"Unknown tool: {name}"}})
-            arguments = await _read_json_body(receive, send)
+            arguments = await _read_json_body(receive, send, body_limit)
             if arguments is None:
                 return
             if not isinstance(arguments, dict):
@@ -250,9 +254,10 @@ async def serve_http(settings) -> None:
 
     ctx = build_context(settings)
     mcp_server = build_mcp_server(ctx)
+    body_limit = max_body_bytes(settings)
     streamable = StreamableHTTPSessionManager(app=mcp_server, json_response=False,
                                               stateless=True,
-                                              max_request_body_size=MAX_BODY_BYTES)
+                                              max_request_body_size=body_limit)
     app = build_app(ctx, settings, streamable)
     config = uvicorn.Config(app, host=settings.mcp_host, port=settings.mcp_port,
                             log_level=settings.log_level.lower(), http="h11")

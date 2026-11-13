@@ -6,12 +6,17 @@ call, and reset() must evict exchangelib's protocol cache so a wedged
 session actually renegotiates auth.
 """
 
+from types import SimpleNamespace as NS
 from unittest.mock import MagicMock
+
+import pytest
 
 from conftest import make_settings
 
+from ewsmcp.errors import ToolError
 from ewsmcp.gateway import client as client_mod
 from ewsmcp.gateway.client import EWSGateway
+from ewsmcp.ids import get_aliaser
 
 
 def _gateway_with_mock_account():
@@ -22,8 +27,6 @@ def _gateway_with_mock_account():
 
 
 def test_mail_folders_skips_other_classes_and_excluded_trees(monkeypatch):
-    from types import SimpleNamespace as NS
-
     gw, account = _gateway_with_mock_account()
     root, top = NS(id="root", name="root"), NS(id="top", name="Top")
 
@@ -87,3 +90,56 @@ def test_reset_survives_close_and_clear_failures(monkeypatch):
     account.protocol.close.side_effect = OSError("socket gone")
     gw.reset()  # must not raise
     assert gw._account is None
+
+
+def test_resolve_folder_distinguished_names_and_unknown_not_found(tmp_path, monkeypatch):
+    gw, account = _gateway_with_mock_account()
+    account.sent = NS(id="F-SENT", name="Sent Items")
+    account.trash = NS(id="F-TRASH", name="Deleted Items")
+    account.junk = NS(id="F-JUNK", name="Junk Email")
+    monkeypatch.setattr(gw, "_folder_map", lambda _a: {})
+    aliaser = get_aliaser(str(tmp_path / "aliases"))
+
+    for ref, expected in (
+        ("sentitems", account.sent),
+        ("SentItems", account.sent),
+        ("f:sentitems", account.sent),
+        ("deleteditems", account.trash),
+        ("DeletedItems", account.trash),
+        ("f:deleteditems", account.trash),
+        ("junkemail", account.junk),
+        ("JunkEmail", account.junk),
+        ("f:junkemail", account.junk),
+    ):
+        assert gw.resolve_folder(account, ref, aliaser) is expected
+
+    for unknown in ("nonexistent_folder", "msgfolderroot"):
+        with pytest.raises(ToolError) as excinfo:
+            gw.resolve_folder(account, unknown, aliaser)
+        assert excinfo.value.code == "not_found"
+        assert "list_folders" in (excinfo.value.hint or "")
+
+
+def test_mail_folders_handles_missing_well_known_folders_and_none_ids(monkeypatch):
+    gw = EWSGateway(make_settings())
+    root = NS(id=None, name="root")
+    top = NS(id=None, name="Top of Information Store")
+    inbox = NS(id="in", name="Inbox", folder_class="IPF.Note")
+    inbox.parts = [root, top, inbox]
+    drafts = NS(id="dr", name="Drafts", folder_class="IPF.Note")
+    drafts.parts = [root, top, drafts]
+
+    class _PartialAccount:
+        trash = None
+        outbox = NS(id=None)
+
+        def __init__(self):
+            self.drafts = drafts
+
+        @property
+        def junk(self):
+            raise RuntimeError("ErrorFolderNotFound")
+
+    account = _PartialAccount()
+    monkeypatch.setattr(gw, "_folder_map", lambda _a: {"in": inbox, "dr": drafts})
+    assert [(p, f.id) for p, f in gw.mail_folders(account)] == [("Inbox", "in")]

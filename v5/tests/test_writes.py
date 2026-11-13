@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -19,7 +20,8 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from exchangelib import OofSettings
+from exchangelib import UTC, EWSDate, EWSDateTime, FileAttachment, OofSettings
+from exchangelib.attachments import AttachmentId
 from exchangelib.items import SEND_TO_ALL_AND_SAVE_COPY, SEND_TO_NONE
 from exchangelib.recurrence import (
     AbsoluteMonthlyPattern,
@@ -29,6 +31,8 @@ from exchangelib.recurrence import (
     NumberedPattern,
     WeeklyPattern,
 )
+from exchangelib.util import xml_to_str
+from exchangelib.version import EXCHANGE_2016, Version
 
 from conftest import make_settings
 from ewsmcp.audit import AuditLog
@@ -270,15 +274,17 @@ def test_create_draft_rejects_bad_attachment_before_saving(tmp_path, monkeypatch
 
 
 def test_create_draft_rejects_too_much_data(tmp_path, monkeypatch):
-    ctx = make_ctx(tmp_path, make_account())
+    ctx = make_ctx(tmp_path, make_account(), ews_max_attachment_mb=1)
     monkeypatch.setattr(writes, "Message", FakeDraftMessage)
-    monkeypatch.setattr(writes, "MAX_ATTACHMENT_BYTES", 3)
+    FakeDraftMessage.last = None
+    chunk = b"x" * (600 * 1024)
     res = call(ctx, "create_draft", {
         "to": ["a@x.com"], "body": "Hi",
-        "attachments": [{"filename": "a", "content_base64": _b64(b"ab")},
-                        {"filename": "b", "content_base64": _b64(b"cd")}],
+        "attachments": [{"filename": "a.bin", "content_base64": _b64(chunk)},
+                        {"filename": "b.bin", "content_base64": _b64(chunk)}],
     })
     assert res["ok"] is False and "exceed" in res["error"]["message"]
+    assert FakeDraftMessage.last is None
 
 
 def test_create_draft_reply_attaches_to_the_fetched_draft(tmp_path):
@@ -981,3 +987,371 @@ def test_set_oof_phase_one_preview_then_plain_string_replies(tmp_path):
     assert oof.state == OofSettings.ENABLED
     assert oof.internal_reply == "I am away"  # plain str — no OofReply wrapper
     assert oof.external_reply == "I am away"  # defaulted; clean() needs both
+
+
+# --- write-side fixes: reply-all, scheduled OOF, path attachments, series, confirm ---
+
+
+def test_create_draft_reply_all_removes_own_dedupes_and_adds_caller_recipients(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)  # ews_email="exec@corp.example"
+    original = MagicMock()
+    original.subject = "Quarterly plan"
+    reply_item = MagicMock()
+    reply_item.to_recipients = [
+        SimpleNamespace(email_address="EXEC@corp.example"),
+        SimpleNamespace(email_address="sender@corp.example"),
+        SimpleNamespace(email_address="peer@corp.example"),
+    ]
+    reply_item.cc_recipients = [
+        SimpleNamespace(email_address="Exec@Corp.Example"),
+        SimpleNamespace(email_address="PEER@corp.example"),
+        SimpleNamespace(email_address="observer@corp.example"),
+    ]
+    reply_item.bcc_recipients = None
+    reply_item.save.return_value = SimpleNamespace(id="RAW-RA-1", changekey="CK-RA")
+    original.create_reply_all.return_value = reply_item
+    account._by_id["RAW-ORIG-RA"] = original
+    alias = ctx.aliaser.alias_for("RAW-ORIG-RA", "m")
+
+    res = call(ctx, "create_draft", {
+        "mode": "reply_all",
+        "reply_to": alias,
+        "body": "Noted.",
+        "to": ["Sender@corp.example", "added_to@corp.example"],
+        "cc": ["added_to@corp.example", "OBSERVER@corp.example", "added_cc@corp.example"],
+        "bcc": ["added_cc@corp.example", "audit@corp.example", "AUDIT@corp.example"],
+    })
+    assert res["ok"] is True
+    assert writes._email_list(reply_item.to_recipients) == [
+        "sender@corp.example", "peer@corp.example", "added_to@corp.example",
+    ]
+    assert writes._email_list(reply_item.cc_recipients) == [
+        "observer@corp.example", "added_cc@corp.example",
+    ]
+    assert writes._email_list(reply_item.bcc_recipients) == ["audit@corp.example"]
+    assert res["preview"]["to"] == [
+        "sender@corp.example", "peer@corp.example", "added_to@corp.example",
+    ]
+    assert res["preview"]["cc"] == [
+        "observer@corp.example", "added_cc@corp.example",
+    ]
+
+
+def test_create_draft_reply_all_note_to_self_never_leaves_to_empty(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    original = MagicMock()
+    original.subject = "Self reminder"
+    reply_item = MagicMock()
+    reply_item.to_recipients = [
+        SimpleNamespace(email_address="EXEC@corp.example"),
+        SimpleNamespace(email_address="exec@corp.example"),
+    ]
+    reply_item.cc_recipients = [SimpleNamespace(email_address="exec@corp.example")]
+    reply_item.bcc_recipients = None
+    reply_item.save.return_value = SimpleNamespace(id="RAW-RA-SELF", changekey="CK-S")
+    original.create_reply_all.return_value = reply_item
+    account._by_id["RAW-SELF"] = original
+    alias = ctx.aliaser.alias_for("RAW-SELF", "m")
+
+    res = call(ctx, "create_draft", {
+        "mode": "reply_all", "reply_to": alias, "body": "Follow up.",
+    })
+    assert res["ok"] is True
+    assert writes._email_list(reply_item.to_recipients) == ["EXEC@corp.example"]
+    assert reply_item.cc_recipients is None
+    assert res["preview"]["to"] == ["EXEC@corp.example"]
+    assert res["preview"]["cc"] == []
+
+
+def test_set_oof_scheduled_serialises_utc_window_and_returns_configured_zone(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    kwargs = {
+        "state": "scheduled",
+        "internal_reply": "Out of office",
+        "start": "2099-05-01T12:00",
+        "end": "2099-05-02T12:00",
+    }
+    p1 = call(ctx, "set_oof", kwargs)
+    assert p1["requires_confirmation"] is True
+    assert not hasattr(account, "oof_settings")
+
+    p2 = call(ctx, "set_oof", {**kwargs, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is True
+    assert p2["state"] == "scheduled"
+    assert p2["start"] == "2099-05-01T12:00+03:00"
+    assert p2["end"] == "2099-05-02T12:00+03:00"
+
+    oof = account.oof_settings
+    assert isinstance(oof, OofSettings)
+    assert isinstance(oof.start, EWSDateTime)
+    assert isinstance(oof.end, EWSDateTime)
+    assert oof.start.tzinfo == UTC
+    assert oof.end.tzinfo == UTC
+    xml = xml_to_str(oof.to_xml(version=Version(build=EXCHANGE_2016)))
+    assert "2099-05-01T09:00:00Z" in xml
+    assert "2099-05-02T09:00:00Z" in xml
+    assert "+03:00" not in xml
+
+
+@pytest.mark.parametrize("bad_kwargs, expected_field", [
+    ({"state": "scheduled", "internal_reply": "Away",
+      "end": "2099-05-02T12:00"}, "start"),
+    ({"state": "scheduled", "internal_reply": "Away",
+      "start": "2099-05-01T12:00"}, "end"),
+    ({"state": "scheduled", "internal_reply": "Away",
+      "start": "2099-05-03T12:00", "end": "2099-05-02T12:00"}, "start"),
+    ({"state": "scheduled", "internal_reply": "Away",
+      "start": "2020-01-01T09:00", "end": "2020-01-02T09:00"}, "end"),
+])
+def test_set_oof_scheduled_validation_fires_with_no_exchange_call(
+    tmp_path, bad_kwargs, expected_field,
+):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    calls = []
+    orig_call = ctx.gateway.call
+
+    async def counting_call(fn):
+        calls.append(True)
+        return await orig_call(fn)
+
+    ctx.gateway.call = counting_call
+    p1 = call(ctx, "set_oof", bad_kwargs)
+    p2 = call(ctx, "set_oof", {**bad_kwargs, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is False
+    assert p2["error"]["code"] == "validation"
+    assert expected_field in p2["error"]["message"]
+    assert calls == []
+    assert not hasattr(account, "oof_settings")
+
+
+def test_path_attachments_off_by_default(tmp_path, monkeypatch):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    FakeDraftMessage.last = None
+    res = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "body": "Hi",
+        "attachments": [{"path": "report.pdf"}],
+    })
+    assert res["ok"] is False
+    assert res["error"]["code"] == "validation"
+    assert "EWS_ATTACHMENT_DIR" in res["error"]["message"]
+    assert FakeDraftMessage.last is None
+
+    draft = make_sendable_draft()
+    account._by_id["RAW-D-OFF"] = draft
+    alias = ctx.aliaser.alias_for("RAW-D-OFF", "d")
+    res_add = call(ctx, "add_draft_attachment", {
+        "draft_id": alias, "path": "report.pdf",
+    })
+    assert res_add["ok"] is False
+    assert res_add["error"]["code"] == "validation"
+    assert "EWS_ATTACHMENT_DIR" in res_add["error"]["message"]
+    draft.attach.assert_not_called()
+
+
+def test_path_attachments_inside_directory_work_and_hide_dir_path(tmp_path, monkeypatch):
+    att_dir = tmp_path / "staging_uploads"
+    (att_dir / "nested").mkdir(parents=True)
+    (att_dir / "report.pdf").write_bytes(b"%PDF-1.4")
+    (att_dir / "nested" / "notes.txt").write_bytes(b"hello")
+
+    account = make_account()
+    ctx = make_ctx(tmp_path, account, ews_attachment_dir=str(att_dir))
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    FakeDraftMessage.last = None
+
+    res = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "body": "See attached.",
+        "attachments": [
+            {"path": "report.pdf"},
+            {"path": "nested/notes.txt", "filename": "renamed.txt"},
+        ],
+    })
+    assert res["ok"] is True
+    assert res["attachments"] == [
+        {"name": "report.pdf", "size": 8},
+        {"name": "renamed.txt", "size": 5},
+    ]
+    assert str(att_dir) not in json.dumps(res)
+    assert "staging_uploads" not in json.dumps(res)
+
+    draft = make_sendable_draft()
+    draft.attachments = []
+    account._by_id["RAW-D-PATH"] = draft
+    alias = ctx.aliaser.alias_for("RAW-D-PATH", "d")
+    res_add = call(ctx, "add_draft_attachment", {
+        "draft_id": alias, "path": "nested/notes.txt",
+    })
+    assert res_add["ok"] is True
+    assert res_add["added"] == {"name": "notes.txt", "size": 5}
+    assert str(att_dir) not in json.dumps(res_add)
+    assert "staging_uploads" not in json.dumps(res_add)
+
+
+def test_path_attachments_reject_invalid_cases_without_leaving_draft(tmp_path, monkeypatch):
+    att_dir = tmp_path / "staging_uploads"
+    (att_dir / "sub").mkdir(parents=True)
+    (att_dir / "valid.txt").write_bytes(b"ok")
+    (att_dir / "empty.txt").write_bytes(b"")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"secret")
+
+    account = make_account()
+    ctx = make_ctx(tmp_path, account, ews_attachment_dir=str(att_dir))
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+
+    bad_items = [
+        {"path": "../outside.txt"},
+        {"path": "sub/../../outside.txt"},
+        {"path": str(outside.resolve())},
+        {"path": "sub"},
+        {"path": "missing.txt"},
+        {"path": "empty.txt"},
+        {"filename": "both.txt", "content_base64": _b64(b"x"), "path": "valid.txt"},
+        {"filename": "neither.txt"},
+    ]
+    for bad in bad_items:
+        FakeDraftMessage.last = None
+        res = call(ctx, "create_draft", {
+            "to": ["peer@corp.example"],
+            "body": "Hi",
+            "attachments": [bad],
+        })
+        assert res["ok"] is False, bad
+        assert res["error"]["code"] == "validation", bad
+        assert FakeDraftMessage.last is None, bad
+        assert str(att_dir) not in json.dumps(res), bad
+        assert "staging_uploads" not in json.dumps(res), bad
+
+
+def test_path_attachments_reject_symlink_leaving_directory(tmp_path, monkeypatch):
+    att_dir = tmp_path / "staging_uploads"
+    att_dir.mkdir()
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_bytes(b"top-secret")
+    escape_link = att_dir / "escape.txt"
+    try:
+        escape_link.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable on this platform: {exc}")
+
+    ctx = make_ctx(tmp_path, make_account(), ews_attachment_dir=str(att_dir))
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    FakeDraftMessage.last = None
+    res = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "body": "Hi",
+        "attachments": [{"path": "escape.txt"}],
+    })
+    assert res["ok"] is False
+    assert res["error"]["code"] == "validation"
+    assert FakeDraftMessage.last is None
+    assert str(att_dir) not in json.dumps(res)
+
+
+def test_attachment_limits_count_base64_and_path_together(tmp_path, monkeypatch):
+    att_dir = tmp_path / "staging_uploads"
+    att_dir.mkdir()
+    (att_dir / "small.bin").write_bytes(b"z")
+    (att_dir / "half.bin").write_bytes(b"p" * (600 * 1024))
+
+    ctx = make_ctx(
+        tmp_path, make_account(),
+        ews_attachment_dir=str(att_dir),
+        ews_max_attachment_mb=1,
+    )
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+
+    # 11 base64 + 10 path = 21 > MAX_ATTACHMENTS (20)
+    FakeDraftMessage.last = None
+    many = (
+        [{"filename": f"b{i}.txt", "content_base64": _b64(b"a")} for i in range(11)]
+        + [{"path": "small.bin"} for _ in range(10)]
+    )
+    res_count = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"], "body": "Hi", "attachments": many,
+    })
+    assert res_count["ok"] is False and res_count["error"]["code"] == "validation"
+    assert FakeDraftMessage.last is None
+
+    # 600 KiB base64 + 600 KiB path > 1 MiB cap
+    FakeDraftMessage.last = None
+    res_size = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "body": "Hi",
+        "attachments": [
+            {"filename": "half_b64.bin", "content_base64": _b64(b"q" * (600 * 1024))},
+            {"path": "half.bin"},
+        ],
+    })
+    assert res_size["ok"] is False and res_size["error"]["code"] == "validation"
+    assert "exceed" in res_size["error"]["message"]
+    assert FakeDraftMessage.last is None
+
+
+def test_update_event_scope_series_all_day_does_not_raise(tmp_path):
+    account = make_account()
+    ev = _event(account, "Occurrence", start=EWSDate(2026, 11, 12))
+    master = ev.recurring_master.return_value
+    master.start = EWSDate(2026, 11, 12)
+    ctx = make_ctx(tmp_path, account)
+
+    res = call(ctx, "update_event", {
+        "event_id": "RAW-E3", "subject": "All-day series", "scope": "series",
+    })
+    assert res["ok"] is True
+    assert master.subject == "All-day series"
+    master.save.assert_called_once_with(
+        update_fields=["subject"],
+        send_meeting_invitations=SEND_TO_NONE,
+    )
+
+    wrong_day = call(ctx, "update_event", {
+        "event_id": "RAW-E3", "scope": "series", "start": "2026-12-01",
+    })
+    assert wrong_day["ok"] is False
+    assert wrong_day["error"]["code"] == "validation"
+    assert "2026-11-12" in wrong_day["error"]["message"]
+
+
+def test_send_draft_swapped_attachment_same_name_and_size_invalidates_token(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    draft = make_content_draft()
+    draft.attachments = [
+        FileAttachment(
+            attachment_id=AttachmentId(id="ATT-ID-ORIGINAL"),
+            name="statement.pdf",
+            size=256,
+        ),
+    ]
+    account._by_id["RAW-D-SWAP"] = draft
+    alias = ctx.aliaser.alias_for("RAW-D-SWAP", "d")
+
+    p1 = call(ctx, "send_draft", {"draft_id": alias})
+    assert p1["requires_confirmation"] is True
+    assert p1["preview"]["attachments"] == [{"name": "statement.pdf", "size": 256}]
+    assert "ATT-ID-ORIGINAL" not in json.dumps(p1["preview"])
+
+    draft.attachments = [
+        FileAttachment(
+            attachment_id=AttachmentId(id="ATT-ID-SWAPPED"),
+            name="statement.pdf",
+            size=256,
+        ),
+    ]
+    p2 = call(ctx, "send_draft", {
+        "draft_id": alias,
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is False
+    assert p2["error"]["code"] == "confirm_invalid"
+    assert "stale" in p2["error"]["message"]
+    draft.send.assert_not_called()

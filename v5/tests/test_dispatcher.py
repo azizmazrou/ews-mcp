@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict
 
+import pytest
+
 from conftest import make_settings
 from ewsmcp.audit import AuditLog
 from ewsmcp.ids import get_aliaser
@@ -332,3 +334,72 @@ def test_audit_chain_written(tmp_path):
         canonical = json.dumps(rec, sort_keys=True, ensure_ascii=False)
         assert h == hashlib.sha256(f"{prev}|{canonical}".encode()).hexdigest()
         prev = h
+
+
+# --- recipient guard normalisation & malformed validation --------------------
+
+
+@pytest.mark.parametrize("spelling", [
+    "  leak@blocked.example  ",
+    "LEAK@BLOCKED.EXAMPLE",
+    "External Contact <leak@blocked.example>",
+    "  External Contact <  LEAK@BLOCKED.EXAMPLE  >  ",
+])
+@pytest.mark.parametrize("field", ["to", "cc", "bcc", "attendees"])
+def test_denylist_normalises_whitespace_case_and_angle_brackets(
+    tmp_path, spelling, field,
+):
+    ctx = _ctx(tmp_path, ews_capability_tier="full",
+               ews_recipient_denylist="*@blocked.example")
+    res = asyncio.run(dispatch(ctx, _spec(_ok_handler, cls="write"),
+                               {field: [spelling]}))
+    assert res["ok"] is False
+    assert res["error"]["code"] == "recipient_blocked"
+
+
+def test_allowlist_normalises_whitespace_case_and_angle_brackets(tmp_path):
+    ctx = _ctx(tmp_path, ews_capability_tier="full",
+               ews_recipient_allowlist="*@corp.example")
+    ok = asyncio.run(dispatch(ctx, _spec(_ok_handler, cls="write"), {
+        "to": ["  Team Lead <PEER@CORP.EXAMPLE> "],
+    }))
+    assert ok.get("ran") is True
+
+
+@pytest.mark.parametrize("bad_recipient", [
+    "",
+    "   ",
+    "missing-at-sign",
+    "@corp.example",
+    "local-only@",
+    "two@at@corp.example",
+    "has space@corp.example",
+    "Contact <has space@corp.example>",
+    "Contact <peer@corp.example> extra",
+    "Contact <peer@corp.example",
+    "<peer@corp.example> <leak@blocked.example>",
+])
+def test_malformed_recipient_is_validation_with_list_and_ignored_without(
+    tmp_path, bad_recipient,
+):
+    deny_ctx = _ctx(tmp_path / "deny", ews_capability_tier="full",
+                    ews_recipient_denylist="*@blocked.example")
+    res_deny = asyncio.run(dispatch(deny_ctx, _spec(_ok_handler, cls="write"),
+                                    {"to": [bad_recipient]}))
+    assert res_deny["ok"] is False
+    assert res_deny["error"]["code"] == "validation"
+
+    allow_ctx = _ctx(tmp_path / "allow", ews_capability_tier="full",
+                     ews_recipient_allowlist="*@corp.example")
+    res_allow = asyncio.run(dispatch(allow_ctx, _spec(_ok_handler, cls="write"),
+                                     {"to": [bad_recipient]}))
+    assert res_allow["ok"] is False
+    assert res_allow["error"]["code"] == "validation"
+
+    open_ctx = _ctx(tmp_path / "open", send_enabled=True, ews_capability_tier="full")
+    res_open = asyncio.run(dispatch(open_ctx, _spec(_ok_handler, cls="write"),
+                                    {"to": [bad_recipient]}))
+    assert res_open.get("ran") is True
+    phase1 = asyncio.run(dispatch(open_ctx, _spec(_ok_handler, cls="send", confirm=True),
+                                  {"to": [bad_recipient]}))
+    assert phase1["requires_confirmation"] is True

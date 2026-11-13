@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     ews_recipient_allowlist: str = ""
     ews_recipient_denylist: str = ""
     ews_max_sends_per_hour: int = 10
+    ews_attachment_dir: str = ""
+    ews_max_attachment_mb: int = Field(default=25, ge=1, le=50)
 
     # --- Serving ------------------------------------------------------------
     mcp_transport: Literal["stdio", "http"] = "stdio"

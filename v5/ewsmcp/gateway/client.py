@@ -30,6 +30,7 @@ WELL_KNOWN = {
     "f:inbox": "inbox", "f:sent": "sent", "f:drafts": "drafts",
     "f:trash": "trash", "f:junk": "junk", "f:outbox": "outbox",
     "f:calendar": "calendar", "f:contacts": "contacts", "f:tasks": "tasks",
+    "f:sentitems": "sent", "f:deleteditems": "trash", "f:junkemail": "junk",
 }
 
 
@@ -156,8 +157,15 @@ class EWSGateway:
     def mail_folders(self, account: Account) -> List[Tuple[str, Any]]:
         """(path, folder) of every mail folder, without deleted items, junk,
         drafts, outbox and what lies below them (sync)."""
-        skip = {f.id for f in (account.trash, account.junk,
-                               account.drafts, account.outbox)}
+        skip: set[str] = set()
+        for attr in ("trash", "junk", "drafts", "outbox"):
+            try:
+                wf = getattr(account, attr, None)
+                fid = getattr(wf, "id", None) if wf is not None else None
+            except Exception:
+                fid = None
+            if isinstance(fid, str) and fid:
+                skip.add(fid)
         out: List[Tuple[str, Any]] = []
         for key, folder in self._folder_map(account).items():
             if key != getattr(folder, "id", None):

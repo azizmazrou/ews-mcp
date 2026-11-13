@@ -38,3 +38,14 @@ def test_synced_path_escape_hatch(tmp_path):
 def test_confirm_ttl_default_matches_confirm_module():
     from ewsmcp import confirm
     assert make_settings().confirm_ttl_seconds == confirm.DEFAULT_TTL_SECONDS == 600
+
+
+def test_attachment_settings_defaults_and_bounds():
+    s = make_settings()
+    assert s.ews_attachment_dir == ""
+    assert s.ews_max_attachment_mb == 25
+    assert make_settings(ews_max_attachment_mb=1).ews_max_attachment_mb == 1
+    assert make_settings(ews_max_attachment_mb=50).ews_max_attachment_mb == 50
+    for out_of_range in (0, -1, 51, 100):
+        with pytest.raises(Exception):
+            make_settings(ews_max_attachment_mb=out_of_range)

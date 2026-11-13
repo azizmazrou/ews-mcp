@@ -200,11 +200,16 @@ def _series_rule(item: Any) -> Any:
     """An occurrence carries no rule, only its master does."""
     kind = getattr(item, "type", None)
     if kind == "RecurringMaster":
-        return item.recurrence
+        return getattr(item, "recurrence", None)
     if kind in ("Occurrence", "Exception"):
-        master = item.recurring_master()
-        master.refresh()
-        return master.recurrence
+        try:
+            master = item.recurring_master()
+            if master is None:
+                return None
+            master.refresh()
+            return getattr(master, "recurrence", None)
+        except Exception:
+            return None
     return None
 
 
