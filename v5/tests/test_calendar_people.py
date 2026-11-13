@@ -465,3 +465,24 @@ def test_get_server_status_not_cold_gated_while_connecting(tmp_path):
     assert res["ok"] is True
     assert res["connection"]["state"] == "connecting"
     assert res["connection"]["attempts"] == 4
+
+
+def test_get_event_reports_the_reminder(tmp_path):
+    def get(ev):
+        account = MagicMock()
+        account.fetch.return_value = iter([ev])
+        ctx = _ctx(tmp_path, account)
+        return _run(ctx, "get_event", {"id": ctx.aliaser.alias_for("RAW-R", "e")})["event"]
+
+    def event(reminder_is_set):
+        ev = MagicMock()
+        ev.id = "RAW-R"
+        ev.required_attendees = ev.optional_attendees = None
+        ev.organizer = None
+        ev.text_body = ""
+        ev.reminder_is_set = reminder_is_set
+        ev.reminder_minutes_before_start = 15
+        return ev
+
+    assert get(event(True))["reminder_minutes"] == 15
+    assert get(event(False))["reminder_minutes"] is None

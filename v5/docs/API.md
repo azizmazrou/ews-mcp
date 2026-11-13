@@ -33,7 +33,7 @@ the registry is the single source of truth for what exists.
 | `update_messages` | write | draft | Bulk-update up to 50 messages: set_read and/or categories_add/categories_remove. |
 | `move_messages` | write | draft | Move up to 50 messages to a folder (id, f:alias or path). |
 | `create_event` | write | draft | Create a calendar event. |
-| `update_event` | write | draft | Update event fields (subject/start/end/location/body). |
+| `update_event` | write | draft | Update event fields (subject/start/end/location/body/reminder). |
 | `send_draft` | send | full | Send an existing draft (the ONLY way mail leaves this mailbox). |
 | `respond_to_event` | send | full | Accept/tentative/decline a meeting — this SENDS a response to the organizer, so it is two-phase confirmed. |
 | `cancel_event` | destructive | full | Cancel a meeting you organize — sends cancellations to all attendees (destructive, two-phase confirmed). |
@@ -137,7 +137,7 @@ List calendar events overlapping a time window (default: today through +7d, serv
 
 #### `get_event` — read (min tier: read)
 
-Fetch one calendar event in full by id (a short alias like 'e3' from list_events, or a raw EWS id). Returns organizer, every attendee with their response (Accept/Decline/Tentative/…), the cleaned body text, a recurring flag, and your own response.
+Fetch one calendar event in full by id (a short alias like 'e3' from list_events, or a raw EWS id). Returns organizer, every attendee with their response (Accept/Decline/Tentative/…), the cleaned body text, a recurring flag, the reminder (null if none) and your own response.
 
 | parameter | type | required | description |
 |---|---|---|---|
@@ -277,7 +277,7 @@ Move up to 50 messages to a folder (id, f:alias or path). Message ids are re-bou
 
 #### `create_event` — write (min tier: draft)
 
-Create a calendar event. Default send_invitations=false saves a placeholder WITHOUT emailing attendees (no confirm needed). With send_invitations=true, invitations leave the org: two-phase confirm + send kill-switch apply.
+Create a calendar event. Default send_invitations=false saves a placeholder WITHOUT emailing attendees (no confirm needed). With send_invitations=true, invitations leave the org: two-phase confirm + send kill-switch apply. Without reminder_minutes the event has no reminder.
 
 > Two-phase confirm for some argument combinations: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 
@@ -289,11 +289,12 @@ Create a calendar event. Default send_invitations=false saves a placeholder WITH
 | `attendees` | array | no |  |
 | `location` | string | no |  |
 | `body` | string | no |  |
+| `reminder_minutes` | integer | no | Remind this many minutes before the start; 0 is at the start. |
 | `send_invitations` | boolean | no | (default `False`) |
 
 #### `update_event` — write (min tier: draft)
 
-Update event fields (subject/start/end/location/body). Default notify_attendees=false is a silent metadata edit; true notifies changed attendees → two-phase confirm + send kill-switch apply.
+Update event fields (subject/start/end/location/body/reminder). Default notify_attendees=false is a silent metadata edit; true notifies changed attendees → two-phase confirm + send kill-switch apply.
 
 > Two-phase confirm for some argument combinations: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 
@@ -305,6 +306,7 @@ Update event fields (subject/start/end/location/body). Default notify_attendees=
 | `end` | string | no |  |
 | `location` | string | no |  |
 | `body` | string | no |  |
+| `reminder_minutes` | integer | no | Remind this many minutes before the start; 0 is at the start, -1 removes the reminder. |
 | `notify_attendees` | boolean | no | (default `False`) |
 
 #### `send_draft` — send (min tier: full)
