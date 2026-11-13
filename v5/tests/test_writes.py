@@ -11,7 +11,7 @@ drift would fail here first.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock
@@ -20,6 +20,14 @@ from zoneinfo import ZoneInfo
 import pytest
 from exchangelib import OofSettings
 from exchangelib.items import SEND_TO_ALL_AND_SAVE_COPY, SEND_TO_NONE
+from exchangelib.recurrence import (
+    AbsoluteMonthlyPattern,
+    DailyPattern,
+    EndDatePattern,
+    NoEndPattern,
+    NumberedPattern,
+    WeeklyPattern,
+)
 
 from conftest import make_settings
 from ewsmcp.audit import AuditLog
@@ -587,6 +595,162 @@ def test_update_event_sets_and_removes_a_reminder(tmp_path):
     res = call(ctx, "update_event", {"event_id": "RAW-E3", "reminder_minutes": -1})
     assert res["updated_fields"] == ["reminder_is_set"]
     assert ev.reminder_is_set is False
+
+
+def _series(tmp_path, monkeypatch, recurrence, **extra):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
+    FakeCalendarItem.last = None
+    kwargs = {"subject": "Sync", "start": "2026-11-12T13:45", "end": "2026-11-12T14:30",
+              "recurrence": recurrence, **extra}
+    return call(ctx, "create_event", kwargs)
+
+
+def test_create_event_weekly_series_without_end(tmp_path, monkeypatch):
+    res = _series(tmp_path, monkeypatch, {"frequency": "weekly"})
+    assert res["ok"] is True and res["recurring"] is True
+    rule = FakeCalendarItem.last.recurrence
+    assert isinstance(rule.pattern, WeeklyPattern)
+    assert rule.pattern.interval == 1
+    assert rule.pattern.weekdays == [4]  # 2026-11-12 is a Thursday, ISO 4
+    assert isinstance(rule.boundary, NoEndPattern)
+    assert rule.boundary.start == date(2026, 11, 12)
+
+
+def test_create_event_series_boundaries_and_patterns(tmp_path, monkeypatch):
+    _series(tmp_path, monkeypatch, {"frequency": "weekly", "interval": 2,
+                                    "weekdays": ["thursday", "monday"], "until": "2027-06-30"})
+    rule = FakeCalendarItem.last.recurrence
+    assert rule.pattern.interval == 2 and rule.pattern.weekdays == [1, 4]
+    assert isinstance(rule.boundary, EndDatePattern) and rule.boundary.end == date(2027, 6, 30)
+
+    _series(tmp_path, monkeypatch, {"frequency": "daily", "count": 5})
+    rule = FakeCalendarItem.last.recurrence
+    assert isinstance(rule.pattern, DailyPattern)
+    assert isinstance(rule.boundary, NumberedPattern) and rule.boundary.number == 5
+
+    _series(tmp_path, monkeypatch, {"frequency": "monthly"})
+    rule = FakeCalendarItem.last.recurrence
+    assert isinstance(rule.pattern, AbsoluteMonthlyPattern)
+    assert rule.pattern.day_of_month == 12
+
+
+def test_create_event_series_uses_the_named_zone_not_a_fixed_offset(tmp_path, monkeypatch):
+    # A fixed offset would move the occurrences across a DST change.
+    _series(tmp_path, monkeypatch, {"frequency": "weekly"},
+            start="2026-11-12T10:00+00:00", end="2026-11-12T11:00+00:00")
+    ev = FakeCalendarItem.last
+    assert ev.kwargs["start"].tzinfo == RIYADH
+    assert ev.kwargs["start"] == datetime(2026, 11, 12, 13, 0, tzinfo=RIYADH)
+    assert ev.kwargs["end"].tzinfo == RIYADH
+
+
+def test_create_event_series_first_date_comes_from_the_named_zone(tmp_path, monkeypatch):
+    # 22:00 UTC is already the next day in Riyadh.
+    _series(tmp_path, monkeypatch, {"frequency": "weekly"},
+            start="2026-11-11T22:00+00:00", end="2026-11-11T23:00+00:00")
+    rule = FakeCalendarItem.last.recurrence
+    assert rule.boundary.start == date(2026, 11, 12)
+    assert rule.pattern.weekdays == [4]
+
+
+@pytest.mark.parametrize("recurrence, message", [
+    ({"frequency": "hourly"}, "frequency"),
+    ({"frequency": "weekly", "weekdays": ["monday"]}, "not in recurrence.weekdays"),
+    ({"frequency": "weekly", "weekdays": ["someday"]}, "unknown day"),
+    ({"frequency": "daily", "weekdays": ["thursday"]}, "requires frequency"),
+    ({"frequency": "weekly", "interval": 0}, "interval"),
+    ({"frequency": "weekly", "until": "2027-01-01", "count": 3}, "not both"),
+    ({"frequency": "weekly", "until": "soon"}, "cannot parse"),
+    ({"frequency": "weekly", "until": "2026-01-01"}, "before the first"),
+    ({"frequency": "weekly", "count": 0}, "at least 1"),
+])
+def test_create_event_rejects_bad_recurrence(tmp_path, monkeypatch, recurrence, message):
+    res = _series(tmp_path, monkeypatch, recurrence)
+    assert res["ok"] is False and res["error"]["code"] == "validation"
+    assert message in res["error"]["message"]
+    assert FakeCalendarItem.last is None  # nothing was built or saved
+
+
+def test_create_event_with_attendees_reports_pending_invitations(tmp_path, monkeypatch):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
+    res = call(ctx, "create_event", {"subject": "Sync", "start": "2026-07-01",
+                                     "end": "2026-07-01T01:00", "attendees": ["a@corp.example"]})
+    assert res["invitations_sent"] is False and res["invitations_pending"] is True
+    assert "Outlook" in res["note"]
+    res = call(ctx, "create_event", {"subject": "Sync", "start": "2026-07-01",
+                                     "end": "2026-07-01T01:00"})
+    assert "invitations_pending" not in res and "note" not in res
+
+
+def _event(account, kind, start=None):
+    ev = MagicMock()
+    ev.type = kind
+    ev.start = start or datetime(2026, 11, 12, 13, 45, tzinfo=RIYADH)
+    account._by_id["RAW-E3"] = ev
+    return ev
+
+
+def test_update_event_occurrence_id_changes_that_occurrence(tmp_path):
+    account = make_account()
+    ev = _event(account, "Occurrence")
+    ctx = make_ctx(tmp_path, account)
+    res = call(ctx, "update_event", {"event_id": "RAW-E3", "subject": "New"})
+    assert res["ok"] is True
+    ev.recurring_master.assert_not_called()
+    assert ev.subject == "New"
+    ev.save.assert_called_once_with(update_fields=["subject"],
+                                    send_meeting_invitations=SEND_TO_NONE)
+
+
+def test_update_event_scope_series_changes_the_master(tmp_path):
+    account = make_account()
+    ev = _event(account, "Occurrence")
+    master = ev.recurring_master.return_value
+    master.start = datetime(2026, 11, 12, 13, 45, tzinfo=RIYADH)
+    ctx = make_ctx(tmp_path, account)
+    res = call(ctx, "update_event", {"event_id": "RAW-E3", "subject": "New", "scope": "series",
+                                     "start": "2026-11-12T14:00", "end": "2026-11-12T14:45"})
+    assert res["ok"] is True
+    master.refresh.assert_called_once_with()
+    assert master.subject == "New"
+    assert master.start == datetime(2026, 11, 12, 14, 0, tzinfo=RIYADH)
+    ev.save.assert_not_called()
+    master.save.assert_called_once_with(update_fields=["subject", "start", "end"],
+                                        send_meeting_invitations=SEND_TO_NONE)
+
+
+def test_update_event_scope_series_rejects_another_date(tmp_path):
+    account = make_account()
+    ev = _event(account, "RecurringMaster")
+    ctx = make_ctx(tmp_path, account)
+    res = call(ctx, "update_event", {"event_id": "RAW-E3", "scope": "series",
+                                     "start": "2026-12-03T14:00"})
+    assert res["ok"] is False and res["error"]["code"] == "validation"
+    assert "2026-11-12" in res["error"]["message"]
+    ev.save.assert_not_called()
+
+
+def test_update_event_scope_series_rejects_a_single_event(tmp_path):
+    account = make_account()
+    ev = _event(account, "Single")
+    ctx = make_ctx(tmp_path, account)
+    res = call(ctx, "update_event", {"event_id": "RAW-E3", "subject": "New", "scope": "series"})
+    assert res["ok"] is False and res["error"]["code"] == "validation"
+    ev.save.assert_not_called()
+
+
+def test_update_event_master_id_needs_an_explicit_scope(tmp_path):
+    # Without this a "small" edit of the id create_event returned rewrites every occurrence.
+    account = make_account()
+    ev = _event(account, "RecurringMaster")
+    ctx = make_ctx(tmp_path, account)
+    res = call(ctx, "update_event", {"event_id": "RAW-E3", "subject": "New"})
+    assert res["ok"] is False and res["error"]["code"] == "validation"
+    ev.save.assert_not_called()
 
 
 def test_update_event_notify_blocked_by_kill_switch(tmp_path):

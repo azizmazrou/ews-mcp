@@ -38,6 +38,16 @@
 ### Added
 - `v5`: reminders. `create_event` and `update_event` take `reminder_minutes`
   (`-1` removes a reminder), and `get_event` returns it.
+### Added
+- `v5`: recurring events. `create_event` takes `recurrence` (daily, weekly or
+  monthly, with `interval`, `weekdays`, `until` or `count`), in the server's named
+  zone so a series keeps its time across DST changes. `get_event` returns the rule
+  of a series and its `type`, and `update_event` takes `scope: series`. An
+  occurrence id still changes one occurrence; the id of a whole series now needs
+  the explicit scope.
+- `v5`: an event saved without invitations says so. `create_event` reports
+  `invitations_pending` when it has attendees, and `get_event` shows the organizer
+  `invitations_sent`.
 
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door

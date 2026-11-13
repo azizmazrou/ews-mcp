@@ -7,10 +7,19 @@ account synchronously. All datetimes are tz-aware Asia/Riyadh.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
+
+import pytest
+from exchangelib.recurrence import (
+    AbsoluteMonthlyPattern,
+    AbsoluteYearlyPattern,
+    DailyPattern,
+    Recurrence,
+    WeeklyPattern,
+)
 
 from conftest import make_settings
 from ewsmcp import __version__
@@ -206,6 +215,81 @@ def test_all_day_event_keeps_its_dates(tmp_path):
     assert row["start_ts"] == int(
         datetime(2026, 11, 3, tzinfo=ZoneInfo("Europe/Berlin")).timestamp())
     assert row["end_ts"] > row["start_ts"]
+
+
+def _get(tmp_path, ev):
+    account = MagicMock()
+    account.fetch.return_value = iter([ev])
+    ctx = _ctx(tmp_path, account)
+    return _run(ctx, "get_event", {"id": ctx.aliaser.alias_for("RAW-S", "e")})["event"]
+
+
+def _series_event(kind):
+    ev = MagicMock()
+    ev.id = "RAW-S"
+    ev.subject = "Sync"
+    ev.type = kind
+    ev.required_attendees = ev.optional_attendees = None
+    ev.organizer = None
+    ev.text_body = ""
+    ev.my_response_type = "Organizer"
+    return ev
+
+
+def test_get_event_reads_the_rule_from_the_master_of_an_occurrence(tmp_path):
+    ev = _series_event("Occurrence")
+    master = ev.recurring_master.return_value
+    master.recurrence = Recurrence(pattern=WeeklyPattern(interval=1, weekdays=[4]),
+                                   start=date(2026, 11, 12))
+    event = _get(tmp_path, ev)
+    master.refresh.assert_called_once_with()
+    assert event["type"] == "Occurrence"
+    assert event["recurrence"] == {"frequency": "weekly", "interval": 1,
+                                   "weekdays": ["thursday"], "first_date": "2026-11-12"}
+
+
+def test_get_event_describes_series_boundaries(tmp_path):
+    ev = _series_event("RecurringMaster")
+    ev.recurrence = Recurrence(pattern=AbsoluteMonthlyPattern(interval=2, day_of_month=12),
+                               start=date(2026, 11, 12), end=date(2027, 6, 30))
+    assert _get(tmp_path, ev)["recurrence"] == {
+        "frequency": "monthly", "interval": 2, "day_of_month": 12,
+        "first_date": "2026-11-12", "until": "2027-06-30"}
+
+    ev = _series_event("RecurringMaster")
+    ev.recurrence = Recurrence(pattern=DailyPattern(interval=1), start=date(2026, 11, 12), number=5)
+    assert _get(tmp_path, ev)["recurrence"] == {
+        "frequency": "daily", "interval": 1, "first_date": "2026-11-12", "count": 5}
+
+
+def test_get_event_reports_a_pattern_it_cannot_write(tmp_path):
+    ev = _series_event("RecurringMaster")
+    ev.recurrence = Recurrence(pattern=AbsoluteYearlyPattern(day_of_month=12, month=11),
+                               start=date(2026, 11, 12))
+    rule = _get(tmp_path, ev)["recurrence"]
+    assert rule["frequency"] == "other" and rule["pattern"]
+
+
+def test_get_event_single_event_has_no_rule(tmp_path):
+    event = _get(tmp_path, _series_event("Single"))
+    assert "recurrence" not in event and event["type"] == "Single"
+
+
+@pytest.mark.parametrize("sent", [True, False])
+def test_get_event_reports_invitation_status_to_the_organizer(tmp_path, sent):
+    ev = _series_event("Single")
+    ev.required_attendees = [SimpleNamespace(
+        mailbox=SimpleNamespace(name=None, email_address="a@corp.example"), response_type="Unknown")]
+    ev.meeting_request_was_sent = sent
+    assert _get(tmp_path, ev)["invitations_sent"] is sent
+
+
+def test_get_event_hides_invitation_status_from_an_attendee(tmp_path):
+    ev = _series_event("Single")
+    ev.required_attendees = [SimpleNamespace(
+        mailbox=SimpleNamespace(name=None, email_address="a@corp.example"), response_type="Accept")]
+    ev.my_response_type = "Accept"
+    assert "invitations_sent" not in _get(tmp_path, ev)
 
 
 def test_get_event_per_item_exception_maps_to_not_found(tmp_path):
