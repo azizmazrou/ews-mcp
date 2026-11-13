@@ -9,7 +9,7 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
    safety gates. Judgment — summaries, briefings, prioritization,
    commitments, voice — belongs to the CALLING assistant. The server never
    makes an LLM call and never ships a "judgment tool". Tool count stays
-   lean (≤ 30) and is generated into the docs, never hand-counted.
+   lean (≤ 35) and is generated into the docs, never hand-counted.
 2. **Indexing = SQLite + FTS5 in core.** The optional semantic tier hides
    behind an adapter (`EWS_SEMANTIC_INDEX=none|pgvector`, default `none`);
    the public server runs with zero dependencies beyond Exchange
@@ -42,7 +42,7 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 
 ## §Tools — the surface
 
-Four packs (see the generated table in `docs/API.md`):
+Five packs (see the generated table in `docs/API.md`):
 
 - **mail-read** (7): `list_folders`, `search_messages`, `check_messages`,
   `get_message`, `get_thread`, `get_attachment`, `get_mailbox_overview`.
@@ -55,6 +55,7 @@ Four packs (see the generated table in `docs/API.md`):
   (`update_messages`, `move_messages`, `delete_messages`), calendar writes
   (`create_event`, `update_event`, `respond_to_event`, `cancel_event`),
   `set_oof`.
+- **inbox rules** (3): `list_rules`, `save_rule`, `delete_rule`.
 - **semantic** (+1, only when enabled): `find_similar`.
 
 Every list-shaped result ships exactly the canonical envelope
@@ -90,6 +91,16 @@ without two model decisions):
   receipt without a fresh token — that is what makes retry-after-timeout
   safe (Stripe semantics).
 - **Send rate cap** `EWS_MAX_SENDS_PER_HOUR`.
+- **Inbox rules safety**: `save_rule` builds `Actions` strictly from an
+  allow-list of mailbox-internal actions (`move_to_folder`,
+  `copy_to_folder`, `assign_categories`, `mark_as_read`, `mark_importance`,
+  `stop_processing_rules`) — no argument path can create a rule that sends,
+  forwards, redirects, replies, or deletes, and a move or copy target in
+  Deleted Items or Junk (or below them) is refused for the same reason.
+  Existing rules using any
+  non-writable field are reported `editable: false` and refused on replace.
+  Both `save_rule` and `delete_rule` are always two-phase confirmed with
+  content-bound tokens and `OutlookRuleBlobExists` / catch-all warnings.
 - The one documented handler-side check: `create_event`/`update_event`
   are write-class for tier purposes, but invitations leave the org, so
   they re-check the kill-switch when (and only when) they would notify.
@@ -97,7 +108,7 @@ without two model decisions):
 ## §Ids — aliases only
 
 The model never sees a raw EWS id: outputs carry short aliases (`m12`,
-`e3`, `d1`, `t4`, `p2`, `k1`, `f7`), inputs accept aliases or raw ids.
+`e3`, `d1`, `t4`, `p2`, `k1`, `f7`, `r1`), inputs accept aliases or raw ids.
 The SQLite-backed aliaser survives restarts, rebinds on moves, and keeps
 `internet_message_id` as a secondary key. Stale alias → clean re-search
 hint, never an upstream error. Page-sized mints batch into one

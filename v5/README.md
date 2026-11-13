@@ -1,7 +1,7 @@
 # ews-mcp 4.5 — Exchange (EWS) as a safe, fast MCP tool surface
 
 An MCP server that turns an on-prem Exchange mailbox into a lean,
-safety-gated tool surface for an LLM assistant: **30 tools**, alias-only
+safety-gated tool surface for an LLM assistant: **33 tools**, alias-only
 ids, token-lean DTOs, a local cache mirror with Arabic-correct full-text
 search, and a two-phase confirm flow that makes autonomous sending
 tamper-evident.
@@ -73,7 +73,7 @@ credentials in `env`. Prefer a file? Copy [`.env.example`](.env.example)
 to `.env` in the directory you launch `ewsmcp` from — it auto-loads.
 
 That is the whole setup. The defaults are safe: capability tier `draft`
-(25 read + draft tools; nothing can send), `SEND_ENABLED=false` until
+(28 read + draft tools; nothing can send), `SEND_ENABLED=false` until
 you flip it, and mail-at-rest (aliases, audit chain, cache) goes to
 `~/.ewsmcp`. The server **refuses cloud-synced folders** for that data —
 if your home directory lives in OneDrive/Dropbox/iCloud, set `DATA_DIR`
@@ -93,8 +93,8 @@ them exactly as returned; raw Exchange ids never appear.
 
 ## What the tools cover
 
-`EWS_CAPABILITY_TIER` exposes **16** tools at `read`, **25** at `draft`
-(the default), and **30** at `full`, plus `find_similar` at `read` when
+`EWS_CAPABILITY_TIER` exposes **17** tools at `read`, **28** at `draft`
+(the default), and **33** at `full`, plus `find_similar` at `read` when
 `EWS_SEMANTIC_INDEX=pgvector`. Full parameter tables live in
 [`docs/API.md`](docs/API.md).
 
@@ -121,6 +121,11 @@ them exactly as returned; raw Exchange ids never appear.
   notifying attendees also requires `SEND_ENABLED=true`); at `full`,
   `send_draft`, `respond_to_event`, `cancel_event`, `delete_messages`,
   and `set_oof`.
+- **Inbox rules** (`list_rules` at `read`; `save_rule` and `delete_rule`
+  at `draft`, always two-phase confirmed): server-side filing, category,
+  read-state, and importance rules (`r`-alias ids, strict mailbox-internal
+  action allow-list that never sends or deletes mail, `editable: false`
+  protection for complex rules, and `outlook_only_rules` warnings).
 
 ## HTTP transport (only when the server runs on another machine)
 
@@ -308,9 +313,10 @@ either run a single HTTP server on loopback (`MCP_TRANSPORT=http`,
   you relied on the previous default.
 - The host-specific Compose file is replaced by
   [`docker-compose.example.yml`](docker-compose.example.yml).
-- `mcp>=1.30` is now required (`pip install -U ./v5`).
-- Two tools were added — `check_messages` and `add_draft_attachment` —
-  bringing the default surface from 28 to **30** tools.
+- `mcp>=1.30` and `exchangelib==5.6.0` are now required (`pip install -U ./v5`).
+- Five tools were added since 4.5.0a1 — `check_messages`,
+  `add_draft_attachment`, `list_rules`, `save_rule`, and `delete_rule` —
+  bringing the default surface from 28 to **33** tools.
 - Multi-folder `search_messages` (`folder="f:all"`, `recursive=true`) is
   bounded to at most `200` folders per call (extras reported in
   `folders_skipped`) and `offset + limit` at most `500`.

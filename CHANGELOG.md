@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- Server-side Exchange Inbox rules in `v5/` (`list_rules` at `read`; `save_rule` and `delete_rule` at `draft`, always two-phase confirmed) with `r`-alias ids (`rule_id` → `r`). Writable actions are strictly allow-listed to mailbox-internal filing and metadata (`move_to_folder`, `copy_to_folder`, `assign_categories`, `mark_as_read`, `mark_importance`, `stop_processing_rules`); rules that forward, redirect, auto-reply, delete, or use unsupported predicates/exceptions are reported `editable: false` with `unsupported` (and `sends_mail` / `recipients` when sending) and refused on wholesale replace.
+- `save_rule` refuses a `move_to_folder` or `copy_to_folder` target in Deleted Items, Junk Email or a folder below them (a deleting rule under another name).
+- `list_rules` reads `<m:OutlookRuleBlobExists>` from `GetInboxRules` as top-level `outlook_only_rules` (`true|false|null`), and `save_rule` / `delete_rule` warn in phase-1 previews before EWS `RemoveOutlookRuleBlob=true` would discard rules disabled in Outlook or client-side send rules (and when a rule has no conditions).
+
+### Changed
+- Upgraded `v5/` dependency pin from `exchangelib==5.0.3` to `exchangelib==5.6.0` (updating the `FolderCollection.view` signature pin and adding inbox-rule service/model pins). Legacy `src/` keeps its existing pin.
+- Default `v5/` tool surface grows from 30 to **33** tools (**17** at `read`, **28** at `draft`, **33** at `full`; design cap raised from 30 to 35).
+
 ## [4.5.0a2] - 2026-11-13
 
 ### Added

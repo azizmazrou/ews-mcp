@@ -39,13 +39,33 @@ from exchangelib.fields import IntegerField
 from exchangelib.folders import Folder
 from exchangelib.folders.collections import FolderCollection
 from exchangelib.items import Item, ReplyToItem
-from exchangelib.properties import ConversationId, Mailbox
+from exchangelib.properties import (
+    Actions,
+    Address,
+    Conditions,
+    ConversationId,
+    CopyToFolder,
+    Exceptions,
+    InboxRules,
+    Mailbox,
+    MoveToFolder,
+    Rule,
+)
 from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
+from exchangelib.services.common import EWSAccountService
+from exchangelib.services.inbox_rules import (
+    CreateInboxRule,
+    DeleteInboxRule,
+    GetInboxRules,
+    SetInboxRule,
+    UpdateInboxRules,
+)
 from exchangelib.version import EXCHANGE_2016, Version
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from ewsmcp.gateway.client import RejectingFaultTolerance
+from ewsmcp.gateway.rules import GetInboxRulesWithBlob
 from ewsmcp.tools import writes
 
 
@@ -87,7 +107,7 @@ PINS = {
     Protocol.resolve_names: ["self", "names", "parent_folders",
                              "return_full_contact_data", "search_scope", "shape"],
     # --- calendar window expansion (list_events; max_items is the Phase D cap)
-    FolderCollection.view: ["self", "start", "end", "max_items", "args", "kwargs"],
+    FolderCollection.view: ["self", "start", "end", "max_items"],
     # --- delta sync primitives (the Phase E cache engine rides on these)
     Folder.sync_items: ["self", "sync_state", "only_fields", "ignore",
                         "max_changes_returned", "sync_scope"],
@@ -96,6 +116,24 @@ PINS = {
     # --- reliability (gateway)
     FaultTolerance.__init__: ["self", "max_wait"],
     FaultTolerance.raise_response_errors: ["self", "response"],
+    # --- inbox rules (gateway.rules + tools.rules; exchangelib 5.6.0)
+    Account.create_rule: ["self", "rule"],
+    Account.set_rule: ["self", "rule"],
+    Account.delete_rule: ["self", "rule"],
+    GetInboxRules.call: ["self", "mailbox"],
+    GetInboxRules.get_payload: ["self", "mailbox"],
+    GetInboxRules._elem_to_obj: ["self", "elem"],
+    GetInboxRules._get_element_container: ["self", "message", "name"],
+    UpdateInboxRules.call: ["self", "rule", "remove_outlook_rule_blob"],
+    UpdateInboxRules.get_payload: ["self", "rule", "remove_outlook_rule_blob"],
+    CreateInboxRule._get_operation: ["self", "rule"],
+    SetInboxRule._get_operation: ["self", "rule"],
+    DeleteInboxRule._get_operation: ["self", "rule"],
+    EWSAccountService._get_elements: ["self", "payload"],
+    EWSAccountService._get_element_container: ["self", "message", "name"],
+    EWSAccountService._elems_to_objs: ["self", "elems"],
+    EWSAccountService.get: ["self", "expect_result", "kwargs"],
+    Rule.from_xml: ["elem", "account"],
 }
 
 
@@ -335,3 +373,74 @@ def test_writes_draft_field_projections_match_real_message_fields():
         assert list(fwd.to_recipients) == ["target@corp.example"]
     finally:
         CachingProtocol.clear_cache()
+
+
+def test_account_rules_property_and_service_override():
+    """Pin Account.rules as a property and verify GetInboxRulesWithBlob matches
+    GetInboxRules's hook signature and instantiates with account= without I/O."""
+    assert isinstance(Account.rules, property)
+    assert Account.rules.fget is not None
+    assert _params(Account.rules.fget) == ["self"]
+    assert issubclass(GetInboxRulesWithBlob, GetInboxRules)
+    assert _params(GetInboxRulesWithBlob._get_element_container) == _params(
+        GetInboxRules._get_element_container
+    )
+    CachingProtocol.clear_cache()
+    try:
+        account = Account(
+            primary_smtp_address="user@example.com",
+            config=Configuration(
+                service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+                credentials=Credentials("svc", "secret"),
+                auth_type=BASIC,
+                version=Version(build=EXCHANGE_2016),
+            ),
+            autodiscover=False,
+            access_type=DELEGATE,
+            default_timezone=EWSTimeZone("UTC"),
+        )
+        svc = GetInboxRulesWithBlob(account=account)
+        assert svc.outlook_rule_blob_exists is None
+    finally:
+        CachingProtocol.clear_cache()
+
+
+def test_inbox_rule_model_fields_pin():
+    """Pin Rule, Actions, Conditions, Exceptions, CopyToFolder, MoveToFolder,
+    Address and InboxRules field sets so a future library addition to Actions
+    or Conditions cannot slip past our allow-list / unsupported classification."""
+    assert issubclass(Address, Mailbox)
+    assert issubclass(Exceptions, Conditions)
+    assert issubclass(MoveToFolder, CopyToFolder)
+    assert [f.name for f in InboxRules.FIELDS] == ["rule"]
+    assert [f.name for f in CopyToFolder.FIELDS] == [
+        "folder_id",
+        "distinguished_folder_id",
+    ]
+    assert [f.name for f in Rule.FIELDS] == [
+        "id",
+        "display_name",
+        "priority",
+        "is_enabled",
+        "is_not_supported",
+        "is_in_error",
+        "conditions",
+        "exceptions",
+        "actions",
+    ]
+    assert [f.name for f in Actions.FIELDS] == [
+        "assign_categories",
+        "copy_to_folder",
+        "delete",
+        "forward_as_attachment_to_recipients",
+        "forward_to_recipients",
+        "mark_importance",
+        "mark_as_read",
+        "move_to_folder",
+        "permanent_delete",
+        "redirect_to_recipients",
+        "send_sms_alert_to_recipients",
+        "server_reply_with_message",
+        "stop_processing_rules",
+    ]
+

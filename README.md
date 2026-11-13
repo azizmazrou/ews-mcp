@@ -5,7 +5,7 @@
 
 > A Model Context Protocol server that gives an LLM assistant **real,
 > typed control of a Microsoft Exchange mailbox** — mail, calendar,
-> people, tasks, drafts and (explicitly gated) sending — speaking EWS
+> people, tasks, inbox rules, drafts and (explicitly gated) sending — speaking EWS
 > natively. No Graph proxy, no Microsoft 365 connector. Works with
 > Claude Code, Claude Desktop, Open WebUI, and any other MCP client.
 
@@ -16,7 +16,7 @@
 | **4.5 — current** | [`v5/`](v5/) | Active development. **Recommended for all new setups.** | `ghcr.io/azizmazrou/ews-mcp:v4.5*` |
 | 4.0 — legacy | [`src/`](src/) | Maintenance only. | `ghcr.io/azizmazrou/ews-mcp:latest` |
 
-The 4.5 line is a greenfield rewrite: a consolidated **30-tool** surface,
+The 4.5 line is a greenfield rewrite: a consolidated **33-tool** surface,
 short alias ids the model can actually copy, token-lean responses (~60-token
 result cards instead of raw Outlook HTML), a cache-first local mirror with
 Arabic-correct full-text search, and a safety model enforced in one place.
@@ -94,6 +94,9 @@ single-service Compose example. Legacy transport docs:
   `cancel_event`, `set_oof`.
 - **Tasks & follow-ups** — `list_tasks`, `update_task`, `waiting_on`
   (sent threads nobody answered).
+- **Inbox rules** — `list_rules` (`read`), `save_rule` and `delete_rule`
+  (`draft`, always two-phase confirmed with Outlook rule-blob warnings;
+  mailbox-internal actions only — never sends or deletes mail).
 - **Write safely** — `create_draft` (with `attachments`),
   `update_draft`, `add_draft_attachment` (`content_base64` or relative
   `path` in `EWS_ATTACHMENT_DIR`), `delete_draft`, `update_messages`,
@@ -104,8 +107,8 @@ single-service Compose example. Legacy transport docs:
 - **Operate** — `get_server_status` (connection and auth-breaker state,
   tier, cache watermarks — works even while Exchange is unreachable).
 
-Capability tiers expose **16** (`read`), **25** (`draft`, default), or
-**30** (`full`) tools. The complete, generated reference — every tool
+Capability tiers expose **17** (`read`), **28** (`draft`, default), or
+**33** (`full`) tools. The complete, generated reference — every tool
 with its parameters, envelope, error codes, and the v3→4.5 rename map —
 is [`v5/docs/API.md`](v5/docs/API.md).
 
@@ -113,7 +116,7 @@ is [`v5/docs/API.md`](v5/docs/API.md).
 
 | Mechanism | What it does |
 |---|---|
-| Capability tiers | `read` (16) ⊂ `draft` (25) ⊂ `full` (30) — above-tier tools are not even registered |
+| Capability tiers | `read` (17) ⊂ `draft` (28) ⊂ `full` (33) — above-tier tools are not even registered |
 | Kill-switch | `SEND_ENABLED=false` (default) refuses every send-class call |
 | Lockout guard | Fails immediately on HTTP 401, opens for `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` (default `900` s), and stays open until restart after `EWS_AUTH_MAX_REJECTIONS` (default `3`) |
 | Recipient guards | Allow/deny globs on argument **and** draft-resolved recipients |
