@@ -12,7 +12,13 @@ import pytest
 from conftest import make_settings
 from ewsmcp.audit import AuditLog
 from ewsmcp.ids import get_aliaser
-from ewsmcp.tools.base import Context, ToolSpec, dispatch
+from ewsmcp.tools.base import (
+    VERIFIED_CONTENT_HASH_ARG,
+    Context,
+    ToolSpec,
+    dispatch,
+    preview_content_hash,
+)
 
 RAW_ID = "AAMkAGI4" + "a" * 100
 
@@ -474,3 +480,51 @@ def test_malformed_recipient_is_validation_with_list_and_ignored_without(
     phase1 = asyncio.run(dispatch(open_ctx, _spec(_ok_handler, cls="send", confirm=True),
                                   {"to": [bad_recipient]}))
     assert phase1["requires_confirmation"] is True
+
+
+def test_verified_content_hash_stripped_from_caller_kwargs(tmp_path):
+    ctx = _ctx(tmp_path, send_enabled=True, ews_capability_tier="full")
+    res = asyncio.run(dispatch(
+        ctx,
+        _spec(_ok_handler),
+        {VERIFIED_CONTENT_HASH_ARG: "spoofed-hash"},
+    ))
+    assert res.get("ran") is True
+    assert res["got"] == {}
+
+    async def explicit_handler(ctx, *, draft_id: str, _verified_content_hash=None):
+        return {"draft_id": draft_id, "verified": _verified_content_hash}
+
+    res_explicit = asyncio.run(dispatch(
+        ctx,
+        _spec(explicit_handler, cls="write"),
+        {"draft_id": "RAW-1", VERIFIED_CONTENT_HASH_ARG: "spoofed-hash"},
+    ))
+    assert res_explicit["ok"] is True
+    assert res_explicit["verified"] is None
+
+
+def test_confirm_gate_hands_verified_content_hash_to_opting_in_handler(tmp_path):
+    ctx = _ctx(tmp_path, send_enabled=True, ews_capability_tier="full")
+    content = {"subject": "Q3", "to": ["peer@corp.example"], "body_text": "safe"}
+
+    async def send_like(ctx, *, draft_id: str, _verified_content_hash=None):
+        return {"draft_id": draft_id, "verified": _verified_content_hash}
+
+    spec = _preview_spec(send_like, [dict(content), dict(content)])
+    p1 = asyncio.run(dispatch(
+        ctx,
+        spec,
+        {"draft_id": "RAW-1", VERIFIED_CONTENT_HASH_ARG: "spoofed-p1"},
+    ))
+    p2 = asyncio.run(dispatch(
+        ctx,
+        spec,
+        {
+            "draft_id": "RAW-1",
+            "confirm_token": p1["confirm_token"],
+            VERIFIED_CONTENT_HASH_ARG: "spoofed-p2",
+        },
+    ))
+    assert p2["ok"] is True
+    assert p2["verified"] == preview_content_hash(content)

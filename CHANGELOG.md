@@ -19,6 +19,7 @@
 - The `send_draft` confirm token also binds the attachment ids (alongside names and sizes).
 
 ### Changed
+- The authentication breaker's cap counts rejected submissions, including requests already in flight when the first 401 arrived, so a burst can reach the cap at once. That is deliberate: submissions are what a directory's lockout counter counts.
 - `ews_tz` now defaults to `"UTC"` — set `EWS_TZ` if you relied on the old default.
 - Replaced the host-specific Compose file with `v5/docker-compose.example.yml` (loopback port, `read` tier, sends off, data volume, `/livez` health check).
 - Multi-folder searches (`f:all`, `recursive`) are bounded: at most 200 folders per call (the rest reported as `folders_skipped`) and `offset + limit` at most 500; a throttled folder fails the call as `throttled`; cancellation propagates.
@@ -29,6 +30,18 @@
 - Removed legacy shell helper scripts (`run.sh`, `scripts/build.sh`, `scripts/deploy.sh`, `scripts/setup.sh`, `scripts/setup-basic-auth.sh`) and redundant `.env.*.example` templates so one template per line remains (root `.env.example` for 4.0 and `v5/.env.example` for 4.5).
 
 ### Fixed
+- `send_draft` sends exactly what was previewed: the confirm gate hands the handler the hash it verified, the handler fetches the draft once, re-checks the hash on that object and sends that object; a draft changed after the preview is refused with `confirm_invalid`. Draft tools (`update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft`) are serialised per draft. Before, a change landing between verification and sending went out unreviewed.
+- `update_draft` refuses items outside Drafts, like the other draft tools.
+- A tool call that completed is no longer reported as `auth_failed` because another call saw a 401 at the same time.
+- After a 401 inside a tool call the connection manager always arms one recovery probe after the cooldown, also with the heartbeat disabled; a half-open probe keeps its claim until the worker finishes.
+- `set_oof`, `create_event` and `update_event` accept times with an explicit non-zero UTC offset (they failed with `UnknownTimeZone`): aware inputs are converted to the configured named zone.
+- `update_messages(flag_complete=false)` only clears a completed flag; an open follow-up flag is left alone.
+- Draft and reply fetches request only the fields they use, so a draft's attachments and MIME content are no longer downloaded on every draft operation.
+- `search_messages` with `sender` on `folder="f:all"` or `recursive=true` returns every match across pages, with the same paging contract as a single folder.
+- `check_messages` takes one folder only, cancels the remaining searches on the first failure and fetches four fields per message.
+- All-day events appear in the mirror on each of their days, including the last.
+- `get_attachment` applies the 5 MiB S/MIME sniff cap in `mode="info"` and `mode="auto"`.
+- `recursive=true` rooted at Deleted Items, Drafts, Junk or Outbox walks that subtree.
 - All-day calendar items no longer return `start`/`end` as null when exchangelib hands back `date` objects: they format as `YYYY-MM-DD`, event cards set `all_day: true`, and the cache mirror stores midnight in the server timezone.
 - OAuth discovery and registration paths (`/.well-known/oauth-*`, `/register`) return 404 instead of inheriting the `MCP_API_KEY` gate's 401 so clients treat OAuth as unsupported; clients that probe `/mcp` unauthenticated before attaching headers should omit `MCP_API_KEY` and rely on network isolation (`x-api-key` on `/api/tools/<name>` is unaffected).
 - A password that Exchange rejects is no longer resubmitted. An HTTP 401 now fails at once (`RejectingFaultTolerance` raises `UnauthorizedError`, mapped ahead of throttling without `"401"` substring false positives while preserving retries on `currently locked out`, 503, and SOAP busy) instead of being retried as throttling; an authentication circuit breaker in `EWSGateway` blocks every path to Exchange (tool calls, warm-up, heartbeat, background sync) for `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` (default 900) and stops permanently after `EWS_AUTH_MAX_REJECTIONS` (default 3) until the process restarts. New connection state `auth_failed` on `/readyz`, `/metrics`, and `get_server_status`; tools answer `auth_failed` with a hint that retrying will not help. Closes the account-lockout path reported in #161 across every mode.

@@ -73,9 +73,16 @@ class ConnectionManager:
 
         self._task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._started = False
         self._stopped = False
         self._on_warm: Optional[Callable[[], Coroutine[Any, Any, None]]] = None
         self._on_warm_fired = False
+
+        breaker = getattr(ews_client, "_breaker", None)
+        add_listener = getattr(breaker, "add_rejection_listener", None)
+        if callable(add_listener):
+            add_listener(self._on_breaker_rejection)
 
     def _now(self) -> float:
         return float(self._clock()) if self._clock is not None else time.time()
@@ -83,8 +90,19 @@ class ConnectionManager:
     async def _sleep_for(self, delay: float) -> None:
         if self._sleep is not None:
             await self._sleep(delay)
-        else:
+            return
+        if self._clock is None:
             await asyncio.sleep(delay)
+            return
+        if delay <= 0:
+            await asyncio.sleep(0)
+            return
+        deadline = self._now() + delay
+        while not self._stopped:
+            rem = deadline - self._now()
+            if rem <= 0:
+                return
+            await asyncio.sleep(min(rem, 0.01))
 
     def _auth_cooldown_floor(self) -> float:
         """Minimum wait after any auth failure, read from the gateway settings."""
@@ -145,11 +163,17 @@ class ConnectionManager:
         on_warm: Optional[Callable[[], Coroutine[Any, Any, None]]] = None,
     ) -> None:
         """Begin the background warmup loop. Returns immediately."""
+        self._loop = asyncio.get_running_loop()
+        self._started = True
         self._on_warm = on_warm
         self._task = asyncio.create_task(self._warmup_loop(), name="ews-warmup")
 
     async def stop(self) -> None:
         self._stopped = True
+        breaker = getattr(self._client, "_breaker", None)
+        remove_listener = getattr(breaker, "remove_rejection_listener", None)
+        if callable(remove_listener):
+            remove_listener(self._on_breaker_rejection)
         for task in (self._task, self._heartbeat_task):
             if task is not None and not task.done():
                 task.cancel()
@@ -157,6 +181,48 @@ class ConnectionManager:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+
+    def _on_breaker_rejection(self) -> None:
+        """Arm cooldown recovery when a 401 trips the breaker off the warmup loop."""
+        if not self._started or self._stopped:
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            self._ensure_auth_warmup()
+            return
+        try:
+            loop.call_soon_threadsafe(self._ensure_auth_warmup)
+        except RuntimeError:
+            pass
+
+    def _ensure_auth_warmup(self) -> None:
+        """Ensure a warmup loop is armed to wait out cooldown and probe once."""
+        if not self._started or self._stopped:
+            return
+        if self._task is not None and not self._task.done():
+            return
+        auth = self._client.auth_status()
+        if auth["rejections"] <= 0:
+            return
+        last_err = getattr(self._client, "last_connection_error", None)
+        with self._lock:
+            if self._state == STATE_WARM:
+                self._state = STATE_DEGRADED
+            if last_err:
+                self._last_error = str(last_err)[:500]
+            if auth["permanent"]:
+                self._next_retry_ts = None
+                return
+        self._task = asyncio.create_task(
+            self._warmup_loop(initial_auth_wait=True),
+            name="ews-warmup",
+        )
 
     async def _warmup_loop(self, *, initial_auth_wait: bool = False) -> None:
         backoff = self._initial_backoff
@@ -267,6 +333,8 @@ class ConnectionManager:
     def _start_heartbeat(self) -> None:
         if self._heartbeat_seconds <= 0 or self._stopped:
             return
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            return
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(), name="ews-heartbeat"
         )
@@ -274,6 +342,11 @@ class ConnectionManager:
     async def _heartbeat_loop(self) -> None:
         while not self._stopped:
             await self._sleep_for(float(self._heartbeat_seconds))
+            if self._stopped or (self._task is not None and not self._task.done()):
+                return
+            if self._client.auth_status()["rejections"] > 0:
+                self._ensure_auth_warmup()
+                return
             outcome = await asyncio.to_thread(self._attempt_probe)
             if outcome == "ok":
                 self._mark_warm()
@@ -282,17 +355,12 @@ class ConnectionManager:
                 auth = self._client.auth_status()
                 with self._lock:
                     self._state = STATE_DEGRADED
-                    permanent = auth["permanent"]
-                    if permanent:
+                    if auth["permanent"]:
                         self._next_retry_ts = None
                 self.logger.warning(
                     "heartbeat: Exchange rejected credentials — state=auth_failed"
                 )
-                if not permanent and not self._stopped:
-                    self._task = asyncio.create_task(
-                        self._warmup_loop(initial_auth_wait=True),
-                        name="ews-warmup",
-                    )
+                self._ensure_auth_warmup()
                 return
             with self._lock:
                 self._state = STATE_DEGRADED
@@ -301,9 +369,10 @@ class ConnectionManager:
             )
             # Re-enter the warmup loop (which restarts the heartbeat on
             # success). Exit this heartbeat; warmup owns recovery now.
-            self._task = asyncio.create_task(
-                self._warmup_loop(), name="ews-warmup"
-            )
+            if self._task is None or self._task.done():
+                self._task = asyncio.create_task(
+                    self._warmup_loop(), name="ews-warmup"
+                )
             return
 
     def _probe(self) -> bool:

@@ -71,14 +71,14 @@ Search mail. TWO ENGINES, mutually exclusive: pass `query` (an Exchange AQS stri
 |---|---|---|---|
 | `query` | string | no | AQS query string — cannot be combined with the structured filters below. |
 | `folder` | string | no | Folder alias (f:inbox, f:sent, f7), path, raw id, or f:all for the whole mailbox: all mail folders with their subfolders, without deleted items, junk, drafts and outbox; each hit then names its folder. (default `f:inbox`) |
-| `sender` | string | no | Sender substring, matched client-side on the fetched page (email or display name). |
+| `sender` | string | no | Sender email or display-name substring, matched within each page; keep paging while next_offset is set (a page may hold fewer than `limit` items or none, and total_available is null on live searches). |
 | `from_` | string | no | DEPRECATED alias of `sender` — do not combine the two. |
 | `subject` | string | no | Subject substring. |
 | `since` | string | no | Window start: 'today', '+Nd', YYYY-MM-DD, or ISO datetime (server timezone). |
 | `until` | string | no | Window end: 'today', '+Nd', YYYY-MM-DD, or ISO datetime (server timezone). |
 | `is_unread` | boolean | no |  |
 | `has_attachments` | boolean | no |  |
-| `categories` | array | no | Match messages carrying all listed Outlook categories (exact names). Cannot combine with `query`. |
+| `categories` | array | no | Match messages carrying all listed Outlook categories; live search uses contains matching whereas the local mirror matches exact category elements. Cannot combine with `query`. |
 | `recursive` | boolean | no | Search `folder` and all mail folders under it, merged newest first; each card carries `folder` and the result reports `folders_searched`. Always runs live. (default `False`) |
 | `flag_complete` | boolean | no | true matches messages whose follow-up flag is marked Complete; false matches all other messages (unflagged or still-open flag). Always runs live and cannot combine with `query`. |
 | `offset` | integer | no | (default `0`) |
@@ -94,7 +94,7 @@ Check a whole list of values against one mail folder in one call: which values o
 |---|---|---|---|
 | `values` | string/array | yes | Values separated by commas or new lines, or an array of strings (a JSON array string is accepted too). At most 200. |
 | `field` | string | no | Where to look for each value (default subject). (one of: `subject`, `sender`) |
-| `folder` | string | no | Folder alias, e.g. f:inbox (default) or f:sent. |
+| `folder` | string | no | Single mail folder alias, path, or raw id, e.g. f:inbox (default) or f:sent (f:all and recursive scopes are not supported). |
 | `since` | string | no | Received at or after (ISO date). |
 | `until` | string | no | Received at or before (ISO date). |
 | `only_missing` | boolean | no | Return only the values without a match. |

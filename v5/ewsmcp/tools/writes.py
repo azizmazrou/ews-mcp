@@ -33,6 +33,7 @@ exchangelib 5.0.3 pins honoured here (verified against the installed lib):
   exposes it via ``flag_complete``.
 """
 
+import asyncio
 import base64
 import binascii
 import html as _html
@@ -42,6 +43,10 @@ import os
 import stat
 import threading
 import time
+from collections import deque
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, List, Optional
@@ -72,7 +77,7 @@ from ..dates import parse_when
 from ..dto import fmt_dt
 from ..errors import ToolError, map_exception
 from ..flag_property import ensure_registered as ensure_flag_status_registered
-from .base import Context, ToolSpec
+from .base import Context, ToolSpec, preview_content_hash
 
 ensure_flag_status_registered()
 
@@ -140,6 +145,117 @@ def _idempotency_put(key: str, record: Dict[str, Any]) -> None:
             oldest = min(_IDEMPOTENT_SENDS, key=lambda k: _IDEMPOTENT_SENDS[k].get("ts", 0))
             del _IDEMPOTENT_SENDS[oldest]
         _IDEMPOTENT_SENDS[key] = record
+
+
+# --- per-draft serialization (self-pruning; never grows unbounded) -----------
+
+
+@dataclass
+class _DraftLockEntry:
+    locked: bool = False
+    waiters: deque[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = dc_field(
+        default_factory=deque
+    )
+
+
+_DRAFT_LOCKS: Dict[str, _DraftLockEntry] = {}
+_DRAFT_LOCKS_GUARD = threading.Lock()
+
+
+def reset_draft_locks() -> None:
+    """Tests only."""
+    with _DRAFT_LOCKS_GUARD:
+        _DRAFT_LOCKS.clear()
+
+
+def _wake_future(fut: asyncio.Future[None]) -> None:
+    if not fut.done():
+        fut.set_result(None)
+
+
+def _handoff_or_prune_draft_lock(raw_id: str, entry: _DraftLockEntry) -> None:
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    while entry.waiters:
+        w_loop, w_fut = entry.waiters.popleft()
+        if w_fut.done() or w_loop.is_closed():
+            continue
+        if w_loop is running:
+            w_fut.set_result(None)
+            return
+        try:
+            w_loop.call_soon_threadsafe(_wake_future, w_fut)
+            return
+        except RuntimeError:
+            continue
+    entry.locked = False
+    _DRAFT_LOCKS.pop(raw_id, None)
+
+
+@asynccontextmanager
+async def _draft_lock(raw_id: str):
+    """Serialize mutations and sends per raw draft id in-process."""
+    loop = asyncio.get_running_loop()
+    waiter: Optional[asyncio.Future[None]] = None
+    with _DRAFT_LOCKS_GUARD:
+        entry = _DRAFT_LOCKS.get(raw_id)
+        if entry is None:
+            entry = _DraftLockEntry(locked=True)
+            _DRAFT_LOCKS[raw_id] = entry
+        elif not entry.locked and not entry.waiters:
+            entry.locked = True
+        else:
+            waiter = loop.create_future()
+            entry.waiters.append((loop, waiter))
+
+    if waiter is not None:
+        try:
+            await waiter
+        except BaseException:
+            with _DRAFT_LOCKS_GUARD:
+                current = _DRAFT_LOCKS.get(raw_id)
+                if current is entry:
+                    try:
+                        entry.waiters.remove((loop, waiter))
+                    except ValueError:
+                        pass
+                    if waiter.done() and not waiter.cancelled():
+                        _handoff_or_prune_draft_lock(raw_id, entry)
+                    elif not entry.locked and not entry.waiters:
+                        _DRAFT_LOCKS.pop(raw_id, None)
+            raise
+
+    try:
+        yield
+    finally:
+        with _DRAFT_LOCKS_GUARD:
+            current = _DRAFT_LOCKS.get(raw_id)
+            if current is entry:
+                _handoff_or_prune_draft_lock(raw_id, entry)
+
+
+# Exact field projections for draft/reply fetches (never pull mime_content).
+_REPLY_SOURCE_FIELDS: List[str] = [
+    "id", "changekey", "subject", "sender", "author", "reply_to",
+    "to_recipients", "cc_recipients", "bcc_recipients",
+]
+_DRAFT_ATTACH_FIELDS: List[str] = [
+    "id", "changekey", "parent_folder_id", "attachments",
+]
+_DRAFT_UPDATE_FIELDS: List[str] = [
+    "id", "changekey", "parent_folder_id", "subject", "to_recipients", "cc_recipients",
+]
+_DRAFT_DELETE_FIELDS: List[str] = [
+    "id", "changekey", "parent_folder_id",
+]
+_DRAFT_PREVIEW_FIELDS: List[str] = [
+    "id", "changekey", "parent_folder_id", "subject",
+    "to_recipients", "cc_recipients", "bcc_recipients",
+    "text_body", "body", "attachments",
+]
+_DRAFT_SEND_FIELDS: List[str] = [*_DRAFT_PREVIEW_FIELDS, "message_id"]
 
 
 # --- shared helpers ----------------------------------------------------------
@@ -246,10 +362,12 @@ def _prefixed(prefix: str, original_subject: Any) -> str:
     return f"{prefix}{base}"
 
 
-def _fetch_one(account: Any, raw_id: str) -> Any:
+def _fetch_one(
+    account: Any, raw_id: str, only: Optional[List[str]] = None
+) -> Any:
     """account.fetch yields items in input order; missing ids surface as
     in-line exception instances (exchangelib bulk semantics)."""
-    fetched = list(account.fetch([(raw_id, None)]))
+    fetched = list(account.fetch([(raw_id, None)], only_fields=only))
     if not fetched:
         raise ToolError("not_found", "item not found; the id may be stale",
                         hint="Re-run search_messages/list_events for a fresh id.")
@@ -505,7 +623,7 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
             attached = _attach_all(msg, decoded)
             return (msg.id, getattr(msg, "changekey", None), list(to), list(cc or []),
                     subject or "", attached)
-        original = _fetch_one(account, reply_to)
+        original = _fetch_one(account, reply_to, only=_REPLY_SOURCE_FIELDS)
         extra: Dict[str, Any] = {}
         reply_all_to: Optional[List[Any]] = None
         reply_all_cc: Optional[List[Any]] = None
@@ -543,7 +661,7 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
         attached: Dict[str, Any] = {}
         if decoded:
             # reply.save() returns a bare id holder that cannot attach.
-            draft = _fetch_one(account, saved.id)
+            draft = _fetch_one(account, saved.id, only=_DRAFT_ATTACH_FIELDS)
             attached = _attach_all(draft, decoded)
             changekey = getattr(draft, "changekey", None)
         return saved.id, changekey, prev_to, prev_cc, final_subject, attached
@@ -570,7 +688,8 @@ async def _update_draft(ctx: Context, *, draft_id: str,
         raise ToolError("validation", "nothing to update: pass to/cc/bcc/subject/body")
 
     def work(account: Any) -> Dict[str, Any]:
-        msg = _fetch_one(account, draft_id)
+        msg = _fetch_one(account, draft_id, only=_DRAFT_UPDATE_FIELDS)
+        _require_in_drafts(msg, account, "update_draft")
         changed: List[str] = []  # update_fields uses exchangelib field names
         for value, field in ((to, "to_recipients"), (cc, "cc_recipients"),
                              (bcc, "bcc_recipients")):
@@ -592,7 +711,8 @@ async def _update_draft(ctx: Context, *, draft_id: str,
             "body_snippet": (body or "")[:200] if body is not None else None,
         }
 
-    preview = await ctx.gateway.call(work)
+    async with _draft_lock(draft_id):
+        preview = await ctx.gateway.call(work)
     return {"ok": True, "draft_id": ctx.aliaser.alias_for(draft_id, "d"),
             "preview": preview}
 
@@ -616,24 +736,26 @@ async def _add_draft_attachment(
     attachment = _decode_attachments([raw_item], ctx.settings)[0]
 
     def work(account: Any) -> Any:
-        msg = _fetch_one(account, draft_id)
+        msg = _fetch_one(account, draft_id, only=_DRAFT_ATTACH_FIELDS)
         _require_in_drafts(msg, account, "add_draft_attachment")
         added = _attach_one(msg, attachment)
         return added, _attachment_list(msg), getattr(msg, "changekey", None)
 
-    added, on_draft, changekey = await ctx.gateway.call(work)
+    async with _draft_lock(draft_id):
+        added, on_draft, changekey = await ctx.gateway.call(work)
     return {"ok": True, "draft_id": ctx.aliaser.alias_for(draft_id, "d", changekey=changekey),
             "added": added, "attachments": on_draft, "note": "saved as draft — NOT sent"}
 
 
 async def _delete_draft(ctx: Context, *, draft_id: str) -> Dict[str, Any]:
     def work(account: Any) -> Dict[str, Any]:
-        msg = _fetch_one(account, draft_id)
+        msg = _fetch_one(account, draft_id, only=_DRAFT_DELETE_FIELDS)
         _require_in_drafts(msg, account, "delete_draft")
         msg.move_to_trash()  # reversible — hence write class, no confirm
         return {"deleted": True}
 
-    return await ctx.gateway.call(work)
+    async with _draft_lock(draft_id):
+        return await ctx.gateway.call(work)
 
 
 async def _update_messages(ctx: Context, *, ids: List[str],
@@ -672,16 +794,21 @@ async def _update_messages(ctx: Context, *, ids: List[str],
                     item.categories = cats or None
                     changed.append("categories")
                     final_cats.append((raw_id, cats))
-                if flag_complete is not None:
+                if flag_complete is True:
                     # 1 = flagged and marked Complete; None = not flagged.
                     # Deliberately does not write state 2 (flagged, still
-                    # open) - this tool only marks/unmarks completion, it
-                    # does not raise a new follow-up flag.
-                    item.flag_status = 1 if flag_complete else None
+                    # open) — this tool only marks/unmarks completion.
+                    item.flag_status = 1
                     changed.append("flag_status")
-                item.save(update_fields=changed)
-                updated += 1
-                ok_ids.append(raw_id)
+                elif flag_complete is False and getattr(item, "flag_status", None) == 1:
+                    # Unmark completion ONLY when currently Complete (1); leave
+                    # open follow-up flags (2) and unflagged items untouched.
+                    item.flag_status = None
+                    changed.append("flag_status")
+                if changed:
+                    item.save(update_fields=changed)
+                    updated += 1
+                    ok_ids.append(raw_id)
             except Exception as exc:
                 failed.append(_failed_entry(ctx, raw_id, exc))
         return {"updated": updated, "failed": failed}
@@ -1001,16 +1128,17 @@ def _draft_content(msg: Any) -> Dict[str, Any]:
     adding/removing one does (a content change worth re-previewing).
     """
     subject = getattr(msg, "subject", None)
+    raw_body = getattr(msg, "body", None)
     body_text = getattr(msg, "text_body", None)
     if not isinstance(body_text, str):
-        body = getattr(msg, "body", None)
-        body_text = str(body) if body is not None else ""
+        body_text = str(raw_body) if raw_body is not None else ""
     return {
         "subject": subject if isinstance(subject, str) else "",
         "to": sorted(_email_list(getattr(msg, "to_recipients", None))),
         "cc": sorted(_email_list(getattr(msg, "cc_recipients", None))),
         "bcc": sorted(_email_list(getattr(msg, "bcc_recipients", None))),
         "body_text": body_text,
+        "_body_html": str(raw_body) if isinstance(raw_body, str) else "",
         "attachment_count": len(getattr(msg, "attachments", None) or []),
         "attachments": _attachment_list(msg),
         "_attachments": _bound_attachments(msg),
@@ -1033,7 +1161,7 @@ async def _send_draft_preview(ctx: Context, kwargs: Dict[str, Any]) -> Dict[str,
         raise ToolError("validation", str(e.args[0] if e.args else e))
 
     def work(account: Any) -> Dict[str, Any]:
-        msg = _fetch_one(account, raw_id)
+        msg = _fetch_one(account, raw_id, only=_DRAFT_PREVIEW_FIELDS)
         _require_in_drafts(msg, account, "send_draft")
         return _draft_content(msg)
 
@@ -1059,8 +1187,19 @@ def _send_confirm_needed(kwargs: Dict[str, Any]) -> bool:
     return True
 
 
-async def _send_draft(ctx: Context, *, draft_id: str,
-                      idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+_STALE_DRAFT_HINT = (
+    "The content changed since the preview (or the arguments differ) — "
+    "re-preview to get a token bound to the current content."
+)
+
+
+async def _send_draft(
+    ctx: Context,
+    *,
+    draft_id: str,
+    idempotency_key: Optional[str] = None,
+    _verified_content_hash: Optional[str] = None,
+) -> Dict[str, Any]:
     if idempotency_key:
         prior = _idempotency_get(idempotency_key)
         if prior is not None:
@@ -1072,16 +1211,32 @@ async def _send_draft(ctx: Context, *, draft_id: str,
                 )
             return {**prior["result"], "replayed": True}
 
+    if not isinstance(_verified_content_hash, str) or not _verified_content_hash:
+        raise ToolError(
+            "confirm_invalid",
+            "confirm_token rejected (stale): the draft changed after the preview",
+            hint=_STALE_DRAFT_HINT,
+        )
+
     def work(account: Any) -> Dict[str, Any]:
-        msg = _fetch_one(account, draft_id)
+        msg = _fetch_one(account, draft_id, only=_DRAFT_SEND_FIELDS)
         _require_in_drafts(msg, account, "send_draft")
-        # Draft with an id → SendItem; Exchange moves it from Drafts to Sent.
+        current_hash = preview_content_hash(_draft_content(msg))
+        if current_hash != _verified_content_hash:
+            raise ToolError(
+                "confirm_invalid",
+                "confirm_token rejected (stale): the draft changed after the preview",
+                hint=_STALE_DRAFT_HINT,
+            )
+        # Draft with an id → SendItem; Exchange moves it from Drafts to Sent
+        # on the SAME fetched object whose content hash was just verified.
         msg.send(save_copy=True)
         imid = getattr(msg, "message_id", None)
         return {"sent": True,
                 "internet_message_id": imid if isinstance(imid, str) else None}
 
-    result = await ctx.gateway.call(work)
+    async with _draft_lock(draft_id):
+        result = await ctx.gateway.call(work)
     if idempotency_key:
         _idempotency_put(idempotency_key, {"draft_id": draft_id,
                                            "result": dict(result),

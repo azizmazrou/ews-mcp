@@ -55,6 +55,31 @@ WELL_KNOWN = {
 
 _QUOTED_RE = re.compile(r'"(?:\\.|[^"\\])*"')
 _SCHEME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
+_THREAD_LOCAL = threading.local()
+
+
+def _thread_401_seq() -> int:
+    return int(getattr(_THREAD_LOCAL, "http_401_seq", 0))
+
+
+def _mark_thread_401() -> None:
+    _THREAD_LOCAL.http_401_seq = _thread_401_seq() + 1
+
+
+def _thread_breaker_seq(breaker: "AuthBreaker") -> int:
+    by_breaker = getattr(_THREAD_LOCAL, "breaker_seq", None)
+    if by_breaker is None:
+        return 0
+    return int(by_breaker.get(id(breaker), 0))
+
+
+def _mark_thread_breaker_rejection(breaker: "AuthBreaker") -> None:
+    by_breaker = getattr(_THREAD_LOCAL, "breaker_seq", None)
+    if by_breaker is None:
+        by_breaker = {}
+        _THREAD_LOCAL.breaker_seq = by_breaker
+    key = id(breaker)
+    by_breaker[key] = int(by_breaker.get(key, 0)) + 1
 
 
 def _www_authenticate_schemes(response: Any) -> List[str]:
@@ -127,6 +152,7 @@ class RejectingFaultTolerance(FaultTolerance):
 
     def raise_response_errors(self, response: Any) -> Any:
         if getattr(response, "status_code", None) == 401:
+            _mark_thread_401()
             raw_body = getattr(response, "content", b"") or b""
             body = (
                 raw_body.encode("utf-8", "replace")
@@ -168,6 +194,17 @@ class AuthBreaker:
         self._permanent = False
         self._probe_in_flight = False
         self._seq = 0
+        self._listeners: List[Callable[[], None]] = []
+
+    def add_rejection_listener(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            if callback not in self._listeners:
+                self._listeners.append(callback)
+
+    def remove_rejection_listener(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
 
     def _now(self) -> float:
         return float(self._clock()) if self._clock is not None else time.time()
@@ -223,6 +260,7 @@ class AuthBreaker:
             self._probe_in_flight = False
 
     def record_rejection(self) -> ToolError:
+        _mark_thread_breaker_rejection(self)
         with self._lock:
             now = self._now()
             self._rejections += 1
@@ -233,7 +271,14 @@ class AuthBreaker:
                 self._open_until_ts = None
             else:
                 self._open_until_ts = now + self._cooldown
-            return self._error_locked(now)
+            err = self._error_locked(now)
+            listeners = list(self._listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception as exc:
+                logger.debug("auth rejection listener failed: %s", exc)
+        return err
 
     def record_success(self) -> None:
         with self._lock:
@@ -383,13 +428,27 @@ class EWSGateway:
         self._folder_cache_ts = 0.0
 
     def _handle_auth_rejection(
-        self, exc: UnauthorizedError, seq_before: int
+        self, exc: UnauthorizedError, thread_breaker_before: int
     ) -> ToolError:
-        if self._breaker.seq != seq_before and self._breaker.status()["rejections"] > 0:
+        if (
+            _thread_breaker_seq(self._breaker) != thread_breaker_before
+            and self._breaker.status()["rejections"] > 0
+        ):
             err = self._breaker.current_error()
         else:
             err = self._breaker.record_rejection()
         self.last_connection_error = f"{type(exc).__name__}: {exc}"
+        return err
+
+    def _handle_swallowed_auth_rejection(self, thread_breaker_before: int) -> ToolError:
+        if (
+            _thread_breaker_seq(self._breaker) != thread_breaker_before
+            and self._breaker.status()["rejections"] > 0
+        ):
+            err = self._breaker.current_error()
+        else:
+            err = self._breaker.record_rejection()
+        self.last_connection_error = f"ToolError: {err.message}"
         return err
 
     def test_connection(self) -> bool:
@@ -405,13 +464,23 @@ class EWSGateway:
         retrying.
         """
         seq_before, claimed = self._breaker.before_call()
+        claim_released = False
+        t401_before = _thread_401_seq()
+        tbrk_before = _thread_breaker_seq(self._breaker)
         try:
             account = self._get_or_build_account()
             account.root.refresh()
-            if self._breaker.seq != seq_before:
-                raise self._breaker.current_error()
-            self._breaker.record_success()
-            self.last_connection_error = None
+            if (
+                _thread_401_seq() != t401_before
+                or _thread_breaker_seq(self._breaker) != tbrk_before
+            ):
+                err = self._handle_swallowed_auth_rejection(tbrk_before)
+                claim_released = True
+                raise err
+            if self._breaker.seq == seq_before:
+                self._breaker.record_success()
+                self.last_connection_error = None
+                claim_released = True
             return True
         except ToolError as err:
             if err.code == "auth_failed":
@@ -421,7 +490,8 @@ class EWSGateway:
             logger.error("connection test failed: %s", self.last_connection_error)
             return False
         except UnauthorizedError as exc:
-            err = self._handle_auth_rejection(exc, seq_before)
+            err = self._handle_auth_rejection(exc, tbrk_before)
+            claim_released = True
             logger.error("connection test rejected credentials: %s", err.message)
             raise err from exc
         except Exception as e:
@@ -429,10 +499,14 @@ class EWSGateway:
             logger.error("connection test failed: %s", self.last_connection_error)
             return False
         finally:
-            if claimed:
+            if claimed and not claim_released:
                 self._breaker.release_half_open()
 
     # ------------------------------------------------------------- calling
+
+    def _release_if_cancelled(self, fut: Any) -> None:
+        if fut.cancelled():
+            self._breaker.release_half_open()
 
     async def call(self, fn: Callable[[Account], Any]) -> Any:
         """Run blocking EWS work on the bounded pool; the pool size IS the
@@ -440,25 +514,45 @@ class EWSGateway:
         _seq_gate, claimed = self._breaker.before_call()
 
         def run_on_pool() -> Any:
-            if not claimed:
-                self._breaker.check_open()
-            call_seq = self._breaker.seq
+            claim_released = False
             try:
-                account = self._get_or_build_account()
-                out = fn(account)
-            except UnauthorizedError as exc:
-                raise self._handle_auth_rejection(exc, call_seq) from exc
-            if self._breaker.seq != call_seq:
-                raise self._breaker.current_error()
-            self._breaker.record_success()
-            return out
+                if not claimed:
+                    self._breaker.check_open()
+                call_seq = self._breaker.seq
+                t401_before = _thread_401_seq()
+                tbrk_before = _thread_breaker_seq(self._breaker)
+                try:
+                    account = self._get_or_build_account()
+                    out = fn(account)
+                except UnauthorizedError as exc:
+                    err = self._handle_auth_rejection(exc, tbrk_before)
+                    claim_released = True
+                    raise err from exc
+                if (
+                    _thread_401_seq() != t401_before
+                    or _thread_breaker_seq(self._breaker) != tbrk_before
+                ):
+                    err = self._handle_swallowed_auth_rejection(tbrk_before)
+                    claim_released = True
+                    raise err
+                if self._breaker.seq == call_seq:
+                    self._breaker.record_success()
+                    claim_released = True
+                return out
+            finally:
+                if claimed and not claim_released:
+                    self._breaker.release_half_open()
 
         loop = asyncio.get_running_loop()
         try:
-            return await loop.run_in_executor(self._pool, run_on_pool)
-        finally:
+            c_fut = self._pool.submit(run_on_pool)
+        except BaseException:
             if claimed:
                 self._breaker.release_half_open()
+            raise
+        if claimed:
+            c_fut.add_done_callback(self._release_if_cancelled)
+        return await asyncio.wrap_future(c_fut, loop=loop)
 
     # ------------------------------------------------------------- folders
 

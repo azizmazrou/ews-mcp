@@ -10,6 +10,7 @@ import logging
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
@@ -938,3 +939,319 @@ def test_breaker_thread_safety_across_readers_and_pool_writers():
     for t in threads:
         t.join(timeout=5)
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: completed-write preservation, wedge recovery, half-open cancel
+# ---------------------------------------------------------------------------
+
+
+_HTTP_401 = SimpleNamespace(
+    status_code=401,
+    content=b"<html>401</html>",
+    headers={"WWW-Authenticate": "NTLM"},
+)
+
+
+def test_gateway_concurrent_401_does_not_discard_completed_write():
+    clock = FakeClock()
+    gw = EWSGateway(_settings(ews_max_concurrency=4), clock=clock.now)
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=lambda: None),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    policy = RejectingFaultTolerance(
+        max_wait=10,
+        on_rejection=lambda: gw._breaker.record_rejection(),
+    )
+    started = threading.Event()
+    go = threading.Event()
+    sent: List[str] = []
+
+    def send_fn(_acct: Any) -> Dict[str, Any]:
+        started.set()
+        go.wait(timeout=5)
+        sent.append("MAIL SENT")
+        return {"sent": True}
+
+    def other_fn(_acct: Any) -> None:
+        started.wait(timeout=5)
+        try:
+            policy.raise_response_errors(_HTTP_401)
+        finally:
+            go.set()
+
+    async def run_both():
+        return await asyncio.gather(
+            gw.call(send_fn), gw.call(other_fn), return_exceptions=True
+        )
+
+    try:
+        res = asyncio.run(run_both())
+        assert sent == ["MAIL SENT"]
+        assert res[0] == {"sent": True}
+        assert isinstance(res[1], ToolError)
+        assert res[1].code == "auth_failed"
+        # The completed call saw no 401 on its own thread, so it returned its
+        # result without resetting the breaker opened by other_fn.
+        st = gw.auth_status()
+        assert st["rejections"] == 1
+        assert st["open"] is True
+    finally:
+        gw._pool.shutdown(wait=True)
+
+
+def test_gateway_swallowed_401_on_own_thread_still_fails_with_auth_failed():
+    clock = FakeClock()
+    gw = EWSGateway(_settings(), clock=clock.now)
+    policy = RejectingFaultTolerance(
+        max_wait=10,
+        on_rejection=lambda: gw._breaker.record_rejection(),
+    )
+
+    def refresh_swallowing_401() -> None:
+        try:
+            policy.raise_response_errors(_HTTP_401)
+        except UnauthorizedError:
+            return None
+
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=refresh_swallowing_401),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    try:
+        with pytest.raises(ToolError) as probe_err:
+            gw.test_connection()
+        assert probe_err.value.code == "auth_failed"
+        assert gw.auth_status()["rejections"] == 1
+
+        clock.advance(901)
+
+        def call_swallowing_401(_acct: Any) -> str:
+            try:
+                policy.raise_response_errors(_HTTP_401)
+            except UnauthorizedError:
+                pass
+            return "should-not-return"
+
+        with pytest.raises(ToolError) as call_err:
+            asyncio.run(gw.call(call_swallowing_401))
+        assert call_err.value.code == "auth_failed"
+        assert gw.auth_status()["rejections"] == 2
+    finally:
+        gw._pool.shutdown(wait=True)
+
+
+def test_connection_manager_arms_warmup_after_tool_401_without_heartbeat_or_sync():
+    # Part A: heartbeat_seconds=0, no SyncEngine, no custom sleep — a 401 inside
+    # a tool call while warm arms a warmup task that recovers once cooldown ends.
+    clock = {"t": 1_000_000.0}
+    gw = EWSGateway(
+        _settings(ews_auth_failure_cooldown_seconds=900, ews_auth_max_rejections=3),
+        clock=lambda: clock["t"],
+    )
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=lambda: None),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    policy = RejectingFaultTolerance(
+        max_wait=10,
+        on_rejection=lambda: gw._breaker.record_rejection(),
+    )
+
+    async def recover_scenario() -> None:
+        mgr = ConnectionManager(gw, heartbeat_seconds=0)
+        await mgr.start()
+        for _ in range(50):
+            if mgr.state == STATE_WARM:
+                break
+            await asyncio.sleep(0.01)
+        assert mgr.state == STATE_WARM
+        assert mgr._task is not None and mgr._task.done()
+        assert mgr._heartbeat_task is None
+
+        with pytest.raises(ToolError) as err:
+            await gw.call(lambda _a: policy.raise_response_errors(_HTTP_401))
+        assert err.value.code == "auth_failed"
+        await asyncio.sleep(0)
+        assert mgr.state == STATE_AUTH_FAILED
+        assert mgr._task is not None and not mgr._task.done()
+
+        clock["t"] += 10 * 3600
+        for _ in range(50):
+            if mgr.state == STATE_WARM:
+                break
+            await asyncio.sleep(0.01)
+        assert mgr.state == STATE_WARM
+        st = mgr.status()
+        assert st["state"] == STATE_WARM
+        assert st["auth_rejections"] == 0
+        assert st["next_retry_in_s"] is None
+        await mgr.stop()
+
+    try:
+        asyncio.run(recover_scenario())
+    finally:
+        gw._pool.shutdown(wait=True)
+
+    # Part B: armed warmup stops cleanly once the rejection cap is reached.
+    clock2 = FakeClock()
+    gw2 = EWSGateway(
+        _settings(ews_auth_failure_cooldown_seconds=900, ews_auth_max_rejections=2),
+        clock=clock2.now,
+    )
+    reject_probes = False
+    probes = 0
+
+    def refresh2() -> None:
+        nonlocal probes
+        probes += 1
+        if reject_probes:
+            raise UnauthorizedError("HTTP 401")
+
+    gw2._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=refresh2),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    policy2 = RejectingFaultTolerance(
+        max_wait=10,
+        on_rejection=lambda: gw2._breaker.record_rejection(),
+    )
+
+    async def cap_scenario() -> None:
+        nonlocal reject_probes
+        mgr2 = ConnectionManager(
+            gw2,
+            heartbeat_seconds=0,
+            clock=clock2.now,
+            sleep=clock2.async_sleep,
+        )
+        await mgr2.start()
+        assert mgr2._task is not None
+        await mgr2._task
+        assert mgr2.state == STATE_WARM
+        assert probes == 1
+
+        reject_probes = True
+        with pytest.raises(ToolError):
+            await gw2.call(lambda _a: policy2.raise_response_errors(_HTTP_401))
+        await asyncio.sleep(0)
+        assert mgr2._task is not None
+        await mgr2._task
+        assert probes == 2
+        assert clock2.sleeps == [900.0]
+        assert mgr2.state == STATE_AUTH_FAILED
+        st2 = mgr2.status()
+        assert st2["auth_rejections"] == 2
+        assert st2["auth_permanent"] is True
+        assert st2["next_retry_in_s"] is None
+        await mgr2.stop()
+
+    try:
+        asyncio.run(cap_scenario())
+    finally:
+        gw2._pool.shutdown(wait=True)
+
+
+def test_cancelling_half_open_caller_keeps_claim_until_worker_finishes():
+    clock = FakeClock()
+    gw = EWSGateway(_settings(ews_max_concurrency=2), clock=clock.now)
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=lambda: None),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    policy = RejectingFaultTolerance(
+        max_wait=10,
+        on_rejection=lambda: gw._breaker.record_rejection(),
+    )
+    running = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    probe_runs = 0
+
+    def slow_probe(_acct: Any) -> str:
+        nonlocal probe_runs
+        probe_runs += 1
+        running.set()
+        release.wait(timeout=5)
+        finished.set()
+        return "ok"
+
+    async def active_worker_cancel() -> None:
+        with pytest.raises(ToolError):
+            await gw.call(lambda _a: policy.raise_response_errors(_HTTP_401))
+        clock.advance(901)
+
+        task = asyncio.create_task(gw.call(slow_probe))
+        await asyncio.to_thread(running.wait, 5)
+        assert gw._breaker._probe_in_flight is True
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Worker thread is still executing slow_probe — claim MUST stay held.
+        assert gw._breaker._probe_in_flight is True
+        with pytest.raises(ToolError) as bc_err:
+            gw._breaker.before_call()
+        assert bc_err.value.code == "auth_failed"
+        with pytest.raises(ToolError) as call_err:
+            await gw.call(lambda _a: "second")
+        assert call_err.value.code == "auth_failed"
+        assert probe_runs == 1
+
+        release.set()
+        await asyncio.to_thread(finished.wait, 5)
+        for _ in range(50):
+            if not gw._breaker._probe_in_flight:
+                break
+            await asyncio.sleep(0.005)
+        assert gw._breaker._probe_in_flight is False
+        assert gw.auth_status()["rejections"] == 0
+
+    try:
+        asyncio.run(active_worker_cancel())
+    finally:
+        release.set()
+        gw._pool.shutdown(wait=True)
+
+    # Also verify a queued future cancelled BEFORE starting releases the claim.
+    clock_q = FakeClock()
+    gw_q = EWSGateway(_settings(ews_max_concurrency=1), clock=clock_q.now)
+    gw_q._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=lambda: None),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    busy_started = threading.Event()
+    busy_release = threading.Event()
+
+    def occupy_pool(_acct: Any) -> str:
+        busy_started.set()
+        busy_release.wait(timeout=5)
+        return "done"
+
+    async def queued_cancel() -> None:
+        holder = asyncio.create_task(gw_q.call(occupy_pool))
+        await asyncio.to_thread(busy_started.wait, 5)
+        gw_q._breaker.record_rejection()
+        clock_q.advance(901)
+
+        queued_probe = asyncio.create_task(gw_q.call(lambda _a: "probe"))
+        await asyncio.sleep(0)
+        assert gw_q._breaker._probe_in_flight is True
+
+        queued_probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued_probe
+        assert gw_q._breaker._probe_in_flight is False
+
+        busy_release.set()
+        assert await holder == "done"
+        assert await gw_q.call(lambda _a: "recovered") == "recovered"
+        assert gw_q.auth_status()["rejections"] == 0
+
+    try:
+        asyncio.run(queued_cancel())
+    finally:
+        busy_release.set()
+        gw_q._pool.shutdown(wait=True)

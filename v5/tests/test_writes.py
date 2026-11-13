@@ -20,9 +20,23 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from exchangelib import UTC, EWSDate, EWSDateTime, FileAttachment, OofSettings
+from exchangelib import (
+    BASIC,
+    DELEGATE,
+    UTC,
+    Account,
+    CalendarItem,
+    Configuration,
+    Credentials,
+    EWSDate,
+    EWSDateTime,
+    EWSTimeZone,
+    FileAttachment,
+    OofSettings,
+)
 from exchangelib.attachments import AttachmentId
 from exchangelib.items import SEND_TO_ALL_AND_SAVE_COPY, SEND_TO_NONE
+from exchangelib.protocol import CachingProtocol
 from exchangelib.recurrence import (
     AbsoluteMonthlyPattern,
     DailyPattern,
@@ -36,6 +50,8 @@ from exchangelib.version import EXCHANGE_2016, Version
 
 from conftest import FIXED_OFFSET_TZ, make_settings
 from ewsmcp.audit import AuditLog
+from ewsmcp.confirm import reset_consumed_tokens
+from ewsmcp.dates import parse_when
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import writes
 from ewsmcp.tools.base import Context, dispatch
@@ -48,8 +64,10 @@ LOCAL_TZ = ZoneInfo(FIXED_OFFSET_TZ)
 @pytest.fixture(autouse=True)
 def _fresh_idempotency():
     writes.reset_idempotency_store()
+    writes.reset_draft_locks()
     yield
     writes.reset_idempotency_store()
+    writes.reset_draft_locks()
 
 
 class FakeGateway:
@@ -371,6 +389,7 @@ def test_update_draft_saves_with_recipient_field_names(tmp_path):
     account = make_account()
     ctx = make_ctx(tmp_path, account)
     draft = MagicMock()
+    draft.parent_folder_id = SimpleNamespace(id=DRAFTS_ID)
     draft.cc_recipients = None
     account._by_id["RAW-D1"] = draft
     res = call(ctx, "update_draft",
@@ -381,6 +400,19 @@ def test_update_draft_saves_with_recipient_field_names(tmp_path):
     draft.save.assert_called_once_with(update_fields=["to_recipients", "subject"])
     assert res["preview"]["to"] == ["a@b.c"]
     assert res["preview"]["subject"] == "S2"
+
+
+def test_update_draft_refuses_items_outside_drafts(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    stranger = MagicMock()
+    stranger.parent_folder_id = SimpleNamespace(id="FOLDER-INBOX")
+    account._by_id["RAW-M8"] = stranger
+    res = call(ctx, "update_draft", {"draft_id": "RAW-M8", "subject": "Rewritten"})
+    assert res["ok"] is False
+    assert res["error"]["code"] == "validation"
+    assert "not a draft" in res["error"]["message"]
+    stranger.save.assert_not_called()
 
 
 def test_delete_draft_refuses_items_outside_drafts(tmp_path):
@@ -1356,3 +1388,507 @@ def test_send_draft_swapped_attachment_same_name_and_size_invalidates_token(tmp_
     assert p2["error"]["code"] == "confirm_invalid"
     assert "stale" in p2["error"]["message"]
     draft.send.assert_not_called()
+
+
+# --- review fixes: TOCTOU + per-draft lock, offsets, flag_complete, projections ---
+
+
+def test_send_draft_verifies_and_sends_same_fetched_object(tmp_path):
+    """_send_draft must fetch ONCE, re-verify the hash on that object, and call
+    .send(save_copy=True) on that very instance."""
+    account = SimpleNamespace(drafts=SimpleNamespace(id=DRAFTS_ID))
+    preview_p1 = make_content_draft(subject="Approve", body="clean body")
+    preview_p2 = make_content_draft(subject="Approve", body="clean body")
+    handler_obj = make_content_draft(subject="Approve", body="clean body")
+    objects = [preview_p1, preview_p2, handler_obj]
+
+    def fetch_seq(pairs, only_fields=None):
+        return [objects.pop(0) for _ in pairs]
+
+    account.fetch = fetch_seq
+    ctx = full_ctx(tmp_path, account)
+    p1 = call(ctx, "send_draft", {"draft_id": "RAW-SAME-OBJ"})
+    p2 = call(ctx, "send_draft", {
+        "draft_id": "RAW-SAME-OBJ",
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is True and p2["sent"] is True
+    assert objects == []
+    preview_p1.send.assert_not_called()
+    preview_p2.send.assert_not_called()
+    handler_obj.send.assert_called_once_with(save_copy=True)
+
+    # Now mutate ONLY the object returned to _send_draft (simulating a change
+    # between _confirm_gate's preview fetch and _send_draft's fetch).
+    reset_consumed_tokens()
+    p1_b = make_content_draft(subject="Approve", body="clean body")
+    p2_b = make_content_draft(subject="Approve", body="clean body")
+    tampered_handler_obj = make_content_draft(
+        subject="Approve",
+        to=("board@corp.example", "extra@corp.example"),
+        body="clean body",
+    )
+    objects.extend([p1_b, p2_b, tampered_handler_obj])
+    tok_b = call(ctx, "send_draft", {"draft_id": "RAW-SAME-OBJ"})["confirm_token"]
+    refused = call(ctx, "send_draft", {
+        "draft_id": "RAW-SAME-OBJ",
+        "confirm_token": tok_b,
+    })
+    assert refused["ok"] is False
+    assert refused["error"]["code"] == "confirm_invalid"
+    assert "the draft changed after the preview" in refused["error"]["message"]
+    tampered_handler_obj.send.assert_not_called()
+
+
+def test_send_draft_concurrent_attachment_or_edit_never_sends_unpreviewed_content(
+    tmp_path,
+):
+    att_dir = tmp_path / "att"
+    att_dir.mkdir()
+    (att_dir / "payroll.xlsx").write_bytes(b"confidential-table")
+
+    class _DraftItem:
+        def __init__(self) -> None:
+            self.id = "RAW-DRAFT"
+            self.changekey = "CK1"
+            self.subject = "Schedule?"
+            self.to_recipients = [SimpleNamespace(email_address="colleague@corp.example")]
+            self.cc_recipients = []
+            self.bcc_recipients = []
+            self.text_body = "Initial note"
+            self.body = "x"
+            self.attachments = []
+            self.parent_folder_id = SimpleNamespace(id=DRAFTS_ID)
+            self.sent_as = None
+
+        def save(self, update_fields=None) -> None:
+            self.changekey = "CK2"
+
+        def attach(self, att: Any) -> None:
+            self.attachments.append(
+                SimpleNamespace(
+                    name=att.name,
+                    size=len(att.content),
+                    attachment_id=SimpleNamespace(id="ATT-NEW"),
+                )
+            )
+            self.changekey = "CK3"
+
+        def send(self, save_copy: bool = True) -> None:
+            self.sent_as = {
+                "to": [getattr(r, "email_address", r) for r in self.to_recipients],
+                "bcc": [getattr(r, "email_address", r) for r in self.bcc_recipients],
+                "body": str(self.body),
+                "attachments": [a.name for a in self.attachments],
+            }
+
+    class _QueueGateway:
+        def __init__(self, account: Any) -> None:
+            self.account = account
+            self._fifo = asyncio.Lock()
+
+        async def call(self, fn: Any) -> Any:
+            async with self._fifo:
+                await asyncio.sleep(0.01)
+                return fn(self.account)
+
+    async def run_interleaved(label: str, extra_tool: str, extra_args: Dict[str, Any]):
+        reset_consumed_tokens()
+        draft = _DraftItem()
+        account = SimpleNamespace(drafts=SimpleNamespace(id=DRAFTS_ID))
+        account.fetch = lambda pairs, only_fields=None: [draft for _ in pairs]
+        ctx = Context(
+            settings=make_settings(
+                ews_tz=FIXED_OFFSET_TZ,
+                send_enabled=True,
+                ews_capability_tier="full",
+                ews_recipient_allowlist="*@corp.example",
+                ews_attachment_dir=str(att_dir),
+            ),
+            gateway=_QueueGateway(account),
+            manager=None,
+            aliaser=get_aliaser(str(tmp_path / f"al-{label}")),
+            audit=AuditLog(str(tmp_path / f"au-{label}")),
+        )
+        p1 = await dispatch(ctx, SPEC["send_draft"], {"draft_id": "RAW-DRAFT"})
+        assert p1["requires_confirmation"] is True
+        send_task = asyncio.create_task(dispatch(
+            ctx,
+            SPEC["send_draft"],
+            {"draft_id": "RAW-DRAFT", "confirm_token": p1["confirm_token"]},
+        ))
+        await asyncio.sleep(0)  # phase-2 preview fetch is now queued first in FIFO
+        edit_task = asyncio.create_task(dispatch(
+            ctx,
+            SPEC[extra_tool],
+            {"draft_id": "RAW-DRAFT", **extra_args},
+        ))
+        r_send, r_edit = await asyncio.gather(send_task, edit_task)
+        assert r_edit["ok"] is True
+        assert r_send["ok"] is False
+        assert r_send["error"]["code"] == "confirm_invalid"
+        assert "the draft changed after the preview" in r_send["error"]["message"]
+        assert draft.sent_as is None
+
+    asyncio.run(run_interleaved(
+        "attach",
+        "add_draft_attachment",
+        {"path": "payroll.xlsx"},
+    ))
+    asyncio.run(run_interleaved(
+        "bcc-body",
+        "update_draft",
+        {"bcc": ["auditor@corp.example"], "body": "replaced text"},
+    ))
+    asyncio.run(run_interleaved(
+        "body-only",
+        "update_draft",
+        {"body": "subtle replacement body"},
+    ))
+
+
+def test_per_draft_lock_serializes_mutations_with_send_and_stays_bounded(tmp_path):
+    events: list[str] = []
+    send_inside = asyncio.Event()
+    release_send = asyncio.Event()
+
+    draft_main = make_content_draft(subject="Main", body="ok")
+    draft_other = make_content_draft(subject="Other", body="ok")
+    by_id = {"RAW-LOCK-1": draft_main, "RAW-LOCK-2": draft_other}
+
+    class _GatedGateway:
+        def __init__(self, account: Any) -> None:
+            self.account = account
+            self.in_send_handler = False
+
+        async def call(self, fn: Any) -> Any:
+            if self.in_send_handler:
+                events.append("send:enter")
+                send_inside.set()
+                await release_send.wait()
+                out = fn(self.account)
+                events.append("send:exit")
+                return out
+            out = fn(self.account)
+            return out
+
+    account = SimpleNamespace(drafts=SimpleNamespace(id=DRAFTS_ID))
+    account.fetch = lambda pairs, only_fields=None: [by_id[i] for i, _ in pairs]
+    gw = _GatedGateway(account)
+    ctx = Context(
+        settings=make_settings(
+            ews_tz=FIXED_OFFSET_TZ,
+            send_enabled=True,
+            ews_capability_tier="full",
+        ),
+        gateway=gw,
+        manager=None,
+        aliaser=get_aliaser(str(tmp_path / "al-lock")),
+        audit=AuditLog(str(tmp_path / "au-lock")),
+    )
+
+    async def scenario() -> None:
+        p1 = await dispatch(ctx, SPEC["send_draft"], {"draft_id": "RAW-LOCK-1"})
+        token = p1["confirm_token"]
+
+        # Wrap _send_draft's gateway call only: once phase-2 preview runs, flip flag.
+        orig_preview = SPEC["send_draft"].preview
+        assert orig_preview is not None
+
+        async def preview_then_arm(c: Any, kw: Dict[str, Any]) -> Dict[str, Any]:
+            res = await orig_preview(c, kw)
+            gw.in_send_handler = True
+            return res
+
+        SPEC["send_draft"].preview = preview_then_arm
+        try:
+            send_task = asyncio.create_task(dispatch(
+                ctx, SPEC["send_draft"], {"draft_id": "RAW-LOCK-1", "confirm_token": token}
+            ))
+            await send_inside.wait()
+            gw.in_send_handler = False
+
+            # Same-draft update/attach/delete must block until send_draft finishes.
+            async def tracked(tag: str, tool_name: str, kw: Dict[str, Any]):
+                res = await dispatch(ctx, SPEC[tool_name], kw)
+                events.append(f"{tag}:done")
+                return res
+
+            upd_same = asyncio.create_task(tracked(
+                "upd_same", "update_draft", {"draft_id": "RAW-LOCK-1", "subject": "After"}
+            ))
+            att_same = asyncio.create_task(tracked(
+                "att_same",
+                "add_draft_attachment",
+                {"draft_id": "RAW-LOCK-1", "filename": "f.txt", "content_base64": _b64(b"x")},
+            ))
+            del_same = asyncio.create_task(tracked(
+                "del_same", "delete_draft", {"draft_id": "RAW-LOCK-1"}
+            ))
+            await asyncio.sleep(0.02)
+            # None of the same-draft mutations finished while send holds the lock.
+            assert events == ["send:enter"]
+
+            # A different draft id is NOT blocked by RAW-LOCK-1's lock.
+            other_res = await dispatch(
+                ctx, SPEC["update_draft"], {"draft_id": "RAW-LOCK-2", "subject": "Independent"}
+            )
+            assert other_res["ok"] is True
+
+            release_send.set()
+            r_send, r_upd, r_att, r_del = await asyncio.gather(
+                send_task, upd_same, att_same, del_same
+            )
+            assert r_send["ok"] is True and r_send["sent"] is True
+            assert r_upd["ok"] is True
+            assert r_att["ok"] is True
+            assert r_del["ok"] is True
+            assert events[:2] == ["send:enter", "send:exit"]
+        finally:
+            SPEC["send_draft"].preview = orig_preview
+
+        # Exercise 100 distinct draft ids (including raising work) and prove the
+        # lock map self-prunes to 0 entries rather than growing without bound.
+        for idx in range(100):
+            key = f"RAW-BOUND-{idx}"
+            if idx % 2 == 0:
+                d = MagicMock()
+                d.parent_folder_id = SimpleNamespace(id=DRAFTS_ID)
+                by_id[key] = d
+                res_d = await dispatch(ctx, SPEC["delete_draft"], {"draft_id": key})
+                assert res_d["ok"] is True
+            else:
+                by_id[key] = RuntimeError("missing")
+                res_e = await dispatch(ctx, SPEC["delete_draft"], {"draft_id": key})
+                assert res_e["ok"] is False
+        assert len(writes._DRAFT_LOCKS) == 0
+
+    asyncio.run(scenario())
+
+
+def test_parse_when_converts_aware_offsets_to_configured_zoneinfo():
+    for raw, expected_hour in (
+        ("2026-11-20T09:00:00+03:00", 9),
+        ("2026-11-20T07:00:00+01:00", 9),
+        ("2026-11-20T01:00:00-05:00", 9),
+        ("2026-11-20T06:00:00+00:00", 9),
+        ("2026-11-20T06:00:00Z", 9),
+    ):
+        dt_local = parse_when(raw, "start", FIXED_OFFSET_TZ)
+        assert isinstance(dt_local.tzinfo, ZoneInfo)
+        assert dt_local.tzinfo == LOCAL_TZ
+        assert dt_local == datetime(2026, 11, 20, expected_hour, 0, tzinfo=LOCAL_TZ)
+
+        dt_utc = parse_when(raw, "start", "UTC")
+        assert isinstance(dt_utc.tzinfo, ZoneInfo)
+        assert dt_utc.tzinfo == ZoneInfo("UTC")
+        assert dt_utc == datetime(2026, 11, 20, 6, 0, tzinfo=ZoneInfo("UTC"))
+
+
+def test_set_oof_create_event_and_update_event_accept_explicit_utc_offsets_with_real_exchangelib(
+    tmp_path, monkeypatch,
+):
+    ver = Version(build=EXCHANGE_2016)
+
+    # 1. set_oof with explicit non-zero UTC offsets (+03:00 and +01:00) using
+    #    real EWSDateTime.from_datetime and real OofSettings XML serialization.
+    oof_account = make_account()
+    oof_ctx = full_ctx(tmp_path / "oof", oof_account)
+    oof_args = {
+        "state": "scheduled",
+        "internal_reply": "Away on leave",
+        "start": "2099-05-01T12:00:00+03:00",
+        "end": "2099-05-02T10:00:00+01:00",
+    }
+    p1 = call(oof_ctx, "set_oof", oof_args)
+    assert p1["requires_confirmation"] is True
+    p2 = call(oof_ctx, "set_oof", {**oof_args, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is True
+    assert p2["start"] == "2099-05-01T12:00+03:00"
+    assert p2["end"] == "2099-05-02T12:00+03:00"
+    assert oof_ctx._circuit_failures == 0
+    oof_xml = xml_to_str(oof_account.oof_settings.to_xml(version=ver))
+    assert "2099-05-01T09:00:00Z" in oof_xml
+    assert "2099-05-02T09:00:00Z" in oof_xml
+
+    # 2 & 3. Non-recurring create_event and update_event with explicit non-zero
+    #        UTC offsets against a REAL offline Account and REAL CalendarItem
+    #        (exercising CalendarItem.clean + CalendarItem.to_xml).
+    CachingProtocol.clear_cache()
+    try:
+        cfg = Configuration(
+            service_endpoint="https://ews.example.invalid/EWS/Exchange.asmx",
+            credentials=Credentials("svc", "secret"),
+            auth_type=BASIC,
+            version=ver,
+        )
+        real_account = Account(
+            primary_smtp_address="exec@corp.example",
+            config=cfg,
+            autodiscover=False,
+            access_type=DELEGATE,
+            default_timezone=EWSTimeZone(FIXED_OFFSET_TZ),
+        )
+        saved_items: list[tuple[CalendarItem, str, Dict[str, Any]]] = []
+
+        def offline_cal_save(self: CalendarItem, **kwargs: Any) -> CalendarItem:
+            self.clean(version=ver)
+            xml_payload = xml_to_str(self.to_xml(version=ver))
+            if not self.id:
+                self.id = "RAW-REAL-CAL-CREATED"
+            saved_items.append((self, xml_payload, kwargs))
+            return self
+
+        existing = CalendarItem(
+            account=real_account,
+            id="RAW-REAL-CAL-EXISTING",
+            changekey="CK-CAL-1",
+            subject="Initial slot",
+            start=EWSDateTime(2026, 11, 20, 8, 0, tzinfo=EWSTimeZone(FIXED_OFFSET_TZ)),
+            end=EWSDateTime(2026, 11, 20, 9, 0, tzinfo=EWSTimeZone(FIXED_OFFSET_TZ)),
+        )
+        monkeypatch.setattr(Account, "calendar", property(lambda _self: None))
+        monkeypatch.setattr(
+            Account,
+            "fetch",
+            lambda _self, ids, only_fields=None, **kw: [existing for _ in ids],
+        )
+        monkeypatch.setattr(CalendarItem, "save", offline_cal_save)
+
+        cal_ctx = full_ctx(tmp_path / "cal", real_account)
+        created = call(cal_ctx, "create_event", {
+            "subject": "Offset create",
+            "start": "2026-11-20T09:00:00+03:00",
+            "end": "2026-11-20T08:00:00+01:00",
+        })
+        assert created["ok"] is True
+        assert len(saved_items) == 1
+        created_item, created_xml, _ = saved_items[0]
+        assert created_item.start == datetime(2026, 11, 20, 9, 0, tzinfo=LOCAL_TZ)
+        assert created_item.end == datetime(2026, 11, 20, 10, 0, tzinfo=LOCAL_TZ)
+        assert "Offset create" in created_xml
+
+        updated = call(cal_ctx, "update_event", {
+            "event_id": "RAW-REAL-CAL-EXISTING",
+            "start": "2026-11-20T11:00:00+03:00",
+            "end": "2026-11-20T10:00:00+01:00",
+        })
+        assert updated["ok"] is True
+        assert updated["updated_fields"] == ["start", "end"]
+        assert len(saved_items) == 2
+        assert existing.start == datetime(2026, 11, 20, 11, 0, tzinfo=LOCAL_TZ)
+        assert existing.end == datetime(2026, 11, 20, 12, 0, tzinfo=LOCAL_TZ)
+        assert cal_ctx._circuit_failures == 0
+    finally:
+        CachingProtocol.clear_cache()
+
+
+def test_update_messages_flag_complete_false_preserves_open_followup_flag(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+
+    open_flag = MagicMock()
+    open_flag.flag_status = 2
+    unflagged = MagicMock()
+    unflagged.flag_status = None
+    completed = MagicMock()
+    completed.flag_status = 1
+
+    account._by_id.update({
+        "RAW-OPEN": open_flag,
+        "RAW-NONE": unflagged,
+        "RAW-DONE": completed,
+    })
+
+    res = call(ctx, "update_messages", {
+        "ids": ["RAW-OPEN", "RAW-NONE", "RAW-DONE"],
+        "flag_complete": False,
+    })
+    assert res == {"ok": True, "updated": 1, "failed": []}
+    assert open_flag.flag_status == 2
+    open_flag.save.assert_not_called()
+    assert unflagged.flag_status is None
+    unflagged.save.assert_not_called()
+    assert completed.flag_status is None
+    completed.save.assert_called_once_with(update_fields=["flag_status"])
+
+    # Combining set_read=True with flag_complete=False on an open-flagged item
+    # saves only is_read and leaves flag_status == 2 intact.
+    res_combo = call(ctx, "update_messages", {
+        "ids": ["RAW-OPEN"],
+        "set_read": True,
+        "flag_complete": False,
+    })
+    assert res_combo == {"ok": True, "updated": 1, "failed": []}
+    assert open_flag.flag_status == 2
+    open_flag.save.assert_called_once_with(update_fields=["is_read"])
+
+
+def test_draft_fetches_use_explicit_projections_excluding_mime_content(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+
+    # 1. create_draft reply-with-attachment path (fetches reply_to + saved draft)
+    original = MagicMock()
+    original.subject = "Plan"
+    reply_item = MagicMock()
+    reply_item.to_recipients = [SimpleNamespace(email_address="peer@corp.example")]
+    reply_item.cc_recipients = None
+    reply_item.save.return_value = SimpleNamespace(id="RAW-PROJ-REPLY", changekey="CK1")
+    original.create_reply.return_value = reply_item
+
+    draft = make_content_draft(subject="Re: Plan", to=("peer@corp.example",), body="Thanks")
+    draft.changekey = "CK2"
+    account._by_id.update({"RAW-PROJ-ORIG": original, "RAW-PROJ-REPLY": draft})
+
+    res_reply = call(ctx, "create_draft", {
+        "mode": "reply",
+        "reply_to": "RAW-PROJ-ORIG",
+        "body": "Thanks",
+        "attachments": [{"filename": "note.txt", "content_base64": _b64(b"hi")}],
+    })
+    assert res_reply["ok"] is True
+
+    # 2. add_draft_attachment
+    res_add = call(ctx, "add_draft_attachment", {
+        "draft_id": "RAW-PROJ-REPLY",
+        "filename": "second.txt",
+        "content_base64": _b64(b"abc"),
+    })
+    assert res_add["ok"] is True
+
+    # 3. update_draft
+    res_upd = call(ctx, "update_draft", {
+        "draft_id": "RAW-PROJ-REPLY",
+        "subject": "Re: Plan v2",
+    })
+    assert res_upd["ok"] is True
+
+    # 4. send_draft (phase 1 preview + phase 2 gate preview + phase 2 handler send)
+    p1 = call(ctx, "send_draft", {"draft_id": "RAW-PROJ-REPLY"})
+    assert p1["requires_confirmation"] is True
+    p2 = call(ctx, "send_draft", {
+        "draft_id": "RAW-PROJ-REPLY",
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is True and p2["sent"] is True
+
+    # 5. delete_draft
+    to_delete = make_content_draft()
+    account._by_id["RAW-PROJ-DEL"] = to_delete
+    res_del = call(ctx, "delete_draft", {"draft_id": "RAW-PROJ-DEL"})
+    assert res_del["ok"] is True
+
+    assert account.fetch_projections == [
+        writes._REPLY_SOURCE_FIELDS,
+        writes._DRAFT_ATTACH_FIELDS,
+        writes._DRAFT_ATTACH_FIELDS,
+        writes._DRAFT_UPDATE_FIELDS,
+        writes._DRAFT_PREVIEW_FIELDS,
+        writes._DRAFT_PREVIEW_FIELDS,
+        writes._DRAFT_SEND_FIELDS,
+        writes._DRAFT_DELETE_FIELDS,
+    ]
+    for projection in account.fetch_projections:
+        assert isinstance(projection, list) and projection
+        assert "mime_content" not in projection

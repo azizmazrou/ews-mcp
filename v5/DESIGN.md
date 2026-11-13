@@ -29,8 +29,12 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
    authentication circuit breaker enforces a cooldown
    (`EWS_AUTH_FAILURE_COOLDOWN_SECONDS`, default 900) and a per-process cap
    (`EWS_AUTH_MAX_REJECTIONS`, default 3) so a stale secret never locks out
-   the directory account. All exchangelib imports are module-top; every
-   kwarg-bearing call and overridden hook has a signature pin.
+   the directory account. `EWS_AUTH_MAX_REJECTIONS` counts rejected
+   credential submissions (matching directory lockout counters), so
+   concurrent requests already in flight when the first 401 arrives are each
+   counted and a burst can reach the cap at once. All exchangelib imports
+   are module-top; every kwarg-bearing call and overridden hook has a
+   signature pin.
 6. **No footprints.** No personal names, real addresses, employer
    identifiers, personal skill names, mailbox content, or tokens in any
    tracked file, comment, commit message, or doc. Fixtures use

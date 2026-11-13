@@ -23,11 +23,14 @@ import inspect
 import pytest
 from exchangelib import (
     BASIC,
+    DELEGATE,
     Account,
     CalendarItem,
     Configuration,
     Credentials,
     EWSDateTime,
+    EWSTimeZone,
+    HTMLBody,
     Message,
     OofSettings,
 )
@@ -36,13 +39,14 @@ from exchangelib.fields import IntegerField
 from exchangelib.folders import Folder
 from exchangelib.folders.collections import FolderCollection
 from exchangelib.items import Item, ReplyToItem
-from exchangelib.properties import ConversationId
+from exchangelib.properties import ConversationId, Mailbox
 from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
 from exchangelib.version import EXCHANGE_2016, Version
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from ewsmcp.gateway.client import RejectingFaultTolerance
+from ewsmcp.tools import writes
 
 
 def _params(func):
@@ -271,3 +275,63 @@ def test_every_forced_auth_setting_maps_to_a_scheme_the_library_accepts():
             version=Version(build=EXCHANGE_2016),
         )
         assert config.auth_type == AUTH_TYPE_BY_SETTING[setting]
+
+
+def test_writes_draft_field_projections_match_real_message_fields():
+    """Every field in writes.py's draft/reply projections must exist on
+    exchangelib.Message and exclude mime_content."""
+    # The library's own validator is the authority: it also accepts the item
+    # id and changekey, which are not entries in Message.FIELDS.
+    validator = Folder()
+    version = Version(build=EXCHANGE_2016)
+    for projection in (
+        writes._REPLY_SOURCE_FIELDS,
+        writes._DRAFT_ATTACH_FIELDS,
+        writes._DRAFT_UPDATE_FIELDS,
+        writes._DRAFT_DELETE_FIELDS,
+        writes._DRAFT_PREVIEW_FIELDS,
+        writes._DRAFT_SEND_FIELDS,
+    ):
+        assert projection
+        assert "mime_content" not in projection
+        for name in projection:
+            validator.validate_item_field(field=name, version=version)
+
+    # Verify offline that a real Message populated only with _REPLY_SOURCE_FIELDS
+    # supports create_reply, create_reply_all, and create_forward without error.
+    CachingProtocol.clear_cache()
+    try:
+        account = Account(
+            primary_smtp_address="exec@corp.example",
+            config=Configuration(
+                service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+                credentials=Credentials("svc", "secret"),
+                auth_type=BASIC,
+                version=Version(build=EXCHANGE_2016),
+            ),
+            autodiscover=False,
+            access_type=DELEGATE,
+            default_timezone=EWSTimeZone("UTC"),
+        )
+        msg = Message(
+            account=account,
+            id="RAW-MSG-1",
+            changekey="CK-MSG-1",
+            subject="Thread subject",
+            sender=Mailbox(email_address="sender@corp.example"),
+            author=Mailbox(email_address="sender@corp.example"),
+            reply_to=[Mailbox(email_address="sender@corp.example")],
+            to_recipients=[Mailbox(email_address="exec@corp.example")],
+            cc_recipients=[Mailbox(email_address="peer@corp.example")],
+            bcc_recipients=None,
+        )
+        body = HTMLBody("<html><body><p>ack</p></body></html>")
+        rep = msg.create_reply("Re: Thread subject", body)
+        assert [m.email_address for m in rep.to_recipients] == ["sender@corp.example"]
+        rep_all = msg.create_reply_all("Re: Thread subject", body)
+        assert rep_all.to_recipients
+        fwd = msg.create_forward("Fwd: Thread subject", body, ["target@corp.example"])
+        # Recipients given as plain strings are kept as given.
+        assert list(fwd.to_recipients) == ["target@corp.example"]
+    finally:
+        CachingProtocol.clear_cache()

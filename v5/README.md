@@ -157,7 +157,7 @@ docker run --rm -p 127.0.0.1:8000:8000 --env-file .env -v ewsmcp-data:/data ews-
 | Variable | Default | Meaning |
 |---|---|---|
 | `EWS_SERVER_URL` / `EWS_EMAIL` / `EWS_USERNAME` / `EWS_PASSWORD` | — | Exchange endpoint + credentials (auth auto-negotiation; blank `EWS_AUTH_TYPE_FORCE` is unset) |
-| `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` / `EWS_AUTH_MAX_REJECTIONS` | `900` / `3` | Lockout guard on HTTP 401 rejections: cooldown between probes (min `60`) and permanent per-process cap (`1`–`10`); values outside fail startup validation |
+| `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` / `EWS_AUTH_MAX_REJECTIONS` | `900` / `3` | Lockout guard on HTTP 401 rejections: cooldown between probes (min `60`) and permanent per-process cap (`1`–`10`); values outside fail startup validation. `EWS_AUTH_MAX_REJECTIONS` counts rejected submissions (matching directory lockout counters), so concurrent requests already in flight when the first 401 arrives are each counted and a burst can reach the cap at once |
 | `EWS_CAPABILITY_TIER` | `draft` | `read` ⊂ `draft` ⊂ `full` — above-tier tools are unregistered AND refused |
 | `SEND_ENABLED` | `false` | Global send kill-switch (blocks every send-class tool) |
 | `EWS_RECIPIENT_ALLOWLIST` / `EWS_RECIPIENT_DENYLIST` | — | Glob lists enforced on argument-borne AND draft-resolved recipients |
