@@ -286,14 +286,22 @@ class CreateReplyDraftTool(BaseTool):
                 if r and hasattr(r, "email_address") and r.email_address
             ]
 
+            # Mirror standard reply-all semantics: sender + original To stay in
+            # To; original Cc recipients stay in Cc rather than being promoted.
+            reply_cc_recipients = []
             if reply_all:
                 seen = set()
                 reply_to_recipients = []
-                for email in [original_from_email] + original_to + original_cc:
+                for email in [original_from_email] + original_to:
                     if not email or email == account.primary_smtp_address or email in seen:
                         continue
                     seen.add(email)
                     reply_to_recipients.append(Mailbox(email_address=email))
+                for email in original_cc:
+                    if not email or email == account.primary_smtp_address or email in seen:
+                        continue
+                    seen.add(email)
+                    reply_cc_recipients.append(Mailbox(email_address=email))
             else:
                 reply_to_recipients = [Mailbox(email_address=original_from_email)]
 
@@ -337,12 +345,21 @@ class CreateReplyDraftTool(BaseTool):
                 folder=account.drafts,
             )
 
-            # Issue #119: persist caller-supplied cc/bcc on the draft.
-            # De-duplicate against to_recipients (already in seen) so a CC'd
-            # address does not also appear in TO when reply_all=True.
+            # Issue #119: persist caller-supplied cc/bcc on the draft, ADDED to
+            # the Cc mirrored from the original on reply-all (assigning only the
+            # caller's list would drop the original Cc recipients again).
+            # De-duplicate against To and against each other.
             to_set = {r.email_address for r in reply_to_recipients}
-            cc_to_save = [Mailbox(email_address=e) for e in extra_cc if e and e not in to_set]
-            bcc_to_save = [Mailbox(email_address=e) for e in extra_bcc if e and e not in to_set]
+            cc_seen = {r.email_address for r in reply_cc_recipients}
+            cc_to_save = list(reply_cc_recipients)
+            for e in extra_cc:
+                if e and e not in to_set and e not in cc_seen:
+                    cc_seen.add(e)
+                    cc_to_save.append(Mailbox(email_address=e))
+            bcc_to_save = [
+                Mailbox(email_address=e) for e in dict.fromkeys(extra_bcc)
+                if e and e not in to_set and e not in cc_seen
+            ]
             if cc_to_save:
                 message.cc_recipients = cc_to_save
             if bcc_to_save:
