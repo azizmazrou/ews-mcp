@@ -37,3 +37,9 @@ asyncio_mode = "strict"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+[tool.ruff.lint]
+# Explicit rule set: the gate must not change meaning when a new ruff release
+# widens its defaults (that turned CI red on an untouched tree). Widen it here,
+# deliberately, in the same change that fixes what the new rules report.
+select = ["E4", "E7", "E9", "F"]
