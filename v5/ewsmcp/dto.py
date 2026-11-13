@@ -1,7 +1,7 @@
 """Token-lean DTO builders (DESIGN.md §DTOs). The model never sees a raw EWS id:
 ``id`` IS the short alias; the aliaser holds the raw id + changekey."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -10,8 +10,14 @@ from .ids import IdAliaser
 
 
 def fmt_dt(value: Any, tz: str) -> Optional[str]:
-    if value is None or not hasattr(value, "astimezone"):
+    if value is None:
         return None
+    if not hasattr(value, "astimezone"):
+        # All-day boundaries arrive as EWSDate — a plain date subclass with
+        # no clock time and no tzinfo, so there is nothing to convert.
+        # Returning None here dropped the date silently and left an all-day
+        # event indistinguishable from a broken record.
+        return value.isoformat() if isinstance(value, date) else None
     try:
         return value.astimezone(ZoneInfo(tz)).isoformat(timespec="minutes")
     except Exception:
@@ -140,6 +146,10 @@ def event_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
         "start": fmt_dt(getattr(item, "start", None), tz),
         "end": fmt_dt(getattr(item, "end", None), tz),
     }
+    if getattr(item, "is_all_day", False):
+        # Without this the caller cannot tell a full-day block from a
+        # timed one, because all-day start/end carry a date but no clock.
+        card["all_day"] = True
     location = getattr(item, "location", None)
     if location:
         card["location"] = str(location)
