@@ -470,15 +470,16 @@ def test_overview_shape(tmp_path):
 # --- list_folders --------------------------------------------------------------------
 
 
-def _folder(raw_id, name, total=1, unread=0, children=()):
+def _folder(raw_id, name, total=1, unread=0, children=(), folder_class=None):
     return SimpleNamespace(id=raw_id, name=name, total_count=total,
-                           unread_count=unread, children=list(children))
+                           unread_count=unread, children=list(children),
+                           folder_class=folder_class)
 
 
 def test_list_folders_walk_with_paths_and_wk(tmp_path):
     sub = _folder("FLD-SUB=", "2026", total=4)
     inbox_folder = _folder("FLD-INBOX=", "Inbox", total=5, unread=2,
-                           children=[sub])
+                           children=[sub], folder_class="IPF.Note")
     empty = _folder("FLD-EMPTY=", "Archive Old", total=0)
     account = _account()
     account.msg_folder_root = _folder("FLD-ROOT=", "root",
@@ -493,7 +494,9 @@ def test_list_folders_walk_with_paths_and_wk(tmp_path):
     assert by_path["Inbox"]["unread"] == 2
     assert by_path["Inbox"]["children"] == 1
     assert by_path["Inbox"]["id"].startswith("f")
+    assert by_path["Inbox"]["folder_class"] == "IPF.Note"
     assert "wk" not in by_path["Inbox/2026"]
+    assert "folder_class" not in by_path["Inbox/2026"]
     # alias roundtrip: the f-alias resolves back to the raw folder id
     assert ctx.aliaser.resolve(by_path["Inbox"]["id"]) == "FLD-INBOX="
 

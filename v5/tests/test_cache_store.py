@@ -200,3 +200,39 @@ def test_task_rows(store):
     store.delete_tasks_by_id(["T1"])
     rows, total = store.task_rows(include_completed=True)
     assert total == 1
+
+
+# schema 1 folders table: no folder_class column.
+_LEGACY_FOLDERS_DDL = """
+CREATE TABLE folders (
+    ews_id   TEXT PRIMARY KEY,
+    name     TEXT,
+    path     TEXT,
+    wk       TEXT,
+    total    INTEGER,
+    unread   INTEGER,
+    children INTEGER
+);
+"""
+
+
+def test_schema_1_mirror_gains_folder_class_without_losing_rows(tmp_path):
+    """Deployed mirrors predate folder_class; CREATE TABLE IF NOT EXISTS will
+    not add it, and the read path selects the column unconditionally — so the
+    ALTER has to run on open, and mirrored folders have to survive it."""
+    db_path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(_LEGACY_FOLDERS_DDL)
+    legacy.execute("INSERT INTO folders VALUES ('F-IN', 'Inbox', 'Inbox', "
+                   "'f:inbox', 3, 1, 0)")
+    legacy.commit()
+    legacy.close()
+
+    store = CacheStore(db_path)
+    try:
+        rows = store.folder_rows()
+        assert [r["path"] for r in rows] == ["Inbox"]
+        assert rows[0]["unread"] == 1
+        assert rows[0]["folder_class"] is None  # migrated, not yet backfilled
+    finally:
+        store.close()

@@ -35,7 +35,9 @@ from ..normalize import fts_match_expression, normalize_ar
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+# Recorded in meta.schema so an operator inspecting a mirror can tell which
+# shape it holds; the migration itself is the additive check in _ensure_schema.
+_SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -107,13 +109,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     status      TEXT
 );
 CREATE TABLE IF NOT EXISTS folders (
-    ews_id   TEXT PRIMARY KEY,
-    name     TEXT,
-    path     TEXT,
-    wk       TEXT,
-    total    INTEGER,
-    unread   INTEGER,
-    children INTEGER
+    ews_id       TEXT PRIMARY KEY,
+    name         TEXT,
+    path         TEXT,
+    wk           TEXT,
+    folder_class TEXT,
+    total        INTEGER,
+    unread       INTEGER,
+    children     INTEGER
 );
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -216,6 +219,12 @@ class CacheStore:
         with self._lock:
             conn = self._writer_conn()
             conn.executescript(_SCHEMA)
+            # CREATE TABLE IF NOT EXISTS is a no-op on an already-deployed
+            # mirror, so schema 1 databases need the new column added by hand
+            # — the read path selects it unconditionally.
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(folders)")}
+            if "folder_class" not in cols:
+                conn.execute("ALTER TABLE folders ADD COLUMN folder_class TEXT")
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', ?)",
                 (str(_SCHEMA_VERSION),),
@@ -363,11 +372,11 @@ class CacheStore:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO folders (ews_id, name, path, wk,
-                        total, unread, children)
-                    VALUES (:ews_id, :name, :path, :wk, :total, :unread,
-                        :children)
+                        folder_class, total, unread, children)
+                    VALUES (:ews_id, :name, :path, :wk, :folder_class, :total,
+                        :unread, :children)
                     """,
-                    r,
+                    {"folder_class": None, **r},  # optional: Exchange may omit it
                 )
 
     def get_sync_state(self, key: str) -> Optional[str]:

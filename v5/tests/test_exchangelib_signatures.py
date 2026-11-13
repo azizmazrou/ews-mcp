@@ -141,6 +141,13 @@ def test_folder_total_count_is_a_stored_field_not_a_probe():
     assert isinstance(Folder.total_count, IntegerField)
 
 
+def test_folder_class_is_a_real_field():
+    """folder_class is the raw EWS FolderClass string exposed verbatim by
+    list_folders (mail/calendar/contacts type marker) — pinned so an
+    exchangelib rename/removal breaks this test before it breaks the tool."""
+    assert "folder_class" in [f.name for f in Folder.FIELDS]
+
+
 def test_protocol_cache_is_evictable():
     """gateway.reset() calls CachingProtocol.clear_cache() to force a
     fresh session + auth negotiation; closing the protocol alone hands
