@@ -11,6 +11,7 @@ drift would fail here first.
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -111,6 +112,12 @@ class FakeDraftMessage:
         self.changekey = "CK-NEW"
         return self
 
+    def attach(self, attachment):
+        if attachment.name == "fails.txt":
+            raise RuntimeError("ErrorMessageSizeExceeded")
+        self.attachments = getattr(self, "attachments", []) + [attachment]
+        self.changekey = "CK-AFTER-ATTACH"
+
 
 class FakeCalendarItem:
     last = None
@@ -139,16 +146,17 @@ def make_sendable_draft():
 
 
 def test_pack_surface_classes_and_confirm_declarations():
-    assert len(writes.TOOLS) == 12
+    assert len(writes.TOOLS) == 13
     classes = {s.name: s.side_effect_class for s in writes.TOOLS}
     assert classes == {
         "create_draft": "write", "update_draft": "write", "delete_draft": "write",
+        "add_draft_attachment": "write",
         "update_messages": "write", "move_messages": "write",
         "create_event": "write", "update_event": "write",
         "send_draft": "send", "respond_to_event": "send", "set_oof": "send",
         "cancel_event": "destructive", "delete_messages": "destructive",
     }
-    for name in ("create_draft", "update_draft", "delete_draft",
+    for name in ("create_draft", "update_draft", "delete_draft", "add_draft_attachment",
                  "update_messages", "move_messages"):
         assert SPEC[name].confirm is False
     for name in ("respond_to_event", "cancel_event", "set_oof"):
@@ -209,6 +217,136 @@ def test_create_draft_reply_calls_create_reply_and_saves_to_drafts(tmp_path):
     assert ctx.aliaser.resolve(res["draft_id"]) == "RAW-REPLY-DRAFT"
     assert res["preview"]["to"] == ["boss@corp.example"]
     assert res["preview"]["subject"] == "Re: Budget"
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def test_create_draft_attaches_files(tmp_path, monkeypatch):
+    ctx = make_ctx(tmp_path, make_account())
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    res = call(ctx, "create_draft", {
+        "to": ["a@x.com"], "body": "Hi",
+        "attachments": [{"filename": "/mnt/data/list.pdf", "content_base64": _b64(b"%PDF")}],
+    })
+    assert res["ok"] is True
+    assert res["attachments"] == [{"name": "list.pdf", "size": 4}]
+    assert "attachments_failed" not in res
+    attached = FakeDraftMessage.last.attachments[0]
+    assert attached.content == b"%PDF"
+    assert attached.content_type == "application/pdf"
+
+
+def test_create_draft_keeps_the_draft_when_an_attachment_fails(tmp_path, monkeypatch):
+    ctx = make_ctx(tmp_path, make_account())
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    res = call(ctx, "create_draft", {
+        "to": ["a@x.com"], "body": "Hi",
+        "attachments": [{"filename": "ok.txt", "content_base64": _b64(b"a")},
+                        {"filename": "fails.txt", "content_base64": _b64(b"b")}],
+    })
+    assert res["ok"] is True and res["draft_id"].startswith("d")
+    assert res["attachments"] == [{"name": "ok.txt", "size": 1}]
+    assert res["attachments_failed"][0]["name"] == "fails.txt"
+    assert "ErrorMessageSizeExceeded" in res["attachments_failed"][0]["error"]
+
+
+@pytest.mark.parametrize("attachment, message", [
+    ({"filename": "a.txt", "content_base64": "not base64!"}, "not valid base64"),
+    ({"filename": "a.txt", "content_base64": "{{file:F-123456}}"}, "not valid base64"),
+    ({"filename": "a.txt", "content_base64": ""}, "empty"),
+    ({"filename": "  ", "content_base64": "YQ=="}, "needs a filename"),
+])
+def test_create_draft_rejects_bad_attachment_before_saving(tmp_path, monkeypatch,
+                                                           attachment, message):
+    ctx = make_ctx(tmp_path, make_account())
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    FakeDraftMessage.last = None
+    res = call(ctx, "create_draft", {"to": ["a@x.com"], "body": "Hi",
+                                     "attachments": [attachment]})
+    assert res["ok"] is False and message in res["error"]["message"]
+    assert FakeDraftMessage.last is None
+
+
+def test_create_draft_rejects_too_much_data(tmp_path, monkeypatch):
+    ctx = make_ctx(tmp_path, make_account())
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    monkeypatch.setattr(writes, "MAX_ATTACHMENT_BYTES", 3)
+    res = call(ctx, "create_draft", {
+        "to": ["a@x.com"], "body": "Hi",
+        "attachments": [{"filename": "a", "content_base64": _b64(b"ab")},
+                        {"filename": "b", "content_base64": _b64(b"cd")}],
+    })
+    assert res["ok"] is False and "exceed" in res["error"]["message"]
+
+
+def test_create_draft_reply_attaches_to_the_fetched_draft(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    original = MagicMock()
+    original.create_reply.return_value.save.return_value = SimpleNamespace(
+        id="RAW-REPLY-DRAFT", changekey="CK1")
+    saved_draft = MagicMock()
+    account._by_id.update({"RAW-ORIG": original, "RAW-REPLY-DRAFT": saved_draft})
+    alias = ctx.aliaser.alias_for("RAW-ORIG", "m")
+    res = call(ctx, "create_draft", {
+        "mode": "reply", "reply_to": alias, "body": "Thanks",
+        "attachments": [{"filename": "a.txt", "content_base64": _b64(b"a")}],
+    })
+    assert res["ok"] is True
+    assert saved_draft.attach.call_count == 1
+    assert saved_draft.attach.call_args.args[0].name == "a.txt"
+
+
+def test_add_draft_attachment(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    draft = make_sendable_draft()
+    draft.changekey = "CK2"
+    draft.attachments = [SimpleNamespace(name="old.pdf", size=9)]
+    account._by_id["RAW-D"] = draft
+    alias = ctx.aliaser.alias_for("RAW-D", "d")
+    res = call(ctx, "add_draft_attachment", {
+        "draft_id": alias, "filename": "a.txt", "content_base64": _b64(b"abc"),
+        "content_type": "text/plain",
+    })
+    assert res["ok"] is True
+    assert res["added"] == {"name": "a.txt", "size": 3}
+    assert res["attachments"] == [{"name": "old.pdf", "size": 9}]  # the fake's attach() is a no-op
+    attached = draft.attach.call_args.args[0]
+    assert (attached.content, attached.content_type) == (b"abc", "text/plain")
+
+
+def test_add_draft_attachment_refuses_a_non_draft(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    item = make_sendable_draft()
+    item.parent_folder_id = SimpleNamespace(id="SOME-OTHER-FOLDER")
+    account._by_id["RAW-M"] = item
+    res = call(ctx, "add_draft_attachment", {
+        "draft_id": ctx.aliaser.alias_for("RAW-M", "m"),
+        "filename": "a.txt", "content_base64": _b64(b"a"),
+    })
+    assert res["ok"] is False and "not a draft" in res["error"]["message"]
+    item.attach.assert_not_called()
+
+
+def test_send_draft_preview_lists_attachments_and_token_binds_them(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    draft = make_sendable_draft()
+    draft.attachments = [SimpleNamespace(name="list.xlsx", size=11)]
+    account._by_id["RAW-D"] = draft
+    alias = ctx.aliaser.alias_for("RAW-D", "d")
+    p1 = call(ctx, "send_draft", {"draft_id": alias})
+    assert p1["preview"]["attachment_count"] == 1
+    assert p1["preview"]["attachments"] == [{"name": "list.xlsx", "size": 11}]
+    # Same count, other file: the preview no longer holds.
+    draft.attachments = [SimpleNamespace(name="other.xlsx", size=11)]
+    p2 = call(ctx, "send_draft", {"draft_id": alias, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is False
+    draft.send.assert_not_called()
 
 
 def test_create_draft_validation(tmp_path):

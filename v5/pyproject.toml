@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "exchangelib==5.0.3",
     "jsonschema>=4.21",
-    "mcp>=1.27,<2",
+    "mcp>=1.30,<2",
     "pydantic>=2.8",
     "pydantic-settings>=2.5",
     "tzdata",  # zoneinfo source of truth: slim images/Windows ship no OS tzdb

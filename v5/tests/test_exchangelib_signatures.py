@@ -40,6 +40,7 @@ PINS = {
     # --- fetch / projection (mail_read._fetch_one, writes._fetch_many)
     Account.fetch: ["self", "ids", "folder", "only_fields", "chunk_size"],
     # --- draft lifecycle (writes._create_draft / _update_draft)
+    Item.attach: ["self", "attachments"],
     Message.create_reply: ["self", "subject", "body", "to_recipients",
                            "cc_recipients", "bcc_recipients", "author"],
     Message.create_reply_all: ["self", "subject", "body", "author"],
