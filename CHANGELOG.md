@@ -35,6 +35,7 @@
 - A tool call that completed is no longer reported as `auth_failed` because another call saw a 401 at the same time.
 - A 401 that says the account is locked out is counted and raised at once even when the response also carries `Connection: close` (the library would report it as a busy server and retry).
 - Only an authenticated round trip closes the authentication breaker: after the cooldown the next call probes first, so a call answered from memory can no longer reset the count.
+- Lockout-guard edge cases found in a second review: a half-open call does not probe if a rejection landed while it was queued; a probe that overlaps another thread's rejection is not reported as warm; a 401 swallowed inside a tool function and followed by another error is still `auth_failed`; listing well-known folders stops at the first rejection instead of asking four more times.
 - After a 401 inside a tool call the connection manager always arms one recovery probe after the cooldown, also with the heartbeat disabled; a half-open probe keeps its claim until the worker finishes.
 - `set_oof`, `create_event` and `update_event` accept times with an explicit non-zero UTC offset (they failed with `UnknownTimeZone`): aware inputs are converted to the configured named zone.
 - `update_messages(flag_complete=false)` only clears a completed flag; an open follow-up flag is left alone.

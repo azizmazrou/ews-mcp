@@ -137,9 +137,11 @@ class RejectingFaultTolerance(FaultTolerance):
 
     exchangelib 5.0.3's ``FaultTolerance`` maps HTTP 401 onto
     ``ErrorServerBusy("Caused by HTTP 401 response")`` and retries with
-    exponential back-off up to ``max_wait``. Any 401 whose body does not
-    contain ``b"currently locked out"`` raises ``UnauthorizedError`` at once;
-    locked-out 401s and all other statuses delegate to ``super()`` unchanged.
+    exponential back-off up to ``max_wait``. Here every 401 is counted and
+    raised as ``UnauthorizedError`` at once, with the library's message when
+    the body says the account is locked out (delegating that case would let
+    a ``Connection: close`` header turn it into a retried busy-server error).
+    Every other status delegates to ``super()`` unchanged.
     """
 
     def __init__(
@@ -487,10 +489,14 @@ class EWSGateway:
                 err = self._handle_swallowed_auth_rejection(tbrk_before)
                 claim_released = True
                 raise err
-            if self._breaker.seq == seq_before:
-                self._breaker.record_success()
-                self.last_connection_error = None
-                claim_released = True
+            if self._breaker.seq != seq_before:
+                # Another thread was rejected while this probe ran. Reporting
+                # "warm" here would end the warm-up loop with the breaker
+                # still open and nothing left to probe again.
+                raise self._breaker.current_error()
+            self._breaker.record_success()
+            self.last_connection_error = None
+            claim_released = True
             return True
         except ToolError as err:
             if err.code == "auth_failed":
@@ -505,6 +511,14 @@ class EWSGateway:
             logger.error("connection test rejected credentials: %s", err.message)
             raise err from exc
         except Exception as e:
+            if (
+                _thread_401_seq() != t401_before
+                or _thread_breaker_seq(self._breaker) != tbrk_before
+            ):
+                err = self._handle_swallowed_auth_rejection(tbrk_before)
+                claim_released = True
+                self.last_connection_error = f"ToolError: {err.message}"
+                raise err from e
             self.last_connection_error = f"{type(e).__name__}: {e}"
             logger.error("connection test failed: %s", self.last_connection_error)
             return False
@@ -521,13 +535,18 @@ class EWSGateway:
     async def call(self, fn: Callable[[Account], Any]) -> Any:
         """Run blocking EWS work on the bounded pool; the pool size IS the
         EWS concurrency cap (polite guest on the per-user throttle budget)."""
-        _seq_gate, claimed = self._breaker.before_call()
+        loop = asyncio.get_running_loop()
+        seq_gate, claimed = self._breaker.before_call()
 
         def run_on_pool() -> Any:
             claim_released = False
             try:
                 if not claimed:
                     self._breaker.check_open()
+                elif self._breaker.seq != seq_gate:
+                    # A rejection landed while this half-open call waited for
+                    # a worker: the breaker is open again. Do not probe.
+                    raise self._breaker.current_error()
                 t401_before = _thread_401_seq()
                 tbrk_before = _thread_breaker_seq(self._breaker)
                 try:
@@ -545,6 +564,9 @@ class EWSGateway:
                             err = self._handle_swallowed_auth_rejection(tbrk_before)
                             claim_released = True
                             raise err
+                        if self._breaker.seq != seq_gate:
+                            # Another thread was rejected during the probe.
+                            raise self._breaker.current_error()
                         self._breaker.record_success()
                         claim_released = True
                     out = fn(account)
@@ -552,6 +574,19 @@ class EWSGateway:
                     err = self._handle_auth_rejection(exc, tbrk_before)
                     claim_released = True
                     raise err from exc
+                except Exception as exc:
+                    if isinstance(exc, ToolError) and exc.code == "auth_failed":
+                        raise
+                    if (
+                        _thread_401_seq() != t401_before
+                        or _thread_breaker_seq(self._breaker) != tbrk_before
+                    ):
+                        # A 401 was swallowed and something else failed after
+                        # it: the cause is still the rejected credentials.
+                        err = self._handle_swallowed_auth_rejection(tbrk_before)
+                        claim_released = True
+                        raise err from exc
+                    raise
                 if (
                     _thread_401_seq() != t401_before
                     or _thread_breaker_seq(self._breaker) != tbrk_before
@@ -564,7 +599,6 @@ class EWSGateway:
                 if claimed and not claim_released:
                     self._breaker.release_half_open()
 
-        loop = asyncio.get_running_loop()
         try:
             c_fut = self._pool.submit(run_on_pool)
         except BaseException:
@@ -611,6 +645,8 @@ class EWSGateway:
             try:
                 wf = getattr(account, attr, None)
                 fid = getattr(wf, "id", None) if wf is not None else None
+            except UnauthorizedError:
+                raise  # never ask again after a rejection
             except Exception:
                 fid = None
             if isinstance(fid, str) and fid:

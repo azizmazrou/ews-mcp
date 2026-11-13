@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from exchangelib.errors import UnauthorizedError
+
 from ..bodyclean import clean_body
 from ..dates import parse_when
 from ..dto import (
@@ -306,6 +308,8 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
                 fid = getattr(getattr(account, attr, None), "id", None)
                 if fid:
                     wk_by_raw_id.setdefault(fid, wk_alias)
+            except UnauthorizedError:
+                raise  # never ask again after a rejection
             except Exception:
                 continue
         rows: List[Dict[str, Any]] = []

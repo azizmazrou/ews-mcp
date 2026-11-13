@@ -24,8 +24,8 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
    exchangelib auto-negotiation is the default because it adapts to the
    authentication schemes the server offers, and blank `EWS_AUTH_TYPE_FORCE`
    values load as unset.
-   `RejectingFaultTolerance` raises `UnauthorizedError` on the first HTTP
-   401 (unless the body carries `currently locked out`), and `EWSGateway`'s
+   `RejectingFaultTolerance` counts and raises `UnauthorizedError` on every
+   HTTP 401, locked-out responses included, and `EWSGateway`'s
    authentication circuit breaker enforces a cooldown
    (`EWS_AUTH_FAILURE_COOLDOWN_SECONDS`, default 900) and a per-process cap
    (`EWS_AUTH_MAX_REJECTIONS`, default 3) so a stale secret never locks out

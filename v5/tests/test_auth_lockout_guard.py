@@ -1331,3 +1331,128 @@ def test_half_open_call_without_network_io_cannot_close_the_breaker():
     finally:
         gw._pool.shutdown(wait=True)
 
+
+def test_swallowed_401_inside_a_tool_function_on_a_closed_breaker_is_auth_failed():
+    """The tool function swallows a 401 and returns normally; the call must
+    still fail as auth_failed (checked after the function, breaker closed)."""
+    clock = FakeClock()
+    gw = EWSGateway(_settings(), clock=clock.now)
+    policy = RejectingFaultTolerance(
+        max_wait=10, on_rejection=lambda: gw._breaker.record_rejection())
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=lambda: None),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    ran = []
+
+    def swallowing(_acct: Any) -> str:
+        ran.append(1)
+        try:
+            policy.raise_response_errors(_HTTP_401)
+        except UnauthorizedError:
+            pass
+        return "should-not-return"
+
+    try:
+        with pytest.raises(ToolError) as err:
+            asyncio.run(gw.call(swallowing))
+        assert err.value.code == "auth_failed"
+        assert ran == [1]
+        assert gw.auth_status()["rejections"] == 1
+    finally:
+        gw._pool.shutdown(wait=True)
+
+
+def test_swallowed_401_followed_by_another_error_is_still_auth_failed():
+    clock = FakeClock()
+    gw = EWSGateway(_settings(), clock=clock.now)
+    policy = RejectingFaultTolerance(
+        max_wait=10, on_rejection=lambda: gw._breaker.record_rejection())
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=lambda: None),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+
+    def swallow_then_fail(_acct: Any) -> str:
+        try:
+            policy.raise_response_errors(_HTTP_401)
+        except UnauthorizedError:
+            pass
+        raise RuntimeError("something downstream broke")
+
+    try:
+        with pytest.raises(ToolError) as err:
+            asyncio.run(gw.call(swallow_then_fail))
+        assert err.value.code == "auth_failed"
+        assert gw.auth_status()["rejections"] == 1
+    finally:
+        gw._pool.shutdown(wait=True)
+
+
+def test_half_open_call_does_not_probe_when_a_rejection_landed_while_it_was_queued():
+    clock = FakeClock()
+    gw = EWSGateway(_settings(), clock=clock.now)
+    probes = []
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=lambda: probes.append(1)),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    gw._breaker.record_rejection()
+    clock.advance(901)
+    real_submit = gw._pool.submit
+
+    def submit_after_foreign_rejection(fn):
+        # Another worker's 401 arrives between the claim and the worker start.
+        gw._breaker.record_rejection()
+        return real_submit(fn)
+
+    gw._pool.submit = submit_after_foreign_rejection  # type: ignore[method-assign]
+    ran = []
+    try:
+        with pytest.raises(ToolError) as err:
+            asyncio.run(gw.call(lambda _a: ran.append(1)))
+        assert err.value.code == "auth_failed"
+        assert probes == [] and ran == []
+        assert gw.auth_status()["rejections"] == 2
+    finally:
+        gw._pool.submit = real_submit  # type: ignore[method-assign]
+        gw._pool.shutdown(wait=True)
+
+
+def test_probe_that_overlaps_a_foreign_rejection_is_not_reported_warm():
+    """Returning True there would end the warm-up loop with the breaker open
+    and nothing left to probe again."""
+    clock = FakeClock()
+    gw = EWSGateway(_settings(), clock=clock.now)
+
+    def refresh_while_another_thread_is_rejected() -> None:
+        gw._breaker.record_rejection()
+
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=refresh_while_another_thread_is_rejected),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    with pytest.raises(ToolError) as err:
+        gw.test_connection()
+    assert err.value.code == "auth_failed"
+    assert gw.auth_status()["rejections"] == 1
+
+
+def test_mail_folders_stops_at_the_first_rejection():
+    gw = EWSGateway(_settings())
+    asked = []
+
+    class _Account:
+        def _reject(self, name):
+            asked.append(name)
+            raise UnauthorizedError("HTTP 401")
+
+        trash = property(lambda self: self._reject("trash"))
+        junk = property(lambda self: self._reject("junk"))
+        drafts = property(lambda self: self._reject("drafts"))
+        outbox = property(lambda self: self._reject("outbox"))
+
+    with pytest.raises(UnauthorizedError):
+        gw.mail_folders(_Account())
+    assert asked == ["trash"]
+
