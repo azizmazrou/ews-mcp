@@ -7,8 +7,8 @@ for the one you run.
 
 | Document | What it covers |
 |---|---|
-| [`v5/README.md`](../v5/README.md) | Install & use: **stdio quick start (no Docker)** for Claude Code / Claude Desktop / any MCP client, HTTP transport, Docker, full configuration reference, the send flow, health endpoints |
-| [`v5/docs/API.md`](../v5/docs/API.md) | **Full API reference, generated from the registry**: every tool with parameters, the canonical envelope, id aliases, error taxonomy, two-phase confirmation, cache freshness contract, v3→4.5 rename map, intentionally-dropped list |
+| [`v5/README.md`](../v5/README.md) | Install & use: **stdio quick start (no Docker)** for Claude Code / Claude Desktop / any MCP client, tool overview, HTTP transport, Docker, full configuration reference, the send flow, health & `auth_failed` recovery, multi-client setup, upgrade notes |
+| [`v5/docs/API.md`](../v5/docs/API.md) | **Full API reference, generated from the registry**: every tool with parameters, the canonical envelope, id aliases, error taxonomy, two-phase confirmation, cache freshness contract, multi-folder search, v3→4.5 rename map, intentionally-dropped list |
 | [`v5/DESIGN.md`](../v5/DESIGN.md) | Architecture and rationale: dispatcher gate chain, alias store, cache mirror, body cleaning, audit chain |
 | [`v5/.env.example`](../v5/.env.example) | Annotated configuration template |
 | [`v5/docker-compose.example.yml`](../v5/docker-compose.example.yml) | Single-service Docker Compose example (loopback port, read tier, sends off) |
@@ -25,7 +25,7 @@ Everything under [`legacy/`](legacy/) describes the legacy server only:
 | [`legacy/API.md`](legacy/API.md) | Legacy tool reference |
 | [`legacy/ARCHITECTURE.md`](legacy/ARCHITECTURE.md) | Legacy internals |
 | [`legacy/DEPLOYMENT.md`](legacy/DEPLOYMENT.md) | Docker / compose deployment |
-| [`legacy/TROUBLESHOOTING.md`](legacy/TROUBLESHOOTING.md) | Common failures and fixes |
+| [`legacy/TROUBLESHOOTING.md`](legacy/TROUBLESHOOTING.md) | Common failures and fixes (including password-change retry caution) |
 | [`legacy/AGENT_SECRETARY.md`](legacy/AGENT_SECRETARY.md) | The legacy agent-secretary feature stack |
 | [`legacy/IMPERSONATION.md`](legacy/IMPERSONATION.md) | Multi-mailbox / delegate access |
 | [`legacy/REPLY_FORWARD.md`](legacy/REPLY_FORWARD.md) | Reply/forward formatting details |

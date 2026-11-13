@@ -425,10 +425,18 @@ Every list-shaped tool ships exactly:
 ```
 
 - `count` = `len(items)`; `total_available` is exact when cheap (local
-  mirror `COUNT(*)`, or a refreshed folder count on unfiltered live
-  listings) and `null` otherwise; `next_offset` is `null` when no further
-  page exists (live paths prove it with a one-item lookahead, never a
-  `count()` scan).
+  mirror `COUNT(*)`, a refreshed folder count on unfiltered live
+  listings, or live single-folder `categories` / `flag_complete=true`
+  queries without `query` or `sender`) and `null` otherwise. In
+  particular, `total_available` is `null` on live
+  `search_messages(flag_complete=false)` (counting uncompleted items
+  would walk nearly the whole folder) and on multi-folder
+  `search_messages` (`folder="f:all"` or `recursive=true`) whenever any
+  folder has matches past `offset + limit`, any folder fails
+  (`folders_failed`), folders exceed the 200-folder cap
+  (`folders_skipped`), or `sender` is set. `next_offset` is `null` when
+  no further page exists (live paths prove it with a one-item lookahead,
+  never a `count()` scan).
 - `source` is `cache` (with `as_of`) or `live`; pass `fresh: true` to any
   cache-first tool to force a live read.
 
@@ -444,7 +452,7 @@ ids change when items move; re-run the search for fresh ones.
 | code | HTTP | meaning |
 |---|---|---|
 | `validation` | 400 | bad arguments (schema-checked on the REST shim) |
-| `auth_failed` | 401 | bad/missing API key, or Exchange rejected credentials |
+| `auth_failed` | 401 | missing/invalid `MCP_API_KEY`, Exchange rejected credentials (HTTP 401), or the lockout guard (`AuthBreaker`) is open (retrying will not help) |
 | `tier_blocked` | 403 | tool needs a higher `EWS_CAPABILITY_TIER` |
 | `kill_switch` | 403 | send-class call while `SEND_ENABLED=false` |
 | `recipient_blocked` | 403 | recipient failed the allow/denylist |
@@ -452,6 +460,7 @@ ids change when items move; re-run the search for fresh ones.
 | `confirm_invalid` | 409 | confirm token expired / consumed / content changed |
 | `throttled` | 429 | Exchange back-off (`retry_after_s` included) |
 | `rate_capped` | 429 | send rate cap reached (`retry_after_s` included) |
+| `internal` | 500 | unexpected internal server error |
 | `upstream_error` | 502 | Exchange failed the call |
 | `upstream_unavailable` | 503 | connection cold/circuit open (`retry_after_s`) |
 
@@ -463,13 +472,17 @@ when they would notify attendees) run in two phases:
 
 1. Call WITHOUT `confirm_token` → a preview + a short-lived token.
    Nothing executes. For `send_draft` the preview shows the draft's REAL
-   `to/cc/bcc/subject/body_snippet/attachment_count/attachments`, and the token is
-   HMAC-bound to that content.
+   `to`, `cc`, `bcc`, `subject`, `body_snippet`, `attachment_count`, and
+   `attachments`, and the token is HMAC-bound to subject, sorted
+   recipients, body, and attachments (ids, names, and sizes).
 2. Call again with identical arguments plus `confirm_token` → executes
-   once. Tokens die on any content/argument change, on TTL expiry
-   (`CONFIRM_TTL_SECONDS`, default 600 s), and after one use.
-   `send_draft` retries with the same `idempotency_key` replay the cached
-   receipt instead of sending twice.
+   once. For `send_draft`, phase 2 fetches the draft once under the
+   per-draft lock, re-checks its content hash against the verified hash,
+   and sends that same object; a draft (or attachment list) changed
+   after the preview is refused with `confirm_invalid`. Tokens also die
+   on argument changes, on TTL expiry (`CONFIRM_TTL_SECONDS`, default
+   600 s), and after one use. `send_draft` retries with the same
+   `idempotency_key` replay the cached receipt instead of sending twice.
 
 ## Cache freshness contract
 
@@ -479,6 +492,32 @@ Reads served by the local mirror carry `source: "cache"` and `as_of`
 `get_server_status.cache` exposes per-folder watermarks, row counts, DB
 size and sync health. `mode: "semantic"` on `search_messages` (and the
 `find_similar` tool) exist only when `EWS_SEMANTIC_INDEX` is enabled.
+
+## Searching several folders
+
+`search_messages` supports two live multi-folder modes (`source: "live"`):
+
+- `folder="f:all"` searches every `IPF.Note*` mail folder in the mailbox
+  except Deleted Items (`f:trash` / `f:deleteditems`), Junk (`f:junk` /
+  `f:junkemail`), Drafts (`f:drafts`), Outbox (`f:outbox`), and their
+  subfolders.
+- `recursive=true` searches the target `folder` and all `IPF.Note*`
+  subfolders beneath it. When `folder` explicitly names Deleted Items,
+  Junk, Drafts, or Outbox with `recursive=true`, that subtree is walked.
+
+Each folder in scope is queried for up to `offset + limit` items and
+merged newest first (`datetime_received` descending). Multi-folder calls
+are bounded to at most `200` folders per call and `offset + limit <= 500`
+(exceeding `500` fails with `validation`). If Exchange throttles any
+folder, the call fails with `throttled`.
+
+Every returned message card includes `folder` (its folder path), and the
+envelope adds `folders_searched`, plus `folders_failed` (paths of
+folders that failed, when non-empty) and `folders_skipped` (folders past
+the `200`-folder cap, when non-zero). `sender` is matched within each
+merged `offset..offset + limit` page, so a page can contain fewer than
+`limit` items (or zero) while older matches remain; keep paging while
+`next_offset` is non-null.
 
 ## v3 → 4.5 tool rename map
 
@@ -510,7 +549,7 @@ size and sync health. `mode: "semantic"` on `search_messages` (and the
 | `delete_appointment` | `cancel_event` |
 | `get_tasks` | `list_tasks` |
 | `update_task` / `complete_task` | `update_task` |
-| — (new) | `get_mailbox_overview`, `waiting_on`, `find_similar`* |
+| — (new) | `get_mailbox_overview`, `check_messages`, `waiting_on`, `add_draft_attachment`, `find_similar`* |
 
 \* `find_similar` only with the semantic tier.
 
