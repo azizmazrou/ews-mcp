@@ -249,3 +249,25 @@ def test_cached_protocol_retry_policy_is_replaceable_via_protocol_config():
         assert proto1.retry_policy is p2
     finally:
         CachingProtocol.clear_cache()
+
+
+def test_every_forced_auth_setting_maps_to_a_scheme_the_library_accepts():
+    """EWS_AUTH_TYPE_FORCE values are lower-case; exchangelib's constants are
+    not (NTLM is upper-case). The gateway maps one onto the other: every value
+    the setting allows must build a real Configuration."""
+    from typing import get_args
+
+    from ewsmcp.config import Settings
+    from ewsmcp.gateway.client import AUTH_TYPE_BY_SETTING
+
+    annotation = Settings.model_fields["ews_auth_type_force"].annotation
+    allowed = set(get_args(get_args(annotation)[0]))
+    assert allowed == set(AUTH_TYPE_BY_SETTING)
+    for setting in sorted(allowed):
+        config = Configuration(
+            service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+            credentials=Credentials("user", "secret"),
+            auth_type=AUTH_TYPE_BY_SETTING[setting],
+            version=Version(build=EXCHANGE_2016),
+        )
+        assert config.auth_type == AUTH_TYPE_BY_SETTING[setting]

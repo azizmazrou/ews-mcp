@@ -18,7 +18,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from exchangelib import Account, Configuration, Credentials, DELEGATE, EWSTimeZone
+from exchangelib import (
+    BASIC,
+    DELEGATE,
+    DIGEST,
+    NTLM,
+    Account,
+    Configuration,
+    Credentials,
+    EWSTimeZone,
+)
 from exchangelib.errors import UnauthorizedError
 from exchangelib.protocol import (
     BaseProtocol,
@@ -31,6 +40,11 @@ from ..config import Settings
 from ..errors import AUTH_FAILED_HINT, ToolError
 
 logger = logging.getLogger(__name__)
+
+# Setting value -> exchangelib constant. They are not the same strings: the
+# library spells NTLM in upper case, so passing the setting through as is
+# made a forced NTLM fail validation before any request was sent.
+AUTH_TYPE_BY_SETTING = {"basic": BASIC, "ntlm": NTLM, "digest": DIGEST}
 
 WELL_KNOWN = {
     "f:inbox": "inbox", "f:sent": "sent", "f:drafts": "drafts",
@@ -328,7 +342,7 @@ class EWSGateway:
         )
         if s.ews_auth_type_force:
             logger.info("Using forced Exchange auth scheme: %s", s.ews_auth_type_force)
-            kwargs["auth_type"] = s.ews_auth_type_force
+            kwargs["auth_type"] = AUTH_TYPE_BY_SETTING[s.ews_auth_type_force]
         config = Configuration(**kwargs)
         account = Account(
             primary_smtp_address=s.ews_email,
