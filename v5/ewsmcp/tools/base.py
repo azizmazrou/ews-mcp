@@ -1,7 +1,7 @@
 """ToolSpec + the dispatcher: every gate from DESIGN.md §Safety in one chain.
 
 Gate order (policy before connectivity, nothing irreversible without two
-model decisions): kill-switch → tier → circuit → cold gate → recipient
+model decisions): kill-switch → tier → circuit → cold / auth gate → recipient
 guard (argument-borne recipients on EVERY tool, resolved recipients via
 the preview hook) → two-phase confirm (content-bound + single-use when
 the spec supplies a preview hook) → send rate cap → alias resolution →
@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from ..confirm import consume_token, content_hash, make_token, verify_token
-from ..errors import ToolError, map_exception
+from ..errors import AUTH_FAILED_HINT, ToolError, map_exception
 
 TIER_RANK = {"read": 0, "draft": 1, "full": 2}
 CLASS_TIER = {"read": "read", "write": "draft", "send": "full", "destructive": "full"}
@@ -310,16 +310,36 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
                 "circuit open after repeated upstream failures",
                 retry_after_s=int(ctx._circuit_open_until - now),
             )
-        # Cold gate
-        if spec.requires_ews and ctx.manager is not None and ctx.manager.state == "connecting":
-            st = ctx.manager.status()
-            raise ToolError(
-                "upstream_unavailable",
-                f"Exchange connection still warming up (attempt {st['attempts']}; "
-                f"last error: {st['last_error'] or 'none yet'})",
-                hint="Check /readyz or call get_server_status.",
-                retry_after_s=st.get("next_retry_in_s"),
-            )
+        # Cold / auth gate
+        if spec.requires_ews and ctx.manager is not None:
+            mstate = ctx.manager.state
+            if mstate == "auth_failed":
+                st = ctx.manager.status()
+                permanent = bool(st.get("auth_permanent"))
+                retry_after = None if permanent else st.get("next_retry_in_s")
+                rejections = st.get("auth_rejections")
+                suffix = (
+                    f" ({rejections} rejection(s); permanently open until restart)"
+                    if permanent and rejections is not None
+                    else f" ({rejections} rejection(s))"
+                    if rejections is not None
+                    else ""
+                )
+                raise ToolError(
+                    "auth_failed",
+                    f"Exchange rejected configured credentials{suffix}.",
+                    hint=AUTH_FAILED_HINT,
+                    retry_after_s=retry_after,
+                )
+            if mstate == "connecting":
+                st = ctx.manager.status()
+                raise ToolError(
+                    "upstream_unavailable",
+                    f"Exchange connection still warming up (attempt {st['attempts']}; "
+                    f"last error: {st['last_error'] or 'none yet'})",
+                    hint="Check /readyz or call get_server_status.",
+                    retry_after_s=st.get("next_retry_in_s"),
+                )
         # Recipient policy — every tool whose arguments carry recipients
         # (create_draft/update_draft/create_event/…), not just send class:
         # drafts and events are how mail actually acquires recipients.

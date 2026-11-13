@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from exchangelib.errors import UnauthorizedError
+
 from ..bodyclean import clean_body
 from ..dto import fmt_dt
 from ..gateway.client import WELL_KNOWN
@@ -251,6 +253,8 @@ class SyncEngine:
                 fid = getattr(getattr(account, attr, None), "id", None)
                 if fid:
                     wk_by_raw.setdefault(fid, wk_alias)
+            except UnauthorizedError:
+                raise
             except Exception:
                 continue
 
@@ -275,6 +279,8 @@ class SyncEngine:
             walk(account.msg_folder_root, "")
             if rows:
                 self.store.replace_folders(rows)
+        except UnauthorizedError:
+            raise
         except Exception as exc:
             logger.debug("folder tree sync failed: %s", exc)
 
@@ -291,6 +297,8 @@ class SyncEngine:
                 [row_from_event(ev, tz) for ev in events
                  if getattr(ev, "id", None)])
             self.store.set_sync_state("events", None, time.time())
+        except UnauthorizedError:
+            raise
         except Exception as exc:
             logger.debug("calendar window sync failed: %s", exc)
 
@@ -314,5 +322,7 @@ class SyncEngine:
                 self.store.set_sync_state("item:tasks",
                                           tasks_folder.item_sync_state,
                                           time.time())
+        except UnauthorizedError:
+            raise
         except Exception as exc:
             logger.debug("tasks sync failed: %s", exc)

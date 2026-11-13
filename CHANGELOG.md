@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Account-lockout guard for rejected Exchange credentials (`v5/`):**
+  - Added `RejectingFaultTolerance` in `v5/ewsmcp/gateway/client.py` and
+    enabled it across all modes so HTTP 401 credential rejections raise
+    `UnauthorizedError` on the first response without sleeping or resending
+    the password (while keeping `FaultTolerance` retries for 503s, SOAP
+    throttling, and 401s carrying `currently locked out`), and log a single
+    credential-free `WARNING` with the offered `WWW-Authenticate` schemes
+    next to `ews_auth_type_force` (`auto-negotiated` when unset).
+  - Added a thread-safe authentication circuit breaker in `EWSGateway`
+    controlled by `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` (default `900`) and
+    `EWS_AUTH_MAX_REJECTIONS` (default `3`): while open, gateway calls fail
+    fast with `ToolError("auth_failed", ...)` without network I/O or
+    `Account` construction, reset on a successful round trip, and stay open
+    until restart once the cap is reached.
+  - Added `ConnectionManager` state `auth_failed` (bypasses the transient
+    back-off and session-reset ladders on 401, transitions heartbeat 401s
+    to `auth_failed` instead of `degraded`, stops background probes at the
+    cap, and exposes `auth_rejections`, `next_retry_in_s`, and
+    `auth_permanent` through `status()`, `/readyz`, `/metrics`, and
+    `get_server_status`), plus a fast-fail `auth_failed` gate in
+    `v5/ewsmcp/tools/base.py`.
+  - Updated `map_exception` in `v5/ewsmcp/errors.py` to classify
+    `UnauthorizedError` as `auth_failed` ahead of throttling matches with a
+    non-retry operator hint and without false positives on arbitrary `"401"`
+    substrings, propagated `UnauthorizedError` out of slow-lane sync and
+    folder walks, and treated empty or whitespace-only
+    `EWS_AUTH_TYPE_FORCE` values as unset.
+
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
   (version guide, stdio-first quick start); `docs/README.md` maps all

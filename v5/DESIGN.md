@@ -20,9 +20,16 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 4. **Safety gates live ONLY in the dispatcher** (`tools/base.py`).
    Handlers declare `side_effect_class` and `confirm`; they contain no
    policy.
-5. **Never pin `auth_type`.** Only exchangelib auto-negotiation works
-   against the target Exchange (verified live). All exchangelib imports
-   are module-top; every kwarg-bearing call has a signature pin.
+5. **Never pin `auth_type`, never retry rejected credentials.** Only
+   exchangelib auto-negotiation works against the target Exchange
+   (verified live), and blank `EWS_AUTH_TYPE_FORCE` values load as unset.
+   `RejectingFaultTolerance` raises `UnauthorizedError` on the first HTTP
+   401 (unless the body carries `currently locked out`), and `EWSGateway`'s
+   authentication circuit breaker enforces a cooldown
+   (`EWS_AUTH_FAILURE_COOLDOWN_SECONDS`, default 900) and a per-process cap
+   (`EWS_AUTH_MAX_REJECTIONS`, default 3) so a stale secret never locks out
+   the directory account. All exchangelib imports are module-top; every
+   kwarg-bearing call and overridden hook has a signature pin.
 6. **No footprints.** No personal names, real addresses, employer
    identifiers, personal skill names, mailbox content, or tokens in any
    tracked file, comment, commit message, or doc. Fixtures use
@@ -52,7 +59,7 @@ Every list-shaped result ships exactly the canonical envelope
 Dispatch order (policy precedes connectivity; nothing irreversible
 without two model decisions):
 
-    kill-switch → tier → circuit → cold gate → recipient guard →
+    kill-switch → tier → circuit → cold / auth gate → recipient guard →
     two-phase confirm → send rate cap → alias resolution → handler → audit
 
 - **Kill-switch** `SEND_ENABLED=false` (default) refuses every send-class
@@ -128,8 +135,10 @@ stdio MCP, Streamable HTTP `/mcp`, a REST shim `/api/tools/<name>`
 `/version`) and `/metrics` (Prometheus, behind the API key).
 **Never-exit boot**: tools register and transports bind before any
 Exchange contact; a background warmup loop owns connection recovery
-(exponential backoff + jitter, protocol-cache eviction every 3 failures,
-heartbeat re-probe with a REAL network round trip).
+(exponential backoff + jitter and protocol-cache eviction every 3
+transient failures, heartbeat re-probe with a REAL network round trip, and
+a bounded `auth_failed` state on HTTP 401 rejections that respects the
+gateway's auth breaker cooldown and stops after `EWS_AUTH_MAX_REJECTIONS`).
 
 ## §Audit
 

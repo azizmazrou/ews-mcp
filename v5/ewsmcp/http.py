@@ -61,9 +61,19 @@ def _metrics_text(ctx) -> str:
         "# TYPE ewsmcp_uptime_seconds gauge",
         f"ewsmcp_uptime_seconds {int(_t.time() - ctx.started_at)}",
     ]
-    state = ctx.manager.state if ctx.manager else "unmanaged"
+    if ctx.manager is None:
+        conn_status = {"state": "unmanaged"}
+    elif callable(getattr(ctx.manager, "status", None)):
+        conn_status = ctx.manager.status()
+    else:
+        conn_status = {"state": ctx.manager.state}
+    state = conn_status.get("state", "unmanaged")
     lines += ["# TYPE ewsmcp_connection_warm gauge",
               f"ewsmcp_connection_warm {1 if state in ('warm', 'unmanaged') else 0}"]
+    lines += ["# TYPE ewsmcp_auth_failed gauge",
+              f"ewsmcp_auth_failed {1 if state == 'auth_failed' else 0}"]
+    lines += ["# TYPE ewsmcp_auth_rejections gauge",
+              f"ewsmcp_auth_rejections {int(conn_status.get('auth_rejections') or 0)}"]
     lines.append("# TYPE ewsmcp_tool_calls_total counter")
     lines.append("# TYPE ewsmcp_errors_total counter")
     for key, value in sorted(ctx.counters.items()):
@@ -170,9 +180,15 @@ def build_app(ctx, settings, streamable: Optional[Any] = None):
             return await _send_json(send, 200, {"version": __version__})
         if path == "/readyz" and method == "GET":
             conn = ctx.manager.status() if ctx.manager else {"state": "unmanaged"}
-            warm = conn.get("state") in ("warm", "unmanaged")
+            cstate = conn.get("state")
+            warm = cstate in ("warm", "unmanaged")
+            ready_status = (
+                "ok"
+                if warm
+                else ("auth_failed" if cstate == "auth_failed" else "unavailable")
+            )
             return await _send_json(send, 200 if warm else 503, {
-                "status": "ok" if warm else "unavailable",
+                "status": ready_status,
                 "connection": conn, "tools": len(ctx.registry),
             })
 

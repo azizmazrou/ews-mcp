@@ -1,7 +1,10 @@
 """Error taxonomy — every failure the model sees is one of these codes,
 with a hint written for the model, never a traceback (DESIGN.md §Errors)."""
 
+import re
 from typing import Any, Dict, Optional
+
+from exchangelib.errors import UnauthorizedError
 
 HTTP_BY_CODE = {
     "validation": 400,
@@ -17,6 +20,17 @@ HTTP_BY_CODE = {
     "upstream_error": 502,
     "internal": 500,
 }
+
+AUTH_FAILED_HINT = (
+    "Retrying will not help: credentials are read once at startup and "
+    "repeated failures risk locking the directory account. Ask the operator "
+    "to check the configured address/username and password, update the "
+    "configuration, and restart the server."
+)
+
+_AUTH_STATUS_RE = re.compile(
+    r"\bunauthorized\b|\bhttp\s+401\b|\bstatus(?:\s+code)?[:=\s]+401\b"
+)
 
 
 class ToolError(Exception):
@@ -53,6 +67,8 @@ def map_exception(exc: Exception) -> ToolError:
     name = type(exc).__name__
     text = f"{name}: {exc}"
     lowered = f"{name} {exc}".lower()
+    if isinstance(exc, UnauthorizedError) or name == "UnauthorizedError":
+        return ToolError("auth_failed", text, hint=AUTH_FAILED_HINT)
     if "errorserverbusy" in lowered or "back off" in lowered or "ratelimit" in lowered:
         return ToolError(
             "throttled", text,
@@ -62,11 +78,17 @@ def map_exception(exc: Exception) -> ToolError:
     if "erroritemnotfound" in lowered or "errorinvalidid" in lowered:
         return ToolError(
             "not_found", text,
-            hint="The item id is stale (items move). Re-run search_messages and use a fresh id.",
+            hint=(
+                "The item id is stale (items move). Re-run search_messages "
+                "and use a fresh id."
+            ),
         )
-    if "unauthorized" in lowered or "401" in lowered or "invalid credentials" in lowered:
-        return ToolError("auth_failed", text, hint="Upstream Exchange rejected our credentials.")
-    if any(k in lowered for k in ("connection", "timeout", "timed out", "transport", "auth type")):
+    if "invalid credentials" in lowered or _AUTH_STATUS_RE.search(lowered):
+        return ToolError("auth_failed", text, hint=AUTH_FAILED_HINT)
+    if any(
+        k in lowered
+        for k in ("connection", "timeout", "timed out", "transport", "auth type")
+    ):
         return ToolError(
             "upstream_unavailable", text,
             hint="Exchange is unreachable or refusing fresh sessions; check /readyz.",

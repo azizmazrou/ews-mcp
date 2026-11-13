@@ -1,4 +1,4 @@
-"""Connection lifecycle manager — lazy, self-healing, never exits.
+"""Connection lifecycle manager — lazy, self-healing, bounded on 401.
 
 The corporate Exchange answers exchangelib's unauthenticated auth-type
 probe unreliably for *fresh* connections ("Failed to get auth type from
@@ -6,13 +6,16 @@ service") while warm, long-lived processes keep working: exchangelib
 probes once per process and caches the negotiated auth type. Startup
 therefore must never gate on a successful connection. Tools register and
 transports bind immediately; this manager keeps trying in the background
-with exponential backoff + full jitter until Exchange answers, and keeps
-state observable via ``/readyz`` and ``whoami``.
+with exponential backoff + full jitter for transient network faults, while
+deferring to the gateway's authentication circuit breaker on HTTP 401
+credential rejections and stopping once the rejection cap is reached.
 
 States:
     connecting  — never connected since process start; warmup loop running
     warm        — last probe/connect succeeded
-    degraded    — was warm, a later heartbeat failed; warmup loop re-armed
+    degraded    — was warm, a later heartbeat hit a transient fault; re-armed
+    auth_failed — Exchange rejected our credentials (HTTP 401); waiting on
+                  the auth breaker cooldown or stopped permanently
 """
 
 import asyncio
@@ -20,39 +23,50 @@ import logging
 import random
 import threading
 import time
-from typing import Any, Callable, Coroutine, Dict, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Dict, Optional
+
+from ..errors import ToolError
 
 STATE_CONNECTING = "connecting"
 STATE_WARM = "warm"
 STATE_DEGRADED = "degraded"
+STATE_AUTH_FAILED = "auth_failed"
 
-# After this many consecutive failures, escalate the recovery ladder:
+# After this many consecutive transient failures, escalate the recovery ladder:
 # drop the cached Account/Protocol so the next attempt re-runs the full
 # auth negotiation on a fresh session instead of reusing a wedged one.
+# Never run on HTTP 401 rejections.
 _RESET_EVERY_N_FAILURES = 3
 
 
 class ConnectionManager:
-    """Owns the background warmup/heartbeat lifecycle for one EWSClient."""
+    """Owns the background warmup/heartbeat lifecycle for one EWSGateway."""
 
     def __init__(
         self,
-        ews_client,
+        ews_client: Any,
         initial_backoff: float = 1.0,
         max_backoff: float = 300.0,
         heartbeat_seconds: int = 600,
+        clock: Optional[Callable[[], float]] = None,
+        sleep: Optional[Callable[[float], Awaitable[None]]] = None,
     ):
         self._client = ews_client
         self._initial_backoff = initial_backoff
         self._max_backoff = max_backoff
         self._heartbeat_seconds = heartbeat_seconds
+        if clock is None:
+            clock = getattr(ews_client, "_clock", None)
+        self._clock = clock
+        self._sleep = sleep
         self.logger = logging.getLogger(__name__)
 
-        # Status fields are read from the event loop (readyz/whoami) and
-        # written from worker threads — guard with a plain lock.
+        # Status fields are read from the event loop (readyz/get_server_status)
+        # and written from worker threads — guard with a plain lock.
         self._lock = threading.Lock()
         self._state = STATE_CONNECTING
         self._attempts = 0
+        self._transient_failures = 0
         self._last_error: Optional[str] = None
         self._last_success_ts: Optional[float] = None
         self._next_retry_ts: Optional[float] = None
@@ -63,10 +77,30 @@ class ConnectionManager:
         self._on_warm: Optional[Callable[[], Coroutine[Any, Any, None]]] = None
         self._on_warm_fired = False
 
+    def _now(self) -> float:
+        return float(self._clock()) if self._clock is not None else time.time()
+
+    async def _sleep_for(self, delay: float) -> None:
+        if self._sleep is not None:
+            await self._sleep(delay)
+        else:
+            await asyncio.sleep(delay)
+
+    def _auth_cooldown_floor(self) -> float:
+        """Minimum wait after any auth failure, read from the gateway settings."""
+        settings = getattr(self._client, "settings", None)
+        configured = getattr(settings, "ews_auth_failure_cooldown_seconds", None)
+        if configured is not None:
+            return float(max(60, int(configured)))
+        return 900.0
+
     # ------------------------------------------------------------------ state
 
     @property
     def state(self) -> str:
+        auth = self._client.auth_status()
+        if auth["rejections"] > 0:
+            return STATE_AUTH_FAILED
         with self._lock:
             return self._state
 
@@ -75,11 +109,23 @@ class ConnectionManager:
         return self.state == STATE_WARM
 
     def status(self) -> Dict[str, Any]:
-        """Snapshot for /readyz and whoami. Never raises, never blocks on EWS."""
+        """Snapshot for /readyz and get_server_status. Never blocks on EWS."""
+        auth = self._client.auth_status()
         with self._lock:
-            now = time.time()
+            now = self._now()
+            effective_state = (
+                STATE_AUTH_FAILED if auth["rejections"] > 0 else self._state
+            )
+            if effective_state == STATE_AUTH_FAILED:
+                next_retry_in_s = (
+                    None if auth["permanent"] else auth["next_retry_in_s"]
+                )
+            elif self._next_retry_ts is not None and effective_state != STATE_WARM:
+                next_retry_in_s = max(0, int(self._next_retry_ts - now))
+            else:
+                next_retry_in_s = None
             return {
-                "state": self._state,
+                "state": effective_state,
                 "attempts": self._attempts,
                 "last_error": self._last_error,
                 "last_success_age_s": (
@@ -87,12 +133,9 @@ class ConnectionManager:
                     if self._last_success_ts is not None
                     else None
                 ),
-                "next_retry_in_s": (
-                    max(0, int(self._next_retry_ts - now))
-                    if self._next_retry_ts is not None
-                    and self._state != STATE_WARM
-                    else None
-                ),
+                "next_retry_in_s": next_retry_in_s,
+                "auth_rejections": auth["rejections"],
+                "auth_permanent": auth["permanent"],
             }
 
     # ------------------------------------------------------------- lifecycle
@@ -115,49 +158,109 @@ class ConnectionManager:
                 except (asyncio.CancelledError, Exception):
                     pass
 
-    async def _warmup_loop(self) -> None:
+    async def _warmup_loop(self, *, initial_auth_wait: bool = False) -> None:
         backoff = self._initial_backoff
         while not self._stopped:
-            ok = await asyncio.to_thread(self._try_connect)
-            if ok:
+            pre_auth = self._client.auth_status()
+            floor = self._auth_cooldown_floor()
+            with self._lock:
+                pre_now = self._now()
+                if pre_auth["permanent"]:
+                    self._next_retry_ts = None
+                    return
+                raw_pre_wait = pre_auth.get("cooldown_remaining_s")
+                must_wait = (
+                    bool(pre_auth.get("open"))
+                    or initial_auth_wait
+                    or (raw_pre_wait is not None and raw_pre_wait > 0)
+                )
+                if must_wait:
+                    pre_wait: Optional[float] = max(
+                        floor,
+                        float(raw_pre_wait) if raw_pre_wait is not None else 0.0,
+                    )
+                    self._next_retry_ts = pre_now + pre_wait
+                else:
+                    pre_wait = None
+            if pre_wait is not None:
+                initial_auth_wait = False
+                await self._sleep_for(pre_wait)
+                continue
+
+            outcome = await asyncio.to_thread(self._attempt_probe)
+            if outcome == "ok":
                 self._mark_warm()
                 await self._fire_on_warm()
                 self._start_heartbeat()
                 return
+
+            if outcome == "auth_failed":
+                auth = self._client.auth_status()
+                floor = self._auth_cooldown_floor()
+                with self._lock:
+                    now = self._now()
+                    if auth["permanent"]:
+                        self._next_retry_ts = None
+                        self.logger.error(
+                            "warmup: Exchange rejected credentials %d time(s); "
+                            "stopping background probes until restart",
+                            auth["rejections"],
+                        )
+                        return
+                    rem = auth.get("cooldown_remaining_s")
+                    delay = max(floor, float(rem) if rem is not None else 0.0)
+                    self._next_retry_ts = now + delay
+                await self._sleep_for(delay)
+                continue
+
             with self._lock:
-                attempts = self._attempts
-            # Recovery ladder: every Nth failure, drop the cached
-            # Account/Protocol so the next try renegotiates auth on a
-            # genuinely fresh session.
-            if attempts % _RESET_EVERY_N_FAILURES == 0:
+                transient = self._transient_failures
+            # Recovery ladder for transient faults ONLY: every Nth failure,
+            # drop the cached Account/Protocol so the next try renegotiates
+            # auth on a genuinely fresh session.
+            if transient > 0 and transient % _RESET_EVERY_N_FAILURES == 0:
                 try:
                     await asyncio.to_thread(self._client.reset)
                     self.logger.info(
                         "warmup: reset cached EWS session after %d failed attempts",
-                        attempts,
+                        transient,
                     )
                 except Exception as exc:
                     self.logger.debug("warmup: session reset failed: %s", exc)
             # Full jitter: sleep U(0, backoff); cap growth at max_backoff.
             delay = random.uniform(0, backoff)
             with self._lock:
-                self._next_retry_ts = time.time() + delay
-            await asyncio.sleep(delay)
+                self._next_retry_ts = self._now() + delay
+            await self._sleep_for(delay)
             backoff = min(backoff * 2, self._max_backoff)
 
-    def _try_connect(self) -> bool:
-        """Blocking connect/probe attempt; runs in a worker thread."""
+    def _attempt_probe(self) -> str:
+        """Blocking connect/probe attempt; runs in a worker thread.
+
+        Returns ``"ok"``, ``"auth_failed"``, or ``"transient"``.
+        """
         try:
             ok = self._client.test_connection()
-            if not ok:
-                self._mark_failure(
-                    getattr(self._client, "last_connection_error", None)
-                    or "connection test returned False"
-                )
-            return ok
+        except ToolError as err:
+            if err.code == "auth_failed":
+                self._mark_auth_failure(f"{type(err).__name__}: {err.message}")
+                return "auth_failed"
+            self._mark_transient_failure(f"{type(err).__name__}: {err}")
+            return "transient"
         except Exception as exc:
-            self._mark_failure(f"{type(exc).__name__}: {exc}")
-            return False
+            self._mark_transient_failure(f"{type(exc).__name__}: {exc}")
+            return "transient"
+        if ok:
+            return "ok"
+        self._mark_transient_failure(
+            getattr(self._client, "last_connection_error", None)
+            or "connection test returned False"
+        )
+        return "transient"
+
+    def _try_connect(self) -> bool:
+        """Compatibility wrapper returning True only on a warm probe."""
+        return self._attempt_probe() == "ok"
 
     # ------------------------------------------------------------- heartbeat
 
@@ -170,34 +273,42 @@ class ConnectionManager:
 
     async def _heartbeat_loop(self) -> None:
         while not self._stopped:
-            await asyncio.sleep(self._heartbeat_seconds)
-            ok = await asyncio.to_thread(self._probe)
-            if ok:
+            await self._sleep_for(float(self._heartbeat_seconds))
+            outcome = await asyncio.to_thread(self._attempt_probe)
+            if outcome == "ok":
                 self._mark_warm()
-            else:
+                continue
+            if outcome == "auth_failed":
+                auth = self._client.auth_status()
                 with self._lock:
                     self._state = STATE_DEGRADED
+                    permanent = auth["permanent"]
+                    if permanent:
+                        self._next_retry_ts = None
                 self.logger.warning(
-                    "heartbeat: EWS probe failed — state=degraded, re-arming warmup"
+                    "heartbeat: Exchange rejected credentials — state=auth_failed"
                 )
-                # Re-enter the warmup loop (which restarts the heartbeat on
-                # success). Exit this heartbeat; warmup owns recovery now.
-                self._task = asyncio.create_task(
-                    self._warmup_loop(), name="ews-warmup"
-                )
+                if not permanent and not self._stopped:
+                    self._task = asyncio.create_task(
+                        self._warmup_loop(initial_auth_wait=True),
+                        name="ews-warmup",
+                    )
                 return
+            with self._lock:
+                self._state = STATE_DEGRADED
+            self.logger.warning(
+                "heartbeat: EWS probe failed — state=degraded, re-arming warmup"
+            )
+            # Re-enter the warmup loop (which restarts the heartbeat on
+            # success). Exit this heartbeat; warmup owns recovery now.
+            self._task = asyncio.create_task(
+                self._warmup_loop(), name="ews-warmup"
+            )
+            return
 
     def _probe(self) -> bool:
-        """Cheap liveness probe against the cached account."""
-        try:
-            account = getattr(self._client, "_account", None)
-            if account is None:
-                return self._client.test_connection()
-            account.root.refresh()
-            return True
-        except Exception as exc:
-            self._mark_failure(f"{type(exc).__name__}: {exc}")
-            return False
+        """Cheap liveness probe routed through the gateway."""
+        return self._attempt_probe() == "ok"
 
     # --------------------------------------------------------------- helpers
 
@@ -205,15 +316,23 @@ class ConnectionManager:
         with self._lock:
             previous = self._state
             self._state = STATE_WARM
-            self._last_success_ts = time.time()
+            self._transient_failures = 0
+            self._last_success_ts = self._now()
             self._next_retry_ts = None
             self._last_error = None
         if previous != STATE_WARM:
             self.logger.info("EWS connection established (state=warm)")
 
-    def _mark_failure(self, error: str) -> None:
+    def _mark_transient_failure(self, error: str) -> None:
         with self._lock:
             self._attempts += 1
+            self._transient_failures += 1
+            self._last_error = error[:500]
+
+    def _mark_auth_failure(self, error: str) -> None:
+        with self._lock:
+            self._attempts += 1
+            self._transient_failures = 0
             self._last_error = error[:500]
 
     async def _fire_on_warm(self) -> None:
