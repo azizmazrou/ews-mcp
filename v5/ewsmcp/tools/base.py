@@ -1,7 +1,7 @@
 """ToolSpec + the dispatcher: every gate from DESIGN.md §Safety in one chain.
 
 Gate order (policy before connectivity, nothing irreversible without two
-model decisions): kill-switch → tier → circuit → cold gate → recipient
+model decisions): kill-switch → tier → circuit → cold / auth gate → recipient
 guard (argument-borne recipients on EVERY tool, resolved recipients via
 the preview hook) → two-phase confirm (content-bound + single-use when
 the spec supplies a preview hook) → send rate cap → alias resolution →
@@ -10,6 +10,7 @@ handler (on the EWS pool) → audit.
 
 import asyncio
 import fnmatch
+import inspect
 import threading
 import time
 from collections import deque
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from ..confirm import consume_token, content_hash, make_token, verify_token
-from ..errors import ToolError, map_exception
+from ..errors import AUTH_FAILED_HINT, ToolError, map_exception
 
 TIER_RANK = {"read": 0, "draft": 1, "full": 2}
 CLASS_TIER = {"read": "read", "write": "draft", "send": "full", "destructive": "full"}
@@ -104,14 +105,45 @@ def _split(raw: str) -> List[str]:
     return [p.strip().lower() for p in (raw or "").split(",") if p.strip()]
 
 
-def _recipients(kwargs: Dict[str, Any]) -> List[str]:
+def _normalise_recipient(raw: str) -> Optional[str]:
+    s = raw.strip()
+    if "<" in s or ">" in s:
+        if s.count("<") != 1 or s.count(">") != 1 or not s.endswith(">"):
+            return None
+        s = s[s.index("<") + 1 : -1].strip()
+    s = s.lower()
+    if not s or any(ch.isspace() for ch in s) or "<" in s or ">" in s:
+        return None
+    parts = s.split("@")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return s
+
+
+def _recipients(kwargs: Dict[str, Any], *, strict: bool = False) -> List[str]:
     out: List[str] = []
     for key in RECIPIENT_KEYS:
         value = kwargs.get(key)
         if isinstance(value, str):
             value = [value]
         if isinstance(value, list):
-            out.extend(r.lower() for r in value if isinstance(r, str) and "@" in r)
+            for item in value:
+                if not isinstance(item, str):
+                    if strict:
+                        raise ToolError(
+                            "validation",
+                            f"invalid recipient in {key!r}: expected string",
+                        )
+                    continue
+                addr = _normalise_recipient(item)
+                if addr is None:
+                    if strict:
+                        raise ToolError(
+                            "validation",
+                            f"invalid recipient in {key!r}: {item!r}",
+                        )
+                    continue
+                out.append(addr)
     return out
 
 
@@ -120,7 +152,7 @@ def _recipient_guard(ctx: Context, kwargs: Dict[str, Any]) -> None:
     allow = _split(ctx.settings.ews_recipient_allowlist)
     if not deny and not allow:
         return
-    for r in _recipients(kwargs):
+    for r in _recipients(kwargs, strict=True):
         if any(fnmatch.fnmatch(r, p) for p in deny):
             raise ToolError("recipient_blocked",
                             f"recipient '{r}' is denylisted (EWS_RECIPIENT_DENYLIST)")
@@ -152,6 +184,8 @@ def _external_recipients(ctx: Context, source: Dict[str, Any]) -> List[str]:
     })
 
 
+VERIFIED_CONTENT_HASH_ARG = "_verified_content_hash"
+
 _CONFIRM_HINTS = {
     "expired": "Token expired — call again WITHOUT confirm_token for a fresh preview.",
     "stale": ("The content changed since the preview (or the arguments differ) — "
@@ -160,6 +194,31 @@ _CONFIRM_HINTS = {
     "bad_signature": "Invalid confirmation token.",
     "malformed": "Malformed confirmation token.",
 }
+
+
+def preview_content_hash(content: Dict[str, Any]) -> str:
+    """Canonical hash of a preview hook's resolved content dict."""
+    body_text = content.get("body_text")
+    parts: List[Any] = [
+        content.get("subject") or "",
+        sorted(content.get("to") or []),
+        sorted(content.get("cc") or []),
+        sorted(content.get("bcc") or []),
+        body_text if isinstance(body_text, str) else "",
+        content.get("_attachments") or content.get("attachments") or [],
+    ]
+    body_html = content.get("_body_html")
+    if isinstance(body_html, str) and body_html:
+        parts.append(body_html)
+    return content_hash(*parts)
+
+
+def _accepts_kwarg(handler: Callable[..., Any], name: str) -> bool:
+    try:
+        params = inspect.signature(handler).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == name for p in params)
 
 
 async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
@@ -176,14 +235,7 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
     if spec.preview is not None:
         content = await spec.preview(ctx, dict(kwargs))
         _recipient_guard(ctx, content)  # the draft's REAL recipients
-        body_text = content.get("body_text")
-        chash = content_hash(
-            content.get("subject") or "",
-            sorted(content.get("to") or []),
-            sorted(content.get("cc") or []),
-            sorted(content.get("bcc") or []),
-            body_text if isinstance(body_text, str) else "",
-        )
+        chash = preview_content_hash(content)
         target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
                         or kwargs.get("id") or "-")
     else:
@@ -195,7 +247,10 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             chash=chash, ttl_seconds=ctx.settings.confirm_ttl_seconds, secret=secret,
         )
         if content is not None:
-            preview = {k: v for k, v in content.items() if k != "body_text"}
+            preview = {
+                k: v for k, v in content.items()
+                if k != "body_text" and not k.startswith("_")
+            }
             body_text = content.get("body_text")
             if isinstance(body_text, str):
                 preview["body_snippet"] = body_text[:1000]
@@ -230,6 +285,8 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
                 reason,
                 f"Call {spec.name} again WITHOUT confirm_token for a fresh preview."),
         )
+    if spec.preview is not None and _accepts_kwarg(spec.handler, VERIFIED_CONTENT_HASH_ARG):
+        kwargs[VERIFIED_CONTENT_HASH_ARG] = chash
     return None
 
 
@@ -241,14 +298,7 @@ async def mint_token(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any]) -> st
     """
     if spec.preview is not None:
         content = await spec.preview(ctx, dict(kwargs))
-        body_text = content.get("body_text")
-        chash = content_hash(
-            content.get("subject") or "",
-            sorted(content.get("to") or []),
-            sorted(content.get("cc") or []),
-            sorted(content.get("bcc") or []),
-            body_text if isinstance(body_text, str) else "",
-        )
+        chash = preview_content_hash(content)
         target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
                         or kwargs.get("id") or "-")
     else:
@@ -280,11 +330,13 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
                    transport: str = "-") -> Dict[str, Any]:
     start = time.time()
     outcome = "ok"
-    # confirm_token is dispatcher vocabulary, never a handler argument —
-    # strip it unconditionally so non-confirm handlers can't receive it
-    # (a leak here used to surface as TypeError → misleading 502).
+    # confirm_token and _verified_content_hash are dispatcher vocabulary,
+    # never caller-supplied handler arguments — strip unconditionally before
+    # any gate runs so non-confirm handlers can't receive confirm_token and a
+    # caller can never spoof _verified_content_hash.
     kwargs = dict(kwargs)
     confirm_token = kwargs.pop("confirm_token", None)
+    kwargs.pop(VERIFIED_CONTENT_HASH_ARG, None)
     try:
         # Kill-switch (policy precedes connectivity)
         if spec.side_effect_class == "send" and not ctx.settings.send_enabled:
@@ -310,16 +362,36 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
                 "circuit open after repeated upstream failures",
                 retry_after_s=int(ctx._circuit_open_until - now),
             )
-        # Cold gate
-        if spec.requires_ews and ctx.manager is not None and ctx.manager.state == "connecting":
-            st = ctx.manager.status()
-            raise ToolError(
-                "upstream_unavailable",
-                f"Exchange connection still warming up (attempt {st['attempts']}; "
-                f"last error: {st['last_error'] or 'none yet'})",
-                hint="Check /readyz or call get_server_status.",
-                retry_after_s=st.get("next_retry_in_s"),
-            )
+        # Cold / auth gate
+        if spec.requires_ews and ctx.manager is not None:
+            mstate = ctx.manager.state
+            if mstate == "auth_failed":
+                st = ctx.manager.status()
+                permanent = bool(st.get("auth_permanent"))
+                retry_after = None if permanent else st.get("next_retry_in_s")
+                rejections = st.get("auth_rejections")
+                suffix = (
+                    f" ({rejections} rejection(s); permanently open until restart)"
+                    if permanent and rejections is not None
+                    else f" ({rejections} rejection(s))"
+                    if rejections is not None
+                    else ""
+                )
+                raise ToolError(
+                    "auth_failed",
+                    f"Exchange rejected configured credentials{suffix}.",
+                    hint=AUTH_FAILED_HINT,
+                    retry_after_s=retry_after,
+                )
+            if mstate == "connecting":
+                st = ctx.manager.status()
+                raise ToolError(
+                    "upstream_unavailable",
+                    f"Exchange connection still warming up (attempt {st['attempts']}; "
+                    f"last error: {st['last_error'] or 'none yet'})",
+                    hint="Check /readyz or call get_server_status.",
+                    retry_after_s=st.get("next_retry_in_s"),
+                )
         # Recipient policy — every tool whose arguments carry recipients
         # (create_draft/update_draft/create_event/…), not just send class:
         # drafts and events are how mail actually acquires recipients.

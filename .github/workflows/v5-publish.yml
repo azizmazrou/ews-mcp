@@ -1,6 +1,6 @@
 # Publish the v5 image to GHCR on v4.5.* tags — gated on the FULL v5 test
 # workflow (no continue-on-error anywhere). NEVER tags :latest — promotion
-# of :latest is a deliberate manual act after the canary ladder completes.
+# of :latest is a deliberate manual step.
 name: v5-publish
 
 on:
@@ -39,7 +39,7 @@ jobs:
           context: v5
           file: v5/Dockerfile
           push: true
-          # The exact tag is what the NAS canary pins; :v4.5 tracks the line.
+          # Pin the exact tag in deployments (see v5/docker-compose.example.yml); :v4.5 tracks the line.
           tags: |
             ${{ steps.tags.outputs.exact }}
             ${{ steps.tags.outputs.line }}

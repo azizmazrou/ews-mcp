@@ -19,9 +19,12 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
+
+from exchangelib.errors import UnauthorizedError
 
 from ..bodyclean import clean_body
 from ..dto import fmt_dt
@@ -43,7 +46,15 @@ CALENDAR_WINDOW_DAYS = 14
 CALENDAR_MAX_ITEMS = 200
 
 
-def _ts(dt: Any) -> Optional[int]:
+def _ts(dt: Any, tz: Optional[str] = None, *, is_end: bool = False) -> Optional[int]:
+    if isinstance(dt, date) and not isinstance(dt, datetime) and tz:
+        # All-day calendar items carry a date; start is midnight of that day,
+        # while exchangelib reports end as the inclusive last date (so the
+        # exclusive upper bound is midnight at the start of the next day).
+        base = date(dt.year, dt.month, dt.day)
+        if is_end:
+            base = base + timedelta(days=1)
+        dt = datetime.combine(base, dtime(), ZoneInfo(tz))
     try:
         return int(dt.timestamp())
     except (AttributeError, OSError, OverflowError, ValueError, TypeError):
@@ -100,9 +111,9 @@ def row_from_event(item: Any, tz: str) -> Dict[str, Any]:
         "ews_id": str(getattr(item, "id", "") or ""),
         "changekey": getattr(item, "changekey", None),
         "subject": getattr(item, "subject", "") or "",
-        "start_ts": _ts(getattr(item, "start", None)),
+        "start_ts": _ts(getattr(item, "start", None), tz),
         "start_iso": fmt_dt(getattr(item, "start", None), tz),
-        "end_ts": _ts(getattr(item, "end", None)),
+        "end_ts": _ts(getattr(item, "end", None), tz, is_end=True),
         "end_iso": fmt_dt(getattr(item, "end", None), tz),
         "location": str(getattr(item, "location", None) or "") or None,
         "organizer": getattr(organizer, "email_address", None),
@@ -251,6 +262,8 @@ class SyncEngine:
                 fid = getattr(getattr(account, attr, None), "id", None)
                 if fid:
                     wk_by_raw.setdefault(fid, wk_alias)
+            except UnauthorizedError:
+                raise
             except Exception:
                 continue
 
@@ -265,6 +278,7 @@ class SyncEngine:
                         "name": name,
                         "path": path,
                         "wk": wk_by_raw.get(raw_id),
+                        "folder_class": getattr(child, "folder_class", None),
                         "total": getattr(child, "total_count", None) or 0,
                         "unread": getattr(child, "unread_count", None) or 0,
                         "children": len(list(getattr(child, "children", None) or [])),
@@ -275,6 +289,8 @@ class SyncEngine:
             walk(account.msg_folder_root, "")
             if rows:
                 self.store.replace_folders(rows)
+        except UnauthorizedError:
+            raise
         except Exception as exc:
             logger.debug("folder tree sync failed: %s", exc)
 
@@ -291,6 +307,8 @@ class SyncEngine:
                 [row_from_event(ev, tz) for ev in events
                  if getattr(ev, "id", None)])
             self.store.set_sync_state("events", None, time.time())
+        except UnauthorizedError:
+            raise
         except Exception as exc:
             logger.debug("calendar window sync failed: %s", exc)
 
@@ -314,5 +332,7 @@ class SyncEngine:
                 self.store.set_sync_state("item:tasks",
                                           tasks_folder.item_sync_state,
                                           time.time())
+        except UnauthorizedError:
+            raise
         except Exception as exc:
             logger.debug("tasks sync failed: %s", exc)

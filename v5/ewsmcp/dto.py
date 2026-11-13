@@ -1,7 +1,7 @@
 """Token-lean DTO builders (DESIGN.md §DTOs). The model never sees a raw EWS id:
 ``id`` IS the short alias; the aliaser holds the raw id + changekey."""
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -10,8 +10,14 @@ from .ids import IdAliaser
 
 
 def fmt_dt(value: Any, tz: str) -> Optional[str]:
-    if value is None or not hasattr(value, "astimezone"):
+    if value is None:
         return None
+    if not hasattr(value, "astimezone"):
+        # All-day boundaries arrive as EWSDate — a plain date subclass with
+        # no clock time and no tzinfo, so there is nothing to convert.
+        # Returning None here dropped the date silently and left an all-day
+        # event indistinguishable from a broken record.
+        return value.isoformat() if isinstance(value, date) else None
     try:
         return value.astimezone(ZoneInfo(tz)).isoformat(timespec="minutes")
     except Exception:
@@ -57,6 +63,42 @@ def _emails(recipients: Any) -> List[str]:
     ]
 
 
+# ContentInfo.contentType OIDs (RFC 5652), DER-encoded incl. tag+length —
+# unique enough as a byte substring that a prefix scan is reliable without
+# a full ASN.1 parser.
+_PKCS7_OID_SIGNED = bytes.fromhex("06092a864886f70d010702")
+_PKCS7_OID_ENVELOPED = bytes.fromhex("06092a864886f70d010703")
+
+
+def is_pkcs7_candidate(name: Optional[str], content_type: Optional[str]) -> bool:
+    """True when filename or MIME type marks a PKCS#7 S/MIME attachment."""
+    ct = (content_type or "").lower()
+    nm = (name or "").lower()
+    return "pkcs7-mime" in ct or nm.endswith(".p7m")
+
+
+def sniff_smime_type(name: Optional[str], content_type: Optional[str],
+                     content: Any) -> Optional[str]:
+    """Best-effort PKCS#7 content-type sniff for smime.p7m attachments.
+
+    application/pkcs7-mime names BOTH signed (opaque-signing) and encrypted
+    S/MIME messages identically, with no way to tell them apart from the
+    filename or content-type alone — the actual answer is the DER
+    ContentInfo.contentType OID at the start of the structure. Returns
+    "signed" / "enveloped" / None (not a p7m, or bytes unavailable).
+    """
+    if not is_pkcs7_candidate(name, content_type):
+        return None
+    if not isinstance(content, (bytes, bytearray)):
+        return None
+    head = bytes(content[:64])
+    if _PKCS7_OID_SIGNED in head:
+        return "signed"
+    if _PKCS7_OID_ENVELOPED in head:
+        return "enveloped"
+    return None
+
+
 def msg_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
     """MsgCard: the ≤~60-token search/list unit."""
     text = getattr(item, "text_body", None) or ""
@@ -90,8 +132,13 @@ def msg_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
 
 
 def msg_full(item: Any, aliaser: IdAliaser, tz: str, body_max_chars: int,
-             include_html: bool = False) -> Dict[str, Any]:
-    """MsgFull: card + cleaned body + recipients + attachment inventory."""
+             include_html: bool = False,
+             smime_types: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
+    """MsgFull: card + cleaned body + recipients + attachment inventory.
+
+    Never touches ``att.content`` (a lazy EWS GetAttachment property); any
+    ``smime_type`` hints are pre-sniffed inside the gateway worker.
+    """
     full = msg_card(item, aliaser, tz)
     full["to"] = _emails(getattr(item, "to_recipients", None))
     cc = _emails(getattr(item, "cc_recipients", None))
@@ -117,17 +164,25 @@ def msg_full(item: Any, aliaser: IdAliaser, tz: str, body_max_chars: int,
         full["body_html"] = raw_html
     attachments = []
     for i, att in enumerate(getattr(item, "attachments", None) or []):
-        attachments.append({
+        name = getattr(att, "name", f"attachment-{i}")
+        content_type = getattr(att, "content_type", None)
+        entry: Dict[str, Any] = {
             "idx": i,
-            "name": getattr(att, "name", f"attachment-{i}"),
+            "name": name,
             "size_bytes": getattr(att, "size", None),
-            "content_type": getattr(att, "content_type", None),
-        })
+            "content_type": content_type,
+        }
+        smime_type = (smime_types or {}).get(i)
+        if smime_type and is_pkcs7_candidate(name, content_type):
+            entry["smime_type"] = smime_type
+        attachments.append(entry)
     if attachments:
         full["attachments"] = attachments
     imid = getattr(item, "message_id", None)
     if imid:
         full["internet_message_id"] = imid
+    if getattr(item, "flag_status", None) == 1:
+        full["flag_complete"] = True
     full.pop("snippet", None)
     return full
 
@@ -140,6 +195,10 @@ def event_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
         "start": fmt_dt(getattr(item, "start", None), tz),
         "end": fmt_dt(getattr(item, "end", None), tz),
     }
+    if getattr(item, "is_all_day", False):
+        # Without this the caller cannot tell a full-day block from a
+        # timed one, because all-day start/end carry a date but no clock.
+        card["all_day"] = True
     location = getattr(item, "location", None)
     if location:
         card["location"] = str(location)

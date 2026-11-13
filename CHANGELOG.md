@@ -2,20 +2,66 @@
 
 ## [Unreleased]
 
-### Documentation
-- Repository-wide revamp: the root README is now a single front door
-  (version guide, stdio-first quick start); `docs/README.md` maps all
-  documentation; the ten 4.0-era documents moved to `docs/legacy/` with
-  banners; `v5/docs/API.md` gained a generated per-tool parameter
-  reference (`dump_tool_table.py` now emits and drift-checks it).
+## [4.5.0a2] - 2026-11-13
 
-### Removed
-- Legacy helper scripts (`run.sh`, `scripts/build.sh`,
-  `scripts/deploy.sh`, `scripts/setup.sh`,
-  `scripts/setup-basic-auth.sh`) and redundant configuration examples
-  (`.env.basic.example`, `.env.oauth2.example`, `.env.ai.example`).
-  One template per line remains: root `.env.example` (4.0) and
-  `v5/.env.example` (4.5).
+### Added
+- `list_folders` rows expose `folder_class`, the raw EWS `FolderClass` string (`IPF.Note`, `IPF.Appointment`, `IPF.Contact`, …), on both the cache and live lanes (omitted when Exchange reports none); existing local mirrors gain `folders.folder_class` on open and populate it on the next hierarchy sync.
+- `get_attachment` and `get_message` sniff `smime.p7m` (`application/pkcs7-mime`) attachments via the DER `ContentInfo.contentType` OID (RFC 5652, stdlib only) and report `smime_type: signed|enveloped`; `get_attachment(mode="auto")` decodes `signed` payloads as text and leaves `enveloped` payloads as `info` with a private-key hint.
+- `create_event` and `update_event` accept `reminder_minutes` (`-1` removes a reminder), and `get_event` returns it.
+- Recurring calendar events: `create_event` accepts `recurrence` (`daily`, `weekly`, or `monthly`, with `interval`, `weekdays`, `until`, or `count`) in the server's named timezone so series keep their wall-clock time across DST changes; `get_event` returns the series rule and `type`, and `update_event` accepts `scope="series"` (required when editing a series master id).
+- `create_event` reports `invitations_pending` when an event with attendees is saved without sending invitations, and `get_event` shows `invitations_sent` to the organizer.
+- `check_messages` checks a list of subjects or senders (comma- or newline-separated string, JSON array string, or string array) against a folder in one call and returns matching messages and missing values.
+- `search_messages` accepts `folder="f:all"` to search mail folders across the mailbox (excluding deleted items, junk, drafts, and outbox), merging hits newest first with each hit's `folder` plus `folders_searched` and `folders_failed`, as well as `categories` and `flag_complete` filters (with `flag_complete` completion state writable via `update_messages`).
+- Draft file attachments: `create_draft` accepts `attachments` and the new `add_draft_attachment` tool adds a file to an existing draft (`filename`, `content_base64`, optional `content_type`; 30 tools total, `mcp>=1.30`); `send_draft` lists attachments in its preview.
+- Draft attachments by `path` from one operator-configured directory (`EWS_ATTACHMENT_DIR`, off by default), next to `content_base64`.
+- `EWS_MAX_ATTACHMENT_MB` (1 to 50, default 25): per-call attachment ceiling; the HTTP body limit follows it.
+- Folder names `sentitems`, `deleteditems`, `junkemail` are accepted wherever a folder is named.
+- The `send_draft` confirm token also binds the attachment ids (alongside names and sizes).
+
+### Changed
+- The authentication breaker's cap counts rejected submissions, including requests already in flight when the first 401 arrived, so a burst can reach the cap at once. That is deliberate: submissions are what a directory's lockout counter counts.
+- `ews_tz` now defaults to `"UTC"` — set `EWS_TZ` if you relied on the old default.
+- Replaced the host-specific Compose file with `v5/docker-compose.example.yml` (loopback port, `read` tier, sends off, data volume, `/livez` health check).
+- Multi-folder searches (`f:all`, `recursive`) are bounded: at most 200 folders per call (the rest reported as `folders_skipped`) and `offset + limit` at most 500; a throttled folder fails the call as `throttled`; cancellation propagates.
+- `total_available` for `flag_complete=false` is null (counting it walks nearly the whole folder); `next_offset` says whether more exist.
+- `get_message` reports `flag_complete` only when read live (`fresh=true`).
+- CI: the lint rule set is pinned in `v5/pyproject.toml`, so a new ruff release cannot turn the gate red on an untouched tree.
+- Repository documentation layout: root `README.md` acts as a single front door (version guide and stdio-first quick start), `docs/README.md` maps all documentation, the 4.0 guides live under `docs/legacy/`, and `v5/docs/API.md` includes a generated per-tool parameter reference drift-checked by `dump_tool_table.py`.
+- Removed legacy shell helper scripts (`run.sh`, `scripts/build.sh`, `scripts/deploy.sh`, `scripts/setup.sh`, `scripts/setup-basic-auth.sh`) and redundant `.env.*.example` templates so one template per line remains (root `.env.example` for 4.0 and `v5/.env.example` for 4.5).
+
+### Fixed
+- `send_draft` sends exactly what was previewed: the confirm gate hands the handler the hash it verified, the handler fetches the draft once, re-checks the hash on that object and sends that object; a draft changed after the preview is refused with `confirm_invalid`. Draft tools (`update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft`) are serialised per draft. Before, a change landing between verification and sending went out unreviewed.
+- `update_draft` refuses items outside Drafts, like the other draft tools.
+- A tool call that completed is no longer reported as `auth_failed` because another call saw a 401 at the same time.
+- A 401 that says the account is locked out is counted and raised at once even when the response also carries `Connection: close` (the library would report it as a busy server and retry).
+- Only an authenticated round trip closes the authentication breaker: after the cooldown the next call probes first, so a call answered from memory can no longer reset the count.
+- Lockout-guard edge cases found in a second review: a half-open call does not probe if a rejection landed while it was queued; a probe that overlaps another thread's rejection is not reported as warm; a 401 swallowed inside a tool function and followed by another error is still `auth_failed`; listing well-known folders stops at the first rejection instead of asking four more times.
+- After a 401 inside a tool call the connection manager always arms one recovery probe after the cooldown, also with the heartbeat disabled; a half-open probe keeps its claim until the worker finishes.
+- `set_oof`, `create_event` and `update_event` accept times with an explicit non-zero UTC offset (they failed with `UnknownTimeZone`): aware inputs are converted to the configured named zone.
+- `update_messages(flag_complete=false)` only clears a completed flag; an open follow-up flag is left alone.
+- Draft and reply fetches request only the fields they use, so a draft's attachments and MIME content are no longer downloaded on every draft operation.
+- `search_messages` with `sender` on `folder="f:all"` or `recursive=true` returns every match across pages, with the same paging contract as a single folder.
+- `check_messages` takes one folder only, cancels the remaining searches on the first failure and fetches four fields per message.
+- All-day events appear in the mirror on each of their days, including the last.
+- `get_attachment` applies the 5 MiB S/MIME sniff cap in `mode="info"` and `mode="auto"`.
+- `recursive=true` rooted at Deleted Items, Drafts, Junk or Outbox walks that subtree.
+- All-day calendar items no longer return `start`/`end` as null when exchangelib hands back `date` objects: they format as `YYYY-MM-DD`, event cards set `all_day: true`, and the cache mirror stores midnight in the server timezone.
+- OAuth discovery and registration paths (`/.well-known/oauth-*`, `/register`) return 404 instead of inheriting the `MCP_API_KEY` gate's 401 so clients treat OAuth as unsupported; clients that probe `/mcp` unauthenticated before attaching headers should omit `MCP_API_KEY` and rely on network isolation (`x-api-key` on `/api/tools/<name>` is unaffected).
+- A password that Exchange rejects is no longer resubmitted. An HTTP 401 now fails at once (`RejectingFaultTolerance` raises `UnauthorizedError`, mapped ahead of throttling without `"401"` substring false positives while preserving retries on `currently locked out`, 503, and SOAP busy) instead of being retried as throttling; an authentication circuit breaker in `EWSGateway` blocks every path to Exchange (tool calls, warm-up, heartbeat, background sync) for `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` (default 900) and stops permanently after `EWS_AUTH_MAX_REJECTIONS` (default 3) until the process restarts. New connection state `auth_failed` on `/readyz`, `/metrics`, and `get_server_status`; tools answer `auth_failed` with a hint that retrying will not help. Closes the account-lockout path reported in #161 across every mode.
+- An empty `EWS_AUTH_TYPE_FORCE` is treated as unset instead of failing start-up.
+- `EWS_AUTH_TYPE_FORCE=ntlm` works: the setting was handed to exchangelib as is, whose NTLM constant is upper-case, so a forced NTLM failed validation before any request was sent.
+- On a 401 the log names the authentication schemes the server offered (`WWW-Authenticate`) next to the configured one without logging credentials.
+- `get_message` and `get_attachment(mode="info")` no longer download attachment bytes for ordinary files; S/MIME sniffing reads only PKCS#7 candidates, off the event loop (up to 5 MiB in `get_message`).
+- `check_messages(field="sender")` asks Exchange (AQS `from:`) on the live lane instead of scanning only the newest 50 messages; whole-word matching also applies to sender names; `values` accepts an array of strings as documented; `fresh` and provenance stamps added.
+- `search_messages(recursive=true)` returns hits newest first across folders with a correct offset: it now runs on the same per-folder search and merge as `folder="f:all"`, labels each hit with its folder, and reports `folders_searched` / `folders_failed`.
+- `flag_complete=false` is applied on whole-mailbox and recursive searches (it was silently dropped there).
+- `check_availability` free/busy window and results are anchored on the Exchange timezone (#141, closes #150); regression tests added.
+- The legacy 4.0 tree: `create_reply_draft(reply_all=true)` keeps the original `Cc` in `Cc` instead of promoting it to `To`, and no longer loses it when the caller adds `Cc` (#138).
+- `create_draft(mode="reply_all")` removes the mailbox's own address from `To` and `Cc`, drops `Cc` entries already in `To`, and adds the caller's `to`, `cc`, `bcc` instead of discarding them.
+- `set_oof(state="scheduled")` validates `start`/`end` before calling Exchange and sends the window in UTC; the result reports `start` and `end`.
+- Recipient allow/deny lists normalise each address (whitespace, case, `Name <address>`) before matching; a malformed recipient is a `validation` error when a list is configured.
+- `get_event` no longer fails on an occurrence whose series master is not in the mailbox; `update_event(scope="series")` works on all-day series.
+- `mail_folders` tolerates a mailbox without one of the well-known folders.
 
 ## [4.5.0a1] - 2026-07-11 (pre-release; the `v5/` tree)
 

@@ -23,6 +23,6 @@ def test_version_is_45_line():
         "_v5_init", V5_ROOT / "ewsmcp" / "__init__.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert mod.__version__.startswith("4.5."), mod.__version__
+    assert mod.__version__ == "4.5.0a2"
     pyproject = (V5_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert f'version = "{mod.__version__}"' in pyproject

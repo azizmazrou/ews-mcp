@@ -1,8 +1,8 @@
 """Signature + behavior pins for every exchangelib API v5 calls.
 
 The v3 tree learned this the hard way: MagicMock accepts any kwarg, so a
-renamed/removed parameter sails through unit tests and detonates in
-production (`disposal_type`, `OofReply`, …). Every kwarg-bearing call site
+renamed/removed parameter sails through unit tests and fails at
+runtime (`disposal_type`, `OofReply`, …). Every kwarg-bearing call site
 in v5/ewsmcp pins the REAL `inspect.signature` here, and the lies that
 drove the Phase B criticals are pinned as behavior contracts:
 
@@ -21,15 +21,32 @@ together with the pins, never the pins alone.
 import inspect
 
 import pytest
-from exchangelib import Account, CalendarItem, Message, OofSettings
+from exchangelib import (
+    BASIC,
+    DELEGATE,
+    Account,
+    CalendarItem,
+    Configuration,
+    Credentials,
+    EWSDateTime,
+    EWSTimeZone,
+    HTMLBody,
+    Message,
+    OofSettings,
+)
+from exchangelib.errors import ErrorServerBusy, UnauthorizedError
 from exchangelib.fields import IntegerField
 from exchangelib.folders import Folder
 from exchangelib.folders.collections import FolderCollection
 from exchangelib.items import Item, ReplyToItem
-from exchangelib.properties import ConversationId
+from exchangelib.properties import ConversationId, Mailbox
 from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
 from exchangelib.version import EXCHANGE_2016, Version
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+from ewsmcp.gateway.client import RejectingFaultTolerance
+from ewsmcp.tools import writes
 
 
 def _params(func):
@@ -40,6 +57,7 @@ PINS = {
     # --- fetch / projection (mail_read._fetch_one, writes._fetch_many)
     Account.fetch: ["self", "ids", "folder", "only_fields", "chunk_size"],
     # --- draft lifecycle (writes._create_draft / _update_draft)
+    Item.attach: ["self", "attachments"],
     Message.create_reply: ["self", "subject", "body", "to_recipients",
                            "cc_recipients", "bcc_recipients", "author"],
     Message.create_reply_all: ["self", "subject", "body", "author"],
@@ -59,6 +77,8 @@ PINS = {
     Item.delete: ["self", "send_meeting_cancellations",
                   "affected_task_occurrences", "suppress_read_receipts"],
     # --- calendar (writes._create_event / _respond_to_event / _cancel_event)
+    CalendarItem.recurring_master: ["self"],
+    Item.refresh: ["self"],
     CalendarItem.save: ["self", "update_fields", "conflict_resolution",
                         "send_meeting_invitations"],
     # --- free/busy + GAL (calendar_people)
@@ -75,6 +95,7 @@ PINS = {
     Folder.refresh: ["self"],
     # --- reliability (gateway)
     FaultTolerance.__init__: ["self", "max_wait"],
+    FaultTolerance.raise_response_errors: ["self", "response"],
 }
 
 
@@ -87,8 +108,8 @@ def test_signature_pin(func):
 
 
 def test_item_delete_has_no_disposal_kwargs():
-    """The 4.x -> 5.x trap that produced two production outages: delete()
-    IS HardDelete; disposal_type/delete_type kwargs are gone."""
+    """In exchangelib 5.x (unlike 4.x), delete() IS HardDelete;
+    disposal_type/delete_type kwargs are gone."""
     params = _params(Item.delete)
     assert "disposal_type" not in params
     assert "delete_type" not in params
@@ -141,8 +162,176 @@ def test_folder_total_count_is_a_stored_field_not_a_probe():
     assert isinstance(Folder.total_count, IntegerField)
 
 
+def test_folder_class_is_a_real_field():
+    """folder_class is the raw EWS FolderClass string exposed verbatim by
+    list_folders (mail/calendar/contacts type marker) — pinned so an
+    exchangelib rename/removal breaks this test before it breaks the tool."""
+    assert "folder_class" in [f.name for f in Folder.FIELDS]
+
+
 def test_protocol_cache_is_evictable():
     """gateway.reset() calls CachingProtocol.clear_cache() to force a
     fresh session + auth negotiation; closing the protocol alone hands
     the same wedged instance back on the next build."""
     assert callable(getattr(CachingProtocol, "clear_cache", None))
+
+
+def test_flag_status_extended_property_pin():
+    """flag_property relies on Message.register and ExtendedProperty's
+    property_tag and property_type attributes."""
+    from exchangelib.extended_properties import ExtendedProperty
+    from ewsmcp.flag_property import FlagStatus, ensure_registered
+
+    assert callable(getattr(Message, "register", None))
+    assert callable(getattr(Message, "deregister", None))
+    assert _params(Message.register) == ["attr_name", "attr_cls"]
+    assert hasattr(ExtendedProperty, "property_tag")
+    assert hasattr(ExtendedProperty, "property_type")
+    assert issubclass(FlagStatus, ExtendedProperty)
+    assert FlagStatus.property_tag == 0x1090
+    assert FlagStatus.property_type == "Integer"
+    ensure_registered()
+    ensure_registered()
+    assert [f.name for f in Message.FIELDS].count("flag_status") == 1
+
+
+def test_streamable_http_session_manager_accepts_max_request_body_size():
+    """http.serve_http passes max_request_body_size (added in mcp 1.30); pin
+    against the real class so an older mcp fails here instead of at runtime."""
+    sig = inspect.signature(StreamableHTTPSessionManager.__init__)
+    for param in ("app", "json_response", "stateless", "max_request_body_size"):
+        assert param in sig.parameters, param
+    sig.bind(
+        None,
+        app=None,
+        json_response=False,
+        stateless=True,
+        max_request_body_size=1024,
+    )
+
+
+def test_ewsdatetime_from_datetime_pin():
+    """writes._set_oof converts stdlib ZoneInfo datetimes via EWSDateTime.from_datetime."""
+    assert callable(getattr(EWSDateTime, "from_datetime", None))
+    assert _params(EWSDateTime.from_datetime) == ["d"]
+
+
+
+def test_unauthorized_error_exists_and_policy_override_matches_base():
+    """RejectingFaultTolerance depends on exchangelib.errors.UnauthorizedError
+    being a real exception distinct from ErrorServerBusy, and on overriding
+    FaultTolerance.raise_response_errors(self, response) with matching params."""
+    assert issubclass(UnauthorizedError, Exception)
+    assert not issubclass(UnauthorizedError, ErrorServerBusy)
+    assert issubclass(RejectingFaultTolerance, FaultTolerance)
+    assert _params(RejectingFaultTolerance.raise_response_errors) == [
+        "self", "response"
+    ]
+
+
+def test_cached_protocol_retry_policy_is_replaceable_via_protocol_config():
+    """CachingProtocol hands back one Protocol per (service_endpoint, credentials),
+    and Protocol.retry_policy reads protocol.config.retry_policy. _build_account
+    relies on both when a cached Protocol carries an earlier gateway's policy.
+    An explicit auth type and version keep this off the network."""
+    CachingProtocol.clear_cache()
+    try:
+        creds = Credentials("svc", "secret")
+        endpoint = "https://ews.example.com/EWS/Exchange.asmx"
+        version = Version(build=EXCHANGE_2016)
+        p1 = RejectingFaultTolerance(max_wait=60)
+        p2 = RejectingFaultTolerance(max_wait=120)
+        proto1 = Protocol(config=Configuration(
+            service_endpoint=endpoint, credentials=creds, auth_type=BASIC,
+            version=version, retry_policy=p1))
+        proto2 = Protocol(config=Configuration(
+            service_endpoint=endpoint, credentials=creds, auth_type=BASIC,
+            version=version, retry_policy=p2))
+        assert proto2 is proto1
+        assert proto2.retry_policy is p1
+        proto2.config.retry_policy = p2
+        assert proto1.retry_policy is p2
+    finally:
+        CachingProtocol.clear_cache()
+
+
+def test_every_forced_auth_setting_maps_to_a_scheme_the_library_accepts():
+    """EWS_AUTH_TYPE_FORCE values are lower-case; exchangelib's constants are
+    not (NTLM is upper-case). The gateway maps one onto the other: every value
+    the setting allows must build a real Configuration."""
+    from typing import get_args
+
+    from ewsmcp.config import Settings
+    from ewsmcp.gateway.client import AUTH_TYPE_BY_SETTING
+
+    annotation = Settings.model_fields["ews_auth_type_force"].annotation
+    allowed = set(get_args(get_args(annotation)[0]))
+    assert allowed == set(AUTH_TYPE_BY_SETTING)
+    for setting in sorted(allowed):
+        config = Configuration(
+            service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+            credentials=Credentials("user", "secret"),
+            auth_type=AUTH_TYPE_BY_SETTING[setting],
+            version=Version(build=EXCHANGE_2016),
+        )
+        assert config.auth_type == AUTH_TYPE_BY_SETTING[setting]
+
+
+def test_writes_draft_field_projections_match_real_message_fields():
+    """Every field in writes.py's draft/reply projections must exist on
+    exchangelib.Message and exclude mime_content."""
+    # The library's own validator is the authority: it also accepts the item
+    # id and changekey, which are not entries in Message.FIELDS.
+    validator = Folder()
+    version = Version(build=EXCHANGE_2016)
+    for projection in (
+        writes._REPLY_SOURCE_FIELDS,
+        writes._DRAFT_ATTACH_FIELDS,
+        writes._DRAFT_UPDATE_FIELDS,
+        writes._DRAFT_DELETE_FIELDS,
+        writes._DRAFT_PREVIEW_FIELDS,
+        writes._DRAFT_SEND_FIELDS,
+    ):
+        assert projection
+        assert "mime_content" not in projection
+        for name in projection:
+            validator.validate_item_field(field=name, version=version)
+
+    # Verify offline that a real Message populated only with _REPLY_SOURCE_FIELDS
+    # supports create_reply, create_reply_all, and create_forward without error.
+    CachingProtocol.clear_cache()
+    try:
+        account = Account(
+            primary_smtp_address="exec@corp.example",
+            config=Configuration(
+                service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+                credentials=Credentials("svc", "secret"),
+                auth_type=BASIC,
+                version=Version(build=EXCHANGE_2016),
+            ),
+            autodiscover=False,
+            access_type=DELEGATE,
+            default_timezone=EWSTimeZone("UTC"),
+        )
+        msg = Message(
+            account=account,
+            id="RAW-MSG-1",
+            changekey="CK-MSG-1",
+            subject="Thread subject",
+            sender=Mailbox(email_address="sender@corp.example"),
+            author=Mailbox(email_address="sender@corp.example"),
+            reply_to=[Mailbox(email_address="sender@corp.example")],
+            to_recipients=[Mailbox(email_address="exec@corp.example")],
+            cc_recipients=[Mailbox(email_address="peer@corp.example")],
+            bcc_recipients=None,
+        )
+        body = HTMLBody("<html><body><p>ack</p></body></html>")
+        rep = msg.create_reply("Re: Thread subject", body)
+        assert [m.email_address for m in rep.to_recipients] == ["sender@corp.example"]
+        rep_all = msg.create_reply_all("Re: Thread subject", body)
+        assert rep_all.to_recipients
+        fwd = msg.create_forward("Fwd: Thread subject", body, ["target@corp.example"])
+        # Recipients given as plain strings are kept as given.
+        assert list(fwd.to_recipients) == ["target@corp.example"]
+    finally:
+        CachingProtocol.clear_cache()

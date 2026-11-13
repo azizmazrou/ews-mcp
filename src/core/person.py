@@ -53,7 +53,7 @@ class Person(BaseModel):
 
     # Core identity
     id: str = Field(..., description="Unique identifier (usually primary email)")
-    name: str = Field(..., description="Full name (e.g., 'Ahmed Al-Rashid')")
+    name: str = Field(..., description="Full name (e.g., 'Alex Morgan')")
     display_name: Optional[str] = Field(None, description="How to address them")
     given_name: Optional[str] = Field(None, description="First name")
     surname: Optional[str] = Field(None, description="Last name")

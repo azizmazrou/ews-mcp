@@ -5,12 +5,13 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from conftest import make_settings
+from conftest import FIXED_OFFSET_TZ, make_settings
+from exchangelib import EWSDate
 
 from ewsmcp.cache.store import CacheStore
-from ewsmcp.cache.sync import SyncEngine, row_from_message
+from ewsmcp.cache.sync import SyncEngine, row_from_event, row_from_message
 
-TZ = ZoneInfo("Asia/Riyadh")
+TZ = ZoneInfo(FIXED_OFFSET_TZ)
 NOW = datetime(2026, 7, 10, 9, 0, tzinfo=TZ)
 
 
@@ -48,7 +49,7 @@ def _msg(raw_id, *, subject="Subj", body="Body text", dt=None, is_read=False,
          conv="CONV-1"):
     return SimpleNamespace(
         id=raw_id, changekey="CK", subject=subject,
-        sender=SimpleNamespace(name="Ahmed", email_address="ahmed@corp.example"),
+        sender=SimpleNamespace(name="Sender", email_address="sender@corp.example"),
         datetime_received=dt or NOW,
         is_read=is_read, has_attachments=False, importance="Normal",
         categories=None, conversation_id=SimpleNamespace(id=conv),
@@ -67,6 +68,7 @@ def _account():
 
 
 def _engine(tmp_path, account, **overrides):
+    overrides.setdefault("ews_tz", FIXED_OFFSET_TZ)
     settings = make_settings(**overrides)
     store = CacheStore(tmp_path / "mirror.db")
     return SyncEngine(settings, FakeGateway(account), store), store
@@ -134,7 +136,7 @@ def test_cycle_failure_degrades_not_dies(tmp_path):
 def test_row_from_message_cleans_body_once(tmp_path):
     quoted = ("Latest reply only.\n\nFrom: Someone <s@corp.example>\n"
               "Sent: Monday\nTo: Exec\nSubject: Re: X\n\nOLD QUOTED TEXT")
-    row = row_from_message(_msg("M1", body=quoted), "inbox", "Asia/Riyadh")
+    row = row_from_message(_msg("M1", body=quoted), "inbox", FIXED_OFFSET_TZ)
     assert "OLD QUOTED" not in row["body_clean"]
     assert row["body_clean"].startswith("Latest reply only.")
     assert row["norm_text"]  # normalized shadow present for FTS
@@ -144,11 +146,14 @@ def test_row_from_message_cleans_body_once(tmp_path):
 def test_slow_lane_syncs_folders_calendar_tasks(tmp_path):
     account = _account()
 
-    def folder_node(fid, name, children=(), total=0, unread=0):
+    def folder_node(fid, name, children=(), total=0, unread=0,
+                    folder_class=None):
         return SimpleNamespace(id=fid, name=name, children=list(children),
-                               total_count=total, unread_count=unread)
+                               total_count=total, unread_count=unread,
+                               folder_class=folder_class)
 
-    inbox_node = folder_node("F-IN", "Inbox", total=5, unread=2)
+    inbox_node = folder_node("F-IN", "Inbox", total=5, unread=2,
+                             folder_class="IPF.Note")
     account.msg_folder_root = folder_node("F-ROOT", "root", [inbox_node])
     account.inbox = FakeFolder("inbox")
     account.inbox.id = "F-IN"
@@ -175,7 +180,82 @@ def test_slow_lane_syncs_folders_calendar_tasks(tmp_path):
     engine._sync_slow_lane(account)
     folders = {r["path"]: r for r in store.folder_rows()}
     assert folders["Inbox"]["unread"] == 2
+    assert folders["Inbox"]["folder_class"] == "IPF.Note"
     assert store.events_window(0, 2**40)
     rows, total = store.task_rows()
     assert total == 1
     assert store.get_sync_state("item:tasks") == "TT-1"
+
+
+def test_all_day_one_day_and_three_day_events_appear_on_every_covered_day(tmp_path):
+    one_day = SimpleNamespace(
+        id="EV-1D",
+        changekey="CK-1",
+        subject="Company holiday",
+        start=EWSDate(2026, 7, 10),
+        end=EWSDate(2026, 7, 10),
+        location=None,
+        organizer=None,
+        is_recurring=False,
+        recurrence=None,
+        my_response_type=None,
+    )
+    three_day = SimpleNamespace(
+        id="EV-3D",
+        changekey="CK-3",
+        subject="Annual summit",
+        start=EWSDate(2026, 7, 10),
+        end=EWSDate(2026, 7, 12),
+        location=None,
+        organizer=None,
+        is_recurring=False,
+        recurrence=None,
+        my_response_type=None,
+    )
+    timed = SimpleNamespace(
+        id="EV-TIMED",
+        changekey="CK-T",
+        subject="Morning check-in",
+        start=datetime(2026, 7, 10, 9, 0, tzinfo=TZ),
+        end=datetime(2026, 7, 10, 9, 30, tzinfo=TZ),
+        location=None,
+        organizer=None,
+        is_recurring=False,
+        recurrence=None,
+        my_response_type=None,
+    )
+
+    row_1d = row_from_event(one_day, FIXED_OFFSET_TZ)
+    row_3d = row_from_event(three_day, FIXED_OFFSET_TZ)
+    row_timed = row_from_event(timed, FIXED_OFFSET_TZ)
+
+    # end_iso keeps the date Exchange reported, while end_ts advances to next-day midnight.
+    assert row_1d["start_iso"] == "2026-07-10"
+    assert row_1d["end_iso"] == "2026-07-10"
+    assert row_1d["end_ts"] - row_1d["start_ts"] == 86400
+
+    assert row_3d["start_iso"] == "2026-07-10"
+    assert row_3d["end_iso"] == "2026-07-12"
+    assert row_3d["end_ts"] - row_3d["start_ts"] == 3 * 86400
+
+    assert row_timed["end_ts"] - row_timed["start_ts"] == 1800
+
+    store = CacheStore(tmp_path / "mirror.db")
+    try:
+        store.replace_events([row_1d, row_3d])
+
+        def subjects_on(day_num):
+            day_start = datetime(2026, 7, day_num, 0, 0, tzinfo=TZ)
+            day_end = day_start + timedelta(days=1)
+            rows = store.events_window(
+                int(day_start.timestamp()), int(day_end.timestamp()), limit=10,
+            )
+            return [r["subject"] for r in rows]
+
+        assert subjects_on(9) == []
+        assert set(subjects_on(10)) == {"Company holiday", "Annual summit"}
+        assert subjects_on(11) == ["Annual summit"]
+        assert subjects_on(12) == ["Annual summit"]
+        assert subjects_on(13) == []
+    finally:
+        store.close()

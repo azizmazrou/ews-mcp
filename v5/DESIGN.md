@@ -9,7 +9,7 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
    safety gates. Judgment — summaries, briefings, prioritization,
    commitments, voice — belongs to the CALLING assistant. The server never
    makes an LLM call and never ships a "judgment tool". Tool count stays
-   lean (≤ 29) and is generated into the docs, never hand-counted.
+   lean (≤ 30) and is generated into the docs, never hand-counted.
 2. **Indexing = SQLite + FTS5 in core.** The optional semantic tier hides
    behind an adapter (`EWS_SEMANTIC_INDEX=none|pgvector`, default `none`);
    the public server runs with zero dependencies beyond Exchange
@@ -20,9 +20,21 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 4. **Safety gates live ONLY in the dispatcher** (`tools/base.py`).
    Handlers declare `side_effect_class` and `confirm`; they contain no
    policy.
-5. **Never pin `auth_type`.** Only exchangelib auto-negotiation works
-   against the target Exchange (verified live). All exchangelib imports
-   are module-top; every kwarg-bearing call has a signature pin.
+5. **Default to auto-negotiated `auth_type`, never retry rejected credentials.**
+   exchangelib auto-negotiation is the default because it adapts to the
+   authentication schemes the server offers, and blank `EWS_AUTH_TYPE_FORCE`
+   values load as unset.
+   `RejectingFaultTolerance` counts and raises `UnauthorizedError` on every
+   HTTP 401, locked-out responses included, and `EWSGateway`'s
+   authentication circuit breaker enforces a cooldown
+   (`EWS_AUTH_FAILURE_COOLDOWN_SECONDS`, default 900) and a per-process cap
+   (`EWS_AUTH_MAX_REJECTIONS`, default 3) so a stale secret never locks out
+   the directory account. `EWS_AUTH_MAX_REJECTIONS` counts rejected
+   credential submissions (matching directory lockout counters), so
+   concurrent requests already in flight when the first 401 arrives are each
+   counted and a burst can reach the cap at once. All exchangelib imports
+   are module-top; every kwarg-bearing call and overridden hook has a
+   signature pin.
 6. **No footprints.** No personal names, real addresses, employer
    identifiers, personal skill names, mailbox content, or tokens in any
    tracked file, comment, commit message, or doc. Fixtures use
@@ -32,16 +44,17 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 
 Four packs (see the generated table in `docs/API.md`):
 
-- **mail-read** (6): `list_folders`, `search_messages`, `get_message`,
-  `get_thread`, `get_attachment`, `get_mailbox_overview`.
+- **mail-read** (7): `list_folders`, `search_messages`, `check_messages`,
+  `get_message`, `get_thread`, `get_attachment`, `get_mailbox_overview`.
 - **calendar / people / status** (7): `list_events`, `get_event`,
   `check_availability`, `find_people`, `get_contact`, `get_oof_settings`,
   `get_server_status`.
 - **tasks / waiting-on** (3): `list_tasks`, `update_task`, `waiting_on`.
-- **writes** (12): draft lifecycle (`create_draft`, `update_draft`,
-  `delete_draft`, `send_draft`), bulk ops (`update_messages`,
-  `move_messages`, `delete_messages`), calendar writes (`create_event`,
-  `update_event`, `respond_to_event`, `cancel_event`), `set_oof`.
+- **writes** (13): draft lifecycle (`create_draft`, `update_draft`,
+  `add_draft_attachment`, `delete_draft`, `send_draft`), bulk ops
+  (`update_messages`, `move_messages`, `delete_messages`), calendar writes
+  (`create_event`, `update_event`, `respond_to_event`, `cancel_event`),
+  `set_oof`.
 - **semantic** (+1, only when enabled): `find_similar`.
 
 Every list-shaped result ships exactly the canonical envelope
@@ -52,7 +65,7 @@ Every list-shaped result ships exactly the canonical envelope
 Dispatch order (policy precedes connectivity; nothing irreversible
 without two model decisions):
 
-    kill-switch → tier → circuit → cold gate → recipient guard →
+    kill-switch → tier → circuit → cold / auth gate → recipient guard →
     two-phase confirm → send rate cap → alias resolution → handler → audit
 
 - **Kill-switch** `SEND_ENABLED=false` (default) refuses every send-class
@@ -88,8 +101,8 @@ transaction and run off the event loop.
 `MsgCard` (~60 tokens): id, from, subject, date, 200-char snippet, flags.
 `MsgFull`: card + recipients + CLEANED body (bilingual quoted-history +
 signature stripping) + attachment inventory. Raw HTML only on explicit
-`include_html=true`. The measured pathology this kills: one v3 detail
-call shipped 115,457 chars for a ~150-char message.
+`include_html=true`. Full HTML bodies routinely exceed 100 kB for a short
+message.
 
 ## §Cache — the mirror (see `cache/`)
 
@@ -128,8 +141,10 @@ stdio MCP, Streamable HTTP `/mcp`, a REST shim `/api/tools/<name>`
 `/version`) and `/metrics` (Prometheus, behind the API key).
 **Never-exit boot**: tools register and transports bind before any
 Exchange contact; a background warmup loop owns connection recovery
-(exponential backoff + jitter, protocol-cache eviction every 3 failures,
-heartbeat re-probe with a REAL network round trip).
+(exponential backoff + jitter and protocol-cache eviction every 3
+transient failures, heartbeat re-probe with a REAL network round trip, and
+a bounded `auth_failed` state on HTTP 401 rejections that respects the
+gateway's auth breaker cooldown and stops after `EWS_AUTH_MAX_REJECTIONS`).
 
 ## §Audit
 

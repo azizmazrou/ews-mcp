@@ -21,9 +21,9 @@ EN_OUTLOOK = (
     "The Q2 numbers are attached. Please review the variance on slide 4\n"
     "before Thursday's meeting.\n"
     "\n"
-    "From: John Smith <john.smith@contoso.com>\n"
+    "From: Alice <alice@example.com>\n"
     "Sent: Monday, June 1, 2026 9:14 AM\n"
-    "To: Omar <omar@bank.example>\n"
+    "To: Bob <bob@bank.example>\n"
     "Subject: RE: Q2 numbers\n"
     "\n"
     "Earlier text that should be stripped.\n"
@@ -40,9 +40,9 @@ AR_OUTLOOK = (
     "\n"
     "تم استلام التقرير وسنوافيكم بالملاحظات قبل نهاية الأسبوع.\n"
     "\n"
-    "من: أحمد المثال <ahmed@example.com>\n"
+    "من: المرسل <alice@example.com>\n"
     "تاريخ الإرسال: الأحد 31 مايو 2026 2:10 م\n"
-    "إلى: عمر المثال\n"
+    "إلى: المستلم\n"
     "الموضوع: التقرير الربعي\n"
     "\n"
     "نص قديم.\n"
@@ -57,7 +57,7 @@ GMAIL_EN = (
     "Sounds good — see you at 10.\n"
     "I will bring the printed deck.\n"
     "\n"
-    "On Mon, Jun 1, 2026 at 9:14 AM Sarah Lee <sarah@fabrikam.com> wrote:\n"
+    "On Mon, Jun 1, 2026 at 9:14 AM Alice <alice@example.com> wrote:\n"
     "> Can we move the sync to 10?\n"
     "> The room is taken at 9.\n"
 )
@@ -67,13 +67,13 @@ GMAIL_AR = (
     "تمام، أراك غداً إن شاء الله.\n"
     "سأرسل جدول الأعمال قبل الاجتماع.\n"
     "\n"
-    "في الأحد، 31 مايو 2026 في 9:14 ص، كتب أحمد المثال <ahmed@example.com>:\n"
+    "في الأحد، 31 مايو 2026 في 9:14 ص، كتب المرسل <alice@example.com>:\n"
     "النص السابق هنا.\n"
 )
 GMAIL_AR_KEPT = "تمام، أراك غداً إن شاء الله.\nسأرسل جدول الأعمال قبل الاجتماع."
 
 MIXED_AR_EN = (
-    "Dear Ahmed,\n"
+    "Dear Team,\n"
     "\n"
     "نوافق على المقترح بصيغته الحالية.\n"
     "We will sign tomorrow.\n"
@@ -85,7 +85,7 @@ MIXED_AR_EN = (
     "Old content.\n"
 )
 MIXED_AR_EN_KEPT = (
-    "Dear Ahmed,\n"
+    "Dear Team,\n"
     "\n"
     "نوافق على المقترح بصيغته الحالية.\n"
     "We will sign tomorrow."
@@ -106,7 +106,7 @@ BIDI_QUOTED = (
     "شكراً جزيلاً.\n"
     "سيتم التنفيذ كما تفضلتم.\n"
     "\n"
-    "> ‏من: سارة <sara@example.com>\n"
+    "> ‏من: المرسل <alice@example.com>\n"
     "> ‏التاريخ: 31 مايو 2026\n"
     "> الموضوع: العرض\n"
 )
@@ -137,7 +137,7 @@ SIG_EN = (
     "Finance has been notified.\n"
     "\n"
     "Best regards,\n"
-    "John Smith\n"
+    "Alice\n"
     "Director, Legal\n"
 )
 SIG_EN_KEPT = "The contract is signed and archived.\nFinance has been notified."
@@ -147,7 +147,7 @@ SIG_AR = (
     "سيتم الرفع للإدارة غداً صباحاً.\n"
     "\n"
     "تحياتي\n"
-    "عمر\n"
+    "فريق العمل\n"
 )
 SIG_AR_KEPT = "تم اعتماد المسودة النهائية.\nسيتم الرفع للإدارة غداً صباحاً."
 
@@ -156,7 +156,7 @@ SIG_AR_FORMAL = (
     "تم رفع المحضر للاعتماد.\n"
     "\n"
     "وتفضلوا بقبول فائق الاحترام والتقدير،\n"
-    "عمر المثال\n"
+    "إدارة العمليات\n"
     "مدير إدارة البيانات\n"
 )
 SIG_AR_FORMAL_KEPT = "نشكر لكم تعاونكم المستمر.\nتم رفع المحضر للاعتماد."
@@ -166,13 +166,13 @@ SIG_DELIM = (
     "Invoice goes out today.\n"
     "\n"
     "-- \n"
-    "Sara\n"
-    "Fabrikam Ltd\n"
+    "Alice\n"
+    "Example Ltd\n"
 )
 SIG_DELIM_KEPT = "Numbers confirmed.\nInvoice goes out today."
 
 FULL_EMAIL = (
-    "Hi Sarah,\n"
+    "Hi Alice,\n"
     "\n"
     "Approved — please proceed with phase two.\n"
     "Loop in finance on the PO.\n"
@@ -180,17 +180,17 @@ FULL_EMAIL = (
     "\n"
     "\n"
     "Best regards,\n"
-    "Omar\n"
+    "Bob\n"
     "\n"
-    "From: Sarah Lee <sarah@fabrikam.com>\n"
+    "From: Alice <alice@example.com>\n"
     "Sent: Monday, June 1, 2026 8:02 AM\n"
-    "To: Omar\n"
+    "To: Bob\n"
     "Subject: Phase two\n"
     "\n"
     "May we proceed?\n"
 )
 FULL_EMAIL_CLEAN = (
-    "Hi Sarah,\n"
+    "Hi Alice,\n"
     "\n"
     "Approved — please proceed with phase two.\n"
     "Loop in finance on the PO."
@@ -200,7 +200,7 @@ TRUNC_SUFFIX = "… [truncated]"
 
 HTML_DOC = (
     "<html><head><title>x</title><style>p {color: red}</style></head><body>"
-    "<p>مرحباً <b>عمر</b>،</p>"
+    "<p>مرحباً <b>بالفريق</b>،</p>"
     "<table><tr><td>البند</td><td>القيمة</td></tr>"
     "<tr><td>Total</td><td>500 &amp; up</td></tr></table>"
     '<p>See <a href="https://example.com/report">report</a> first.</p>'
@@ -301,7 +301,7 @@ def test_signature_sent_from_my_stripped():
 
 
 def test_signature_not_stripped_when_body_too_short():
-    text = "Approved.\n\nBest regards,\nJohn"
+    text = "Approved.\n\nBest regards,\nBob"
     assert strip_signature(text) == text
 
 
@@ -385,7 +385,7 @@ def test_html_to_text_table_links_and_arabic():
     out = html_to_text(HTML_DOC)
     nonempty = [ln for ln in out.split("\n") if ln]
     assert nonempty == [
-        "مرحباً عمر،",
+        "مرحباً بالفريق،",
         "البند القيمة",
         "Total 500 & up",
         "See report (https://example.com/report) first.",

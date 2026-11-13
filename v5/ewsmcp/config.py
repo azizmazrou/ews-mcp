@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Path fragments that identify cloud-synced folders. The data dir holds
@@ -22,18 +22,20 @@ class Settings(BaseSettings):
     ews_email: str
     ews_username: Optional[str] = None
     ews_password: Optional[str] = None
-    # NEVER pin auth_type against this Exchange: the front door only works
-    # via exchangelib auto-negotiation (verified live 2026-06-12; pinning
-    # BASIC/NTLM both fail). Escape hatch for a *different* server only.
+    # Auto-negotiation is the default because it adapts to what the server
+    # offers; forcing a scheme skips the unauthenticated probe request and is
+    # appropriate when the scheme is known.
     ews_auth_type_force: Optional[Literal["basic", "ntlm", "digest"]] = None
     ews_insecure_skip_verify: bool = False
-    ews_tz: str = "Asia/Riyadh"
+    ews_tz: str = "UTC"
     request_timeout: int = 30
 
     # --- Reliability --------------------------------------------------------
     ews_warmup_max_backoff_seconds: int = 300
     ews_heartbeat_seconds: int = 600
     ews_retry_max_wait_seconds: int = 300
+    ews_auth_failure_cooldown_seconds: int = Field(default=900, ge=60)
+    ews_auth_max_rejections: int = Field(default=3, ge=1, le=10)
     ews_max_concurrency: int = 4
     circuit_failure_threshold: int = 5
     circuit_open_seconds: int = 60
@@ -46,6 +48,8 @@ class Settings(BaseSettings):
     ews_recipient_allowlist: str = ""
     ews_recipient_denylist: str = ""
     ews_max_sends_per_hour: int = 10
+    ews_attachment_dir: str = ""
+    ews_max_attachment_mb: int = Field(default=25, ge=1, le=50)
 
     # --- Serving ------------------------------------------------------------
     mcp_transport: Literal["stdio", "http"] = "stdio"
@@ -75,6 +79,14 @@ class Settings(BaseSettings):
     # --- Response economy ----------------------------------------------------
     default_page_size: int = Field(default=20, le=50)
     body_max_chars: int = 4000
+
+    @field_validator("ews_auth_type_force", mode="before")
+    @classmethod
+    def _blank_auth_type_is_unset(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip().lower()
+            return stripped or None
+        return value
 
     @model_validator(mode="after")
     def _resolve_data_dir(self) -> "Settings":

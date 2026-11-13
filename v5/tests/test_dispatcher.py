@@ -7,10 +7,18 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict
 
+import pytest
+
 from conftest import make_settings
 from ewsmcp.audit import AuditLog
 from ewsmcp.ids import get_aliaser
-from ewsmcp.tools.base import Context, ToolSpec, dispatch
+from ewsmcp.tools.base import (
+    VERIFIED_CONTENT_HASH_ARG,
+    Context,
+    ToolSpec,
+    dispatch,
+    preview_content_hash,
+)
 
 RAW_ID = "AAMkAGI4" + "a" * 100
 
@@ -90,6 +98,56 @@ def test_cold_gate_blocks_ews_tools_with_hint(tmp_path):
 def test_cold_gate_passes_local_tools(tmp_path):
     ctx = _ctx(tmp_path)
     ctx.manager = _ColdManager()
+    result = asyncio.run(dispatch(ctx, _spec(_ok_handler, requires_ews=False), {}))
+    assert result.get("ran") is True
+
+
+class _AuthFailedManager:
+    state = "auth_failed"
+
+    def __init__(self, *, rejections=1, permanent=False, next_retry_in_s=900):
+        self._rejections = rejections
+        self._permanent = permanent
+        self._next = next_retry_in_s
+
+    def status(self):
+        return {
+            "state": "auth_failed",
+            "attempts": self._rejections,
+            "last_error": "UnauthorizedError: HTTP 401",
+            "last_success_age_s": None,
+            "next_retry_in_s": None if self._permanent else self._next,
+            "auth_rejections": self._rejections,
+            "auth_permanent": self._permanent,
+        }
+
+
+def test_auth_failed_gate_blocks_ews_tools_with_retry_when_permitted(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.manager = _AuthFailedManager(rejections=1, permanent=False, next_retry_in_s=900)
+    result = asyncio.run(dispatch(ctx, _spec(_ok_handler), {}))
+    assert result["ok"] is False
+    err = result["error"]
+    assert err["code"] == "auth_failed"
+    assert err["retry_after_s"] == 900
+    assert "retrying will not help" in err["hint"].lower()
+    assert "restart" in err["hint"].lower()
+
+
+def test_auth_failed_gate_omits_retry_after_when_permanent(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.manager = _AuthFailedManager(rejections=3, permanent=True, next_retry_in_s=None)
+    result = asyncio.run(dispatch(ctx, _spec(_ok_handler), {}))
+    assert result["ok"] is False
+    err = result["error"]
+    assert err["code"] == "auth_failed"
+    assert "retry_after_s" not in err
+    assert "retrying will not help" in err["hint"].lower()
+
+
+def test_auth_failed_gate_passes_local_tools(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.manager = _AuthFailedManager(rejections=3, permanent=True)
     result = asyncio.run(dispatch(ctx, _spec(_ok_handler, requires_ews=False), {}))
     assert result.get("ran") is True
 
@@ -180,6 +238,27 @@ def test_exception_mapping_throttled(tmp_path):
     result = asyncio.run(dispatch(ctx, _spec(boom), {}))
     assert result["error"]["code"] == "throttled"
     assert result["error"]["retry_after_s"]
+
+
+def test_exception_mapping_unauthorized_beats_throttling_and_avoids_401_false_positives():
+    from exchangelib.errors import UnauthorizedError
+    from ewsmcp.errors import map_exception
+
+    # UnauthorizedError wins even if message text contains throttling keywords.
+    auth_err = map_exception(UnauthorizedError("server busy back off ratelimit"))
+    assert auth_err.code == "auth_failed"
+    assert auth_err.hint is not None
+    assert "retrying will not help" in auth_err.hint.lower()
+
+    # Messages that merely contain digits "401" must NOT map to auth_failed.
+    assert map_exception(RuntimeError("failed on item 401 in batch")).code == "upstream_error"
+    assert map_exception(RuntimeError("id AAMk401xyz corrupted")).code == "upstream_error"
+    assert map_exception(ConnectionError("timed out after 4010 ms")).code == "upstream_unavailable"
+
+    class ErrorItemNotFound(Exception):
+        pass
+
+    assert map_exception(ErrorItemNotFound("item 401 missing")).code == "not_found"
 
 
 def test_circuit_opens_after_threshold(tmp_path):
@@ -332,3 +411,120 @@ def test_audit_chain_written(tmp_path):
         canonical = json.dumps(rec, sort_keys=True, ensure_ascii=False)
         assert h == hashlib.sha256(f"{prev}|{canonical}".encode()).hexdigest()
         prev = h
+
+
+# --- recipient guard normalisation & malformed validation --------------------
+
+
+@pytest.mark.parametrize("spelling", [
+    "  leak@blocked.example  ",
+    "LEAK@BLOCKED.EXAMPLE",
+    "External Contact <leak@blocked.example>",
+    "  External Contact <  LEAK@BLOCKED.EXAMPLE  >  ",
+])
+@pytest.mark.parametrize("field", ["to", "cc", "bcc", "attendees"])
+def test_denylist_normalises_whitespace_case_and_angle_brackets(
+    tmp_path, spelling, field,
+):
+    ctx = _ctx(tmp_path, ews_capability_tier="full",
+               ews_recipient_denylist="*@blocked.example")
+    res = asyncio.run(dispatch(ctx, _spec(_ok_handler, cls="write"),
+                               {field: [spelling]}))
+    assert res["ok"] is False
+    assert res["error"]["code"] == "recipient_blocked"
+
+
+def test_allowlist_normalises_whitespace_case_and_angle_brackets(tmp_path):
+    ctx = _ctx(tmp_path, ews_capability_tier="full",
+               ews_recipient_allowlist="*@corp.example")
+    ok = asyncio.run(dispatch(ctx, _spec(_ok_handler, cls="write"), {
+        "to": ["  Team Lead <PEER@CORP.EXAMPLE> "],
+    }))
+    assert ok.get("ran") is True
+
+
+@pytest.mark.parametrize("bad_recipient", [
+    "",
+    "   ",
+    "missing-at-sign",
+    "@corp.example",
+    "local-only@",
+    "two@at@corp.example",
+    "has space@corp.example",
+    "Contact <has space@corp.example>",
+    "Contact <peer@corp.example> extra",
+    "Contact <peer@corp.example",
+    "<peer@corp.example> <leak@blocked.example>",
+])
+def test_malformed_recipient_is_validation_with_list_and_ignored_without(
+    tmp_path, bad_recipient,
+):
+    deny_ctx = _ctx(tmp_path / "deny", ews_capability_tier="full",
+                    ews_recipient_denylist="*@blocked.example")
+    res_deny = asyncio.run(dispatch(deny_ctx, _spec(_ok_handler, cls="write"),
+                                    {"to": [bad_recipient]}))
+    assert res_deny["ok"] is False
+    assert res_deny["error"]["code"] == "validation"
+
+    allow_ctx = _ctx(tmp_path / "allow", ews_capability_tier="full",
+                     ews_recipient_allowlist="*@corp.example")
+    res_allow = asyncio.run(dispatch(allow_ctx, _spec(_ok_handler, cls="write"),
+                                     {"to": [bad_recipient]}))
+    assert res_allow["ok"] is False
+    assert res_allow["error"]["code"] == "validation"
+
+    open_ctx = _ctx(tmp_path / "open", send_enabled=True, ews_capability_tier="full")
+    res_open = asyncio.run(dispatch(open_ctx, _spec(_ok_handler, cls="write"),
+                                    {"to": [bad_recipient]}))
+    assert res_open.get("ran") is True
+    phase1 = asyncio.run(dispatch(open_ctx, _spec(_ok_handler, cls="send", confirm=True),
+                                  {"to": [bad_recipient]}))
+    assert phase1["requires_confirmation"] is True
+
+
+def test_verified_content_hash_stripped_from_caller_kwargs(tmp_path):
+    ctx = _ctx(tmp_path, send_enabled=True, ews_capability_tier="full")
+    res = asyncio.run(dispatch(
+        ctx,
+        _spec(_ok_handler),
+        {VERIFIED_CONTENT_HASH_ARG: "spoofed-hash"},
+    ))
+    assert res.get("ran") is True
+    assert res["got"] == {}
+
+    async def explicit_handler(ctx, *, draft_id: str, _verified_content_hash=None):
+        return {"draft_id": draft_id, "verified": _verified_content_hash}
+
+    res_explicit = asyncio.run(dispatch(
+        ctx,
+        _spec(explicit_handler, cls="write"),
+        {"draft_id": "RAW-1", VERIFIED_CONTENT_HASH_ARG: "spoofed-hash"},
+    ))
+    assert res_explicit["ok"] is True
+    assert res_explicit["verified"] is None
+
+
+def test_confirm_gate_hands_verified_content_hash_to_opting_in_handler(tmp_path):
+    ctx = _ctx(tmp_path, send_enabled=True, ews_capability_tier="full")
+    content = {"subject": "Q3", "to": ["peer@corp.example"], "body_text": "safe"}
+
+    async def send_like(ctx, *, draft_id: str, _verified_content_hash=None):
+        return {"draft_id": draft_id, "verified": _verified_content_hash}
+
+    spec = _preview_spec(send_like, [dict(content), dict(content)])
+    p1 = asyncio.run(dispatch(
+        ctx,
+        spec,
+        {"draft_id": "RAW-1", VERIFIED_CONTENT_HASH_ARG: "spoofed-p1"},
+    ))
+    p2 = asyncio.run(dispatch(
+        ctx,
+        spec,
+        {
+            "draft_id": "RAW-1",
+            "confirm_token": p1["confirm_token"],
+            VERIFIED_CONTENT_HASH_ARG: "spoofed-p2",
+        },
+    ))
+    assert p2["ok"] is True
+    assert p2["verified"] == preview_content_hash(content)

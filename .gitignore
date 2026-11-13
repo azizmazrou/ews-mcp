@@ -49,3 +49,6 @@ docker-compose.override.yml
 
 # Claude Code local config — never push
 .claude/
+
+# Pair-engineering scratch (briefs, run logs) — never push
+.gemini-pair/

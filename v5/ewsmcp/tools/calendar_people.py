@@ -23,6 +23,16 @@ from datetime import datetime, time as dtime, timedelta
 from itertools import islice
 from typing import Any, Dict, List, Optional, Tuple
 
+from exchangelib import EWSTimeZone
+from exchangelib.fields import WEEKDAY_NAMES
+from exchangelib.recurrence import (
+    AbsoluteMonthlyPattern,
+    DailyPattern,
+    EndDatePattern,
+    NumberedPattern,
+    WeeklyPattern,
+)
+
 from .. import __version__
 from ..bodyclean import clean_body, html_to_text
 from ..dates import parse_when
@@ -57,6 +67,20 @@ def _ceil_to_grid(dt: datetime, step_minutes: int = GRID_MINUTES) -> datetime:
     floored = dt.replace(minute=(dt.minute // step_minutes) * step_minutes,
                          second=0, microsecond=0)
     return floored if floored >= dt else floored + timedelta(minutes=step_minutes)
+
+
+def _fb_aware(value: Optional[datetime], tz: Any) -> Optional[datetime]:
+    """Free/busy CalendarEvent start/end arrive NAIVE — exchangelib logs
+    "Returning naive datetime ... on field start". EWS renders them in the
+    timezone the request carried but drops the offset. Left naive they are
+    two different bugs downstream: fmt_dt reads them as SYSTEM local time
+    (right only by accident when the host tz equals EWS_TZ, two hours off in
+    a UTC container), and merge_busy_and_find_slots compares them against a
+    tz-aware window, raising "can't compare offset-naive and offset-aware
+    datetimes". Re-attach the timezone we asked for."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=tz)
 
 
 # ------------------------------------------------- slot synthesis (pure)
@@ -145,6 +169,50 @@ def _attendee_entries(item: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _describe_recurrence(rule: Any) -> Dict[str, Any]:
+    """The rule of a series. Patterns create_event cannot write are still reported."""
+    pattern = rule.pattern
+    if isinstance(pattern, DailyPattern):
+        described: Dict[str, Any] = {"frequency": "daily", "interval": pattern.interval}
+    elif isinstance(pattern, WeeklyPattern):
+        described = {
+            "frequency": "weekly", "interval": pattern.interval,
+            "weekdays": [
+                (WEEKDAY_NAMES[day - 1] if isinstance(day, int) else str(day)).lower()
+                for day in pattern.weekdays
+            ],
+        }
+    elif isinstance(pattern, AbsoluteMonthlyPattern):
+        described = {"frequency": "monthly", "interval": pattern.interval,
+                     "day_of_month": pattern.day_of_month}
+    else:
+        described = {"frequency": "other", "pattern": str(pattern)}
+    boundary = rule.boundary
+    described["first_date"] = str(boundary.start)
+    if isinstance(boundary, EndDatePattern):
+        described["until"] = str(boundary.end)
+    elif isinstance(boundary, NumberedPattern):
+        described["count"] = boundary.number
+    return described
+
+
+def _series_rule(item: Any) -> Any:
+    """An occurrence carries no rule, only its master does."""
+    kind = getattr(item, "type", None)
+    if kind == "RecurringMaster":
+        return getattr(item, "recurrence", None)
+    if kind in ("Occurrence", "Exception"):
+        try:
+            master = item.recurring_master()
+            if master is None:
+                return None
+            master.refresh()
+            return getattr(master, "recurrence", None)
+        except Exception:
+            return None
+    return None
+
+
 async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
     tz = ctx.settings.ews_tz
 
@@ -156,9 +224,9 @@ async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
         if item is None:
             raise ToolError("not_found", f"No event found for id {id!r}.",
                             hint="Re-run list_events and use a fresh event id.")
-        return item
+        return item, _series_rule(item)
 
-    item = await ctx.gateway.call(work)
+    item, rule = await ctx.gateway.call(work)
     event = event_card(item, ctx.aliaser, tz)
     event["attendees"] = _attendee_entries(item)
     source = getattr(item, "text_body", None) or ""
@@ -169,9 +237,21 @@ async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
     event["body"] = clean_body(source, max_chars=2000)["text"]
     event["recurring"] = bool(getattr(item, "is_recurring", False)
                               or getattr(item, "recurrence", None))
+    if rule is not None:
+        event["recurrence"] = _describe_recurrence(rule)
+    kind = getattr(item, "type", None)
+    if isinstance(kind, str):
+        event["type"] = kind
     my_response = getattr(item, "my_response_type", None)
     if my_response:
         event["my_response"] = str(my_response)
+    if getattr(item, "reminder_is_set", None) is True:
+        event["reminder_minutes"] = item.reminder_minutes_before_start
+    elif getattr(item, "reminder_is_set", None) is False:
+        event["reminder_minutes"] = None
+    # Only the organizer's copy says whether the invitations went out.
+    if my_response == "Organizer" and event["attendees"]:
+        event["invitations_sent"] = bool(getattr(item, "meeting_request_was_sent", False))
     return {"ok": True, "event": event}
 
 
@@ -185,6 +265,13 @@ async def _check_availability(ctx: Context, attendees: List[str], start: str,
     if int(duration_minutes) <= 0:
         raise ToolError("validation", "'duration_minutes' must be positive.")
     start_dt, end_dt = _window(start, end, tz)
+    # get_free_busy_info serializes the window as an Exchange timezone and
+    # reads tzinfo.ms_id. The shared date grammar hands back stdlib ZoneInfo,
+    # which has no such attribute — so re-anchor on EWSTimeZone here, at the
+    # exchangelib boundary, and leave dates.py free of exchangelib imports.
+    ews_tz = EWSTimeZone(tz)
+    start_dt = start_dt.astimezone(ews_tz)
+    end_dt = end_dt.astimezone(ews_tz)
     requests = [(email, "Required", False) for email in emails]
 
     def work(account: Any) -> List[Any]:
@@ -206,8 +293,8 @@ async def _check_availability(ctx: Context, attendees: List[str], start: str,
         entries: List[Dict[str, Any]] = []
         blocks: List[Tuple[datetime, datetime]] = []
         for ev in getattr(view, "calendar_events", None) or []:
-            ev_start = getattr(ev, "start", None)
-            ev_end = getattr(ev, "end", None)
+            ev_start = _fb_aware(getattr(ev, "start", None), ews_tz)
+            ev_end = _fb_aware(getattr(ev, "end", None), ews_tz)
             if ev_start is None or ev_end is None:
                 continue
             status = str(getattr(ev, "busy_type", None) or "Busy")
@@ -274,7 +361,7 @@ def _contact_person(contact: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
               for e in (getattr(contact, "email_addresses", None) or [])]
     email = next((e for e in emails if e), None)
     if not email:
-        return None  # address-less contacts are useless to the secretary
+        return None  # contacts without an email address cannot be addressed
     raw_key = str(getattr(contact, "id", None) or email)
     person: Dict[str, Any] = {
         "name": getattr(contact, "display_name", None) or email,
@@ -507,7 +594,9 @@ TOOLS: List[ToolSpec] = [
             "Fetch one calendar event in full by id (a short alias like 'e3' "
             "from list_events, or a raw EWS id). Returns organizer, every "
             "attendee with their response (Accept/Decline/Tentative/…), the "
-            "cleaned body text, a recurring flag, and your own response."
+            "cleaned body text, a recurring flag, the rule of a series, the reminder "
+            "(null if none), your own response and, for an event you organize, whether "
+            "invitations were sent."
         ),
         side_effect_class="read",
         input_schema={
@@ -568,7 +657,7 @@ TOOLS: List[ToolSpec] = [
             "type": "object",
             "properties": {
                 "query": {"type": "string",
-                          "description": "Name or email fragment, e.g. 'ahmed'."},
+                          "description": "Name or email fragment, e.g. 'alice@example.com'."},
                 "source": {"type": "string", "enum": ["auto", "gal", "contacts"],
                            "default": "auto",
                            "description": "Where to search; auto = GAL + contacts."},

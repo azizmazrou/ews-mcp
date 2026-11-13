@@ -12,11 +12,16 @@ from . import __version__
 from .errors import HTTP_BY_CODE
 from .server import build_context, build_mcp_server, start_connection_manager
 from .tools.base import dispatch
+from .tools.writes import max_attachment_bytes
 
 logger = logging.getLogger(__name__)
 
 PUBLIC_PATHS = {"/health", "/livez", "/readyz", "/version"}
-MAX_BODY_BYTES = 1_048_576  # 1 MiB — tool arguments, not attachments
+
+
+def max_body_bytes(settings: Any) -> int:
+    """Tool arguments carry attachments as base64 (4/3 of their size)."""
+    return max_attachment_bytes(settings) * 4 // 3 + 1_048_576
 
 
 def _validator_for(spec) -> Any:
@@ -61,9 +66,19 @@ def _metrics_text(ctx) -> str:
         "# TYPE ewsmcp_uptime_seconds gauge",
         f"ewsmcp_uptime_seconds {int(_t.time() - ctx.started_at)}",
     ]
-    state = ctx.manager.state if ctx.manager else "unmanaged"
+    if ctx.manager is None:
+        conn_status = {"state": "unmanaged"}
+    elif callable(getattr(ctx.manager, "status", None)):
+        conn_status = ctx.manager.status()
+    else:
+        conn_status = {"state": ctx.manager.state}
+    state = conn_status.get("state", "unmanaged")
     lines += ["# TYPE ewsmcp_connection_warm gauge",
               f"ewsmcp_connection_warm {1 if state in ('warm', 'unmanaged') else 0}"]
+    lines += ["# TYPE ewsmcp_auth_failed gauge",
+              f"ewsmcp_auth_failed {1 if state == 'auth_failed' else 0}"]
+    lines += ["# TYPE ewsmcp_auth_rejections gauge",
+              f"ewsmcp_auth_rejections {int(conn_status.get('auth_rejections') or 0)}"]
     lines.append("# TYPE ewsmcp_tool_calls_total counter")
     lines.append("# TYPE ewsmcp_errors_total counter")
     for key, value in sorted(ctx.counters.items()):
@@ -112,7 +127,7 @@ def _openapi(ctx) -> Dict[str, Any]:
             "paths": paths}
 
 
-async def _read_json_body(receive, send) -> Optional[Any]:
+async def _read_json_body(receive, send, max_bytes: int) -> Optional[Any]:
     """Drain the request body (bounded) and parse JSON.
 
     Returns the parsed value, or None after having already sent an error
@@ -128,10 +143,10 @@ async def _read_json_body(receive, send) -> Optional[Any]:
         if message["type"] == "http.request":
             body = message.get("body", b"")
             size += len(body)
-            if size > MAX_BODY_BYTES:
+            if size > max_bytes:
                 await _send_json(send, 413, {"ok": False, "error": {
                     "code": "validation",
-                    "message": f"request body exceeds {MAX_BODY_BYTES} bytes"}})
+                    "message": f"request body exceeds {max_bytes} bytes"}})
                 return None
             chunks.append(body)
             if not message.get("more_body"):
@@ -147,6 +162,7 @@ async def _read_json_body(receive, send) -> Optional[Any]:
 def build_app(ctx, settings, streamable: Optional[Any] = None):
     """ASGI app closure — separated from serve_http so tests can drive it."""
     api_key = settings.mcp_api_key or ""
+    body_limit = max_body_bytes(settings)
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -170,11 +186,26 @@ def build_app(ctx, settings, streamable: Optional[Any] = None):
             return await _send_json(send, 200, {"version": __version__})
         if path == "/readyz" and method == "GET":
             conn = ctx.manager.status() if ctx.manager else {"state": "unmanaged"}
-            warm = conn.get("state") in ("warm", "unmanaged")
+            cstate = conn.get("state")
+            warm = cstate in ("warm", "unmanaged")
+            ready_status = (
+                "ok"
+                if warm
+                else ("auth_failed" if cstate == "auth_failed" else "unavailable")
+            )
             return await _send_json(send, 200 if warm else 503, {
-                "status": "ok" if warm else "unavailable",
+                "status": ready_status,
                 "connection": conn, "tools": len(ctx.registry),
             })
+
+        # OAuth discovery/registration — we implement neither. Returning 401
+        # here (as the api_key gate below would do) tells a spec-compliant
+        # MCP client "OAuth required, but no metadata available". 404 is the
+        # standard "not supported" signal so clients fall back to their
+        # configured headers.
+        if "/.well-known/" in path or path == "/register":
+            return await _send_json(send, 404, {"ok": False, "error": {
+                "code": "validation", "message": "not found"}})
 
         if api_key and not _authorized(scope.get("headers"), api_key):
             return await _send_json(send, 401, {"ok": False, "error": {
@@ -207,7 +238,7 @@ def build_app(ctx, settings, streamable: Optional[Any] = None):
             if spec is None:
                 return await _send_json(send, 404, {"ok": False, "error": {
                     "code": "validation", "message": f"Unknown tool: {name}"}})
-            arguments = await _read_json_body(receive, send)
+            arguments = await _read_json_body(receive, send, body_limit)
             if arguments is None:
                 return
             if not isinstance(arguments, dict):
@@ -237,8 +268,10 @@ async def serve_http(settings) -> None:
 
     ctx = build_context(settings)
     mcp_server = build_mcp_server(ctx)
+    body_limit = max_body_bytes(settings)
     streamable = StreamableHTTPSessionManager(app=mcp_server, json_response=False,
-                                              stateless=True)
+                                              stateless=True,
+                                              max_request_body_size=body_limit)
     app = build_app(ctx, settings, streamable)
     config = uvicorn.Config(app, host=settings.mcp_host, port=settings.mcp_port,
                             log_level=settings.log_level.lower(), http="h11")

@@ -1,14 +1,13 @@
 """Per-mailbox SQLite mirror — the "fetch email very fast" core.
 
-Design rules (hard requirements, lessons from a real SQLite corruption in
-a sibling project):
+Design rules (invariants for concurrent SQLite access):
 
 - SINGLE WRITER. Only this store's writer connection (used by the sync
   engine and the write-through path, serialized by one lock) ever writes.
   Tool reads open short-lived ``mode=ro`` connections — under WAL they
   never block the writer and can't corrupt anything.
 - Cleaned bodies are stored ONCE at sync time (``bodyclean`` output), so
-  the measured 115 kB raw-HTML email costs its ~150 chars exactly once.
+  plain text is extracted once rather than on every read.
 - Arabic-correct FTS: ``messages_fts`` indexes a NORMALIZED shadow text
   (``normalize.normalize_ar`` over subject + sender + body), queries are
   normalized with the same function, and the tokenizer adds
@@ -35,7 +34,9 @@ from ..normalize import fts_match_expression, normalize_ar
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+# Recorded in meta.schema so an operator inspecting a mirror can tell which
+# shape it holds; the migration itself is the additive check in _ensure_schema.
+_SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -107,13 +108,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     status      TEXT
 );
 CREATE TABLE IF NOT EXISTS folders (
-    ews_id   TEXT PRIMARY KEY,
-    name     TEXT,
-    path     TEXT,
-    wk       TEXT,
-    total    INTEGER,
-    unread   INTEGER,
-    children INTEGER
+    ews_id       TEXT PRIMARY KEY,
+    name         TEXT,
+    path         TEXT,
+    wk           TEXT,
+    folder_class TEXT,
+    total        INTEGER,
+    unread       INTEGER,
+    children     INTEGER
 );
 CREATE TABLE IF NOT EXISTS sync_state (
     key   TEXT PRIMARY KEY,
@@ -216,6 +218,12 @@ class CacheStore:
         with self._lock:
             conn = self._writer_conn()
             conn.executescript(_SCHEMA)
+            # CREATE TABLE IF NOT EXISTS is a no-op on an already-deployed
+            # mirror, so schema 1 databases need the new column added by hand
+            # — the read path selects it unconditionally.
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(folders)")}
+            if "folder_class" not in cols:
+                conn.execute("ALTER TABLE folders ADD COLUMN folder_class TEXT")
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', ?)",
                 (str(_SCHEMA_VERSION),),
@@ -242,8 +250,8 @@ class CacheStore:
 
         Also LEARNS per-sender signatures: the trailing block of each body
         is hashed per sender; once the same block recurs SIG_MIN_HITS times
-        the read paths strip it (closes the measured gap where a corporate
-        signature survived clean_body)."""
+        the read paths strip it (strips recurring footers that do not start
+        with a standard closer)."""
         if not rows:
             return 0
         with self._write() as conn:
@@ -363,11 +371,11 @@ class CacheStore:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO folders (ews_id, name, path, wk,
-                        total, unread, children)
-                    VALUES (:ews_id, :name, :path, :wk, :total, :unread,
-                        :children)
+                        folder_class, total, unread, children)
+                    VALUES (:ews_id, :name, :path, :wk, :folder_class, :total,
+                        :unread, :children)
                     """,
-                    r,
+                    {"folder_class": None, **r},  # optional: Exchange may omit it
                 )
 
     def get_sync_state(self, key: str) -> Optional[str]:
@@ -441,6 +449,7 @@ class CacheStore:
         until_ts: Optional[int] = None,
         is_unread: Optional[bool] = None,
         has_attachments: Optional[bool] = None,
+        categories: Optional[List[str]] = None,
         offset: int = 0,
         limit: int = 20,
     ) -> Tuple[List[sqlite3.Row], int]:
@@ -478,6 +487,17 @@ class CacheStore:
         if has_attachments is not None:
             where.append("m.has_attachments = ?")
             params.append(1 if has_attachments else 0)
+        if categories:
+            # AND semantics (message must carry ALL listed categories), to
+            # match exchangelib's categories__contains behavior on the live
+            # path (mail_read.py) - one EXISTS(json_each(...)) per category,
+            # each requiring an exact (case-sensitive) match against the
+            # JSON array stored in categories_json (see apply_categories()).
+            for cat in categories:
+                where.append(
+                    "EXISTS (SELECT 1 FROM json_each(m.categories_json) "
+                    "WHERE value = ?)")
+                params.append(cat)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         base = f"FROM messages m {joins}{clause}"
         with self._read() as conn:

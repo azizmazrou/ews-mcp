@@ -12,6 +12,9 @@ from ewsmcp.ids import reset_aliaser_cache  # noqa: E402
 from ewsmcp.tools.base import reset_send_rate_window  # noqa: E402
 from ewsmcp.tools.writes import reset_idempotency_store  # noqa: E402
 
+# Fixed UTC+3 IANA zone without daylight saving (Etc/GMT-3 means +03:00).
+FIXED_OFFSET_TZ = "Etc/GMT-3"
+
 
 @pytest.fixture(autouse=True)
 def _isolate_stores(tmp_path, monkeypatch):

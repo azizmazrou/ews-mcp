@@ -10,8 +10,9 @@ import json
 
 from conftest import make_settings
 
+from ewsmcp import http as http_mod
 from ewsmcp.audit import AuditLog
-from ewsmcp.http import MAX_BODY_BYTES, build_app
+from ewsmcp.http import build_app, max_body_bytes
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools.base import Context, ToolSpec
 
@@ -99,11 +100,58 @@ def test_unknown_tool_404(tmp_path):
 
 
 def test_oversize_body_is_capped(tmp_path):
-    app = build_app(_ctx(tmp_path), make_settings())
-    huge = b'{"q": "' + b"x" * MAX_BODY_BYTES + b'"}'
+    settings = make_settings(ews_max_attachment_mb=1)
+    limit = max_body_bytes(settings)
+    app = build_app(_ctx(tmp_path), settings)
+    huge = b'{"q": "' + b"x" * limit + b'"}'
     status, body = _status_and_body(_post(app, "echo", huge))
     assert status == 413
     assert body["error"]["code"] == "validation"
+
+
+def test_http_body_limit_follows_ews_max_attachment_mb(tmp_path):
+    small_settings = make_settings(ews_max_attachment_mb=1)
+    large_settings = make_settings(ews_max_attachment_mb=5)
+    small_limit = max_body_bytes(small_settings)
+    large_limit = max_body_bytes(large_settings)
+    assert small_limit < large_limit
+
+    payload = b'{"q": "' + b"a" * (small_limit + 64) + b'"}'
+    small_app = build_app(_ctx(tmp_path / "s"), small_settings)
+    large_app = build_app(_ctx(tmp_path / "l"), large_settings)
+    assert _status_and_body(_post(small_app, "echo", payload))[0] == 413
+    assert _status_and_body(_post(large_app, "echo", payload))[0] == 200
+
+
+def test_serve_http_passes_derived_body_limit_to_session_manager(tmp_path, monkeypatch):
+    import uvicorn
+
+    settings = make_settings(ews_max_attachment_mb=3)
+    captured = {}
+
+    class _DummySessionManager:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            class _CM:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *args):
+                    return False
+
+            return _CM()
+
+    async def _no_serve(self):
+        return None
+
+    monkeypatch.setattr(http_mod, "build_context", lambda _s: _ctx(tmp_path))
+    monkeypatch.setattr(http_mod, "build_mcp_server", lambda _c: object())
+    monkeypatch.setattr(http_mod, "StreamableHTTPSessionManager", _DummySessionManager)
+    monkeypatch.setattr(uvicorn.Server, "serve", _no_serve)
+    asyncio.run(http_mod.serve_http(settings))
+    assert captured["max_request_body_size"] == max_body_bytes(settings)
 
 
 def test_disconnect_mid_body_does_not_hang_or_crash(tmp_path):
@@ -113,6 +161,25 @@ def test_disconnect_mid_body_does_not_hang_or_crash(tmp_path):
         {"type": "http.disconnect"},
     ])
     assert sent == []  # no response to a vanished client — and no hang
+
+
+def test_oauth_discovery_paths_404_even_behind_api_key(tmp_path):
+    """We implement no OAuth at all — these MUST be 404, never 401.
+
+    A 401 here reads to a spec-compliant MCP client as "OAuth required,
+    no metadata available" instead of falling back to configured headers.
+    """
+    app = build_app(_ctx(tmp_path), make_settings(mcp_api_key="secret"))
+    for path in (
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server",
+        "/mcp/.well-known/openid-configuration",
+        "/register",
+    ):
+        status, _ = _status_and_body(_drive(app, path, [
+            {"type": "http.request", "body": b"", "more_body": False}], method="GET"))
+        assert status == 404, path
 
 
 def test_confirm_token_accepted_by_public_schema(tmp_path):

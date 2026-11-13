@@ -20,15 +20,28 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+from exchangelib.errors import UnauthorizedError
 
 from ..bodyclean import clean_body
 from ..dates import parse_when
-from ..dto import envelope, event_card, fmt_dt, msg_card, msg_full
-from ..errors import ToolError
+from ..dto import (
+    envelope,
+    event_card,
+    fmt_dt,
+    is_pkcs7_candidate,
+    msg_card,
+    msg_full,
+    sniff_smime_type,
+)
+from ..errors import ToolError, map_exception
+from ..flag_property import ensure_registered as ensure_flag_status_registered
 from ..gateway.client import WELL_KNOWN, paginate
 from .base import Context, ToolSpec
+
+ensure_flag_status_registered()
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +63,10 @@ def _stamp(result: Dict[str, Any], source: str,
 
 def _cache_folder_key(ctx: Context, folder_ref: Optional[str]) -> Optional[str]:
     """Map a folder argument onto a mirrored folder key, or None (→ live)."""
-    key = (folder_ref or "f:inbox").strip().lower()
-    if key.startswith("f:"):
-        key = key[2:]
+    raw = (folder_ref or "f:inbox").strip().lower()
+    if raw == ALL_FOLDERS:
+        return None
+    key = raw[2:] if raw.startswith("f:") else raw
     cached = {k.strip().lower()
               for k in (ctx.settings.ews_cache_folders or "").split(",")}
     return key if key in cached else None
@@ -135,8 +149,13 @@ _PROJECTION = (
     "message_id", "importance", "attachments",
 )
 
+# Slim FindItem-only projection for check_messages (avoids per-item GetItem
+# for text_body / attachments when only four summary fields are returned).
+_CHECK_PROJECTION = ("id", "subject", "sender", "datetime_received")
+
 _TEXT_EXTS = (".txt", ".csv", ".md", ".log", ".json")
 _TEXT_CAP = 20_000
+_SMIME_SNIFF_MAX_BYTES = 5 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------
@@ -144,7 +163,11 @@ _TEXT_CAP = 20_000
 # --------------------------------------------------------------------------
 
 
-def _project(qs: Any, order: Optional[str] = "-datetime_received") -> Any:
+def _project(
+    qs: Any,
+    order: Optional[str] = "-datetime_received",
+    fields: Tuple[str, ...] = _PROJECTION,
+) -> Any:
     """Best-effort .order_by()/.only() — some folder types reject them."""
     if order:
         try:
@@ -152,7 +175,7 @@ def _project(qs: Any, order: Optional[str] = "-datetime_received") -> Any:
         except Exception:
             pass
     try:
-        qs = qs.only(*_PROJECTION)
+        qs = qs.only(*fields)
     except Exception:
         pass
     return qs
@@ -228,6 +251,15 @@ def _is_texty(name: str, content_type: Optional[str]) -> bool:
             or (name or "").lower().endswith(_TEXT_EXTS))
 
 
+def _read_attachment_bytes(att: Any) -> Optional[bytes]:
+    """Single site that touches ``att.content`` (triggers GetAttachment).
+
+    Must only run inside a gateway worker function when bytes are needed.
+    """
+    raw = getattr(att, "content", None)
+    return bytes(raw) if isinstance(raw, (bytes, bytearray)) else None
+
+
 # --------------------------------------------------------------------------
 # 1. list_folders
 # --------------------------------------------------------------------------
@@ -260,6 +292,8 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
                 }
                 if r["wk"]:
                     row["wk"] = r["wk"]
+                if r["folder_class"]:
+                    row["folder_class"] = r["folder_class"]
                 rows.append(row)
             as_of = ctx.cache.watermark("events")  # slow-lane watermark
             return _stamp(envelope(rows, total_available=len(rows), offset=0),
@@ -274,6 +308,8 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
                 fid = getattr(getattr(account, attr, None), "id", None)
                 if fid:
                     wk_by_raw_id.setdefault(fid, wk_alias)
+            except UnauthorizedError:
+                raise  # never ask again after a rejection
             except Exception:
                 continue
         rows: List[Dict[str, Any]] = []
@@ -299,6 +335,10 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
                     wk = wk_by_raw_id.get(raw_id)
                     if wk:
                         row["wk"] = wk
+                    # getattr — not every folder object carries a FolderClass
+                    folder_class = getattr(child, "folder_class", None)
+                    if folder_class:
+                        row["folder_class"] = folder_class
                     rows.append(row)
                 walk(child, level + 1, path)
 
@@ -345,12 +385,282 @@ async def _search_semantic(ctx: Context, query: str, folder_key: str,
     return _stamp(out, "cache", _cache_watermark(ctx, folder_key))
 
 
+ALL_FOLDERS = "f:all"
+MAX_FANOUT_FOLDERS = 200
+MAX_FANOUT_WINDOW = 500
+
+
+def _sender_matches_substring(item: Any, needle: str) -> bool:
+    sd = getattr(item, "sender", None)
+    email = (getattr(sd, "email_address", "") or "").lower()
+    name = (getattr(sd, "name", "") or "").lower()
+    return needle in email or needle in name
+
+
+def _build_queryset(
+    target: Any,
+    *,
+    query: Optional[str] = None,
+    subject: Optional[str] = None,
+    categories: Optional[List[str]] = None,
+    since_dt: Optional[datetime] = None,
+    until_dt: Optional[datetime] = None,
+    is_unread: Optional[bool] = None,
+    has_attachments: Optional[bool] = None,
+    flag_complete: Optional[bool] = None,
+) -> Any:
+    """Build the unprojected EWS QuerySet for one folder.
+
+    Shared by the single-folder and multi-folder paths so every restriction
+    and exclusion applies identically across scopes.
+    """
+    if query:
+        return target.filter(query)
+    filters: Dict[str, Any] = {}
+    if subject:
+        filters["subject__icontains"] = subject
+    if categories:
+        filters["categories__contains"] = categories
+    if since_dt is not None:
+        filters["datetime_received__gte"] = since_dt
+    if until_dt is not None:
+        filters["datetime_received__lte"] = until_dt
+    if is_unread is not None:
+        filters["is_read"] = not is_unread
+    if has_attachments is not None:
+        filters["has_attachments"] = bool(has_attachments)
+    if flag_complete is True:
+        filters["flag_status"] = 1
+    qs = target.filter(**filters)
+    if flag_complete is False:
+        # Incomplete covers both unflagged (None) and open-flagged (2);
+        # excluding Complete (1) captures both.
+        qs = qs.exclude(flag_status=1)
+    return qs
+
+
+def _folder_parts(folder: Any) -> List[Any]:
+    raw_parts = getattr(folder, "parts", None)
+    if raw_parts is None:
+        return []
+    try:
+        return list(raw_parts)
+    except TypeError:
+        return []
+
+
+def _folder_map_entries(gateway: Any, account: Any) -> List[Tuple[str, Any]]:
+    """Build ``(path, folder)`` entries for every mail folder in the gateway's
+    folder map — including trees omitted from ``f:all`` (trash, drafts, junk,
+    outbox) so ``recursive=True`` rooted there still walks its subtree.
+    """
+    folder_map_fn = getattr(gateway, "_folder_map", None)
+    if not callable(folder_map_fn):
+        return []
+    fmap = folder_map_fn(account)
+    if not isinstance(fmap, dict) or not fmap:
+        return []
+    path_by_obj: Dict[int, str] = {}
+    for key, folder in fmap.items():
+        if key != getattr(folder, "id", None) and isinstance(key, str):
+            path_by_obj.setdefault(id(folder), key)
+    out: List[Tuple[str, Any]] = []
+    seen: set = set()
+    for folder in fmap.values():
+        fid = getattr(folder, "id", None)
+        dedup_key = ("id", fid) if fid is not None else ("obj", id(folder))
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        fclass = getattr(folder, "folder_class", None)
+        if isinstance(fclass, str) and fclass and not fclass.startswith("IPF.Note"):
+            continue
+        parts = _folder_parts(folder)
+        if parts:
+            path = (
+                "/".join(str(getattr(p, "name", "") or "") for p in parts[2:])
+                or str(getattr(folder, "name", "") or "")
+            )
+        else:
+            path = path_by_obj.get(id(folder)) or str(getattr(folder, "name", "") or "")
+        out.append((path, folder))
+    return out
+
+
+def _find_subtree_in_entries(
+    target: Any,
+    root_ref: str,
+    entries: List[Tuple[str, Any]],
+) -> Optional[List[Tuple[str, Any]]]:
+    target_id = getattr(target, "id", None)
+    root_path: Optional[str] = None
+    for path, folder in entries:
+        if folder is target or (
+            target_id is not None and getattr(folder, "id", None) == target_id
+        ):
+            root_path = path
+            break
+    if root_path is None and target_id is None:
+        ref_key = root_ref.strip().strip("/").lower()
+        wk_key = WELL_KNOWN.get(ref_key) or WELL_KNOWN.get(f"f:{ref_key}") or ref_key
+        candidates = [wk_key]
+        target_name = getattr(target, "name", None)
+        if isinstance(target_name, str) and target_name.strip():
+            norm_name = target_name.strip().strip("/").lower()
+            if norm_name not in candidates:
+                candidates.append(norm_name)
+        for cand in candidates:
+            for path, _folder in entries:
+                if path.rstrip("/").lower() == cand:
+                    root_path = path
+                    break
+            if root_path is not None:
+                break
+    if root_path is None:
+        return None
+    prefix = root_path.rstrip("/").lower()
+    selected: List[Tuple[str, Any]] = []
+    for path, folder in entries:
+        parts = _folder_parts(folder)
+        if target_id is not None and parts and any(
+            getattr(p, "id", None) is not None for p in parts
+        ):
+            if (folder is target
+                    or getattr(folder, "id", None) == target_id
+                    or any(getattr(p, "id", None) == target_id for p in parts)):
+                selected.append((path, folder))
+            continue
+        norm = path.rstrip("/").lower()
+        if norm == prefix or norm.startswith(prefix + "/"):
+            selected.append((path, folder))
+    return selected
+
+
+def _select_subtree(
+    target: Any,
+    root_ref: str,
+    all_folders: List[Tuple[str, Any]],
+    fallback_folders: Optional[List[Tuple[str, Any]]] = None,
+) -> List[Tuple[str, Any]]:
+    """Return ``(path, folder)`` entries at or under ``target``."""
+    found = _find_subtree_in_entries(target, root_ref, all_folders)
+    if found is not None:
+        return found
+    if fallback_folders:
+        found = _find_subtree_in_entries(target, root_ref, fallback_folders)
+        if found is not None:
+            return found
+    fallback = getattr(target, "name", None) or root_ref.strip()
+    return [(str(fallback), target)]
+
+
+async def _search_all_folders(
+    ctx: Context,
+    build_qs: Callable[[Any], Any],
+    offset: int,
+    limit: int,
+    root_folder: Optional[str] = None,
+    sender_needle: Optional[str] = None,
+) -> Dict[str, Any]:
+    """One search per mail folder in scope, merged newest first.
+
+    A single FindItem over several folders is no substitute: hits come back
+    folder by folder, unsorted across them, and the offset is applied to each
+    folder rather than the merged list. Each folder therefore delivers its
+    newest offset+limit hits before merging.
+    """
+    def list_scope(account: Any) -> List[Tuple[str, Any]]:
+        target = (
+            ctx.gateway.resolve_folder(account, root_folder, ctx.aliaser)
+            if root_folder is not None else None
+        )
+        all_folders = ctx.gateway.mail_folders(account)
+        if target is None or root_folder is None:
+            if not all_folders:
+                raise ToolError("upstream_unavailable", "the folder list is not available.")
+            return all_folders
+        found = _find_subtree_in_entries(target, root_folder, all_folders)
+        if found is not None:
+            return found
+        map_folders = _folder_map_entries(ctx.gateway, account)
+        if not all_folders and not map_folders:
+            raise ToolError("upstream_unavailable", "the folder list is not available.")
+        return _select_subtree(
+            target, root_folder, all_folders, fallback_folders=map_folders,
+        )
+
+    all_in_scope = await ctx.gateway.call(list_scope)
+    folders = all_in_scope[:MAX_FANOUT_FOLDERS]
+    skipped = len(all_in_scope) - len(folders)
+    wanted = offset + limit
+
+    async def one(target: Any) -> Tuple[List[Any], Optional[int]]:
+        def work(_account: Any) -> Tuple[List[Any], Optional[int]]:
+            return paginate(_project(build_qs(target)), offset=0, limit=wanted)
+        return await ctx.gateway.call(work)
+
+    results = await asyncio.gather(*(one(f) for _, f in folders),
+                                   return_exceptions=True)
+    for r in results:
+        if isinstance(r, asyncio.CancelledError) or (
+            isinstance(r, BaseException) and not isinstance(r, Exception)
+        ):
+            raise r
+        if isinstance(r, Exception):
+            mapped = map_exception(r)
+            if (mapped.code == "throttled"
+                    or "throttl" in f"{type(r).__name__} {r}".lower()):
+                if mapped.code == "throttled":
+                    raise r
+                raise ToolError(
+                    "throttled",
+                    f"{type(r).__name__}: {r}",
+                    hint="Exchange asked us to slow down. Retry after the delay.",
+                    retry_after_s=60,
+                )
+    errors = [r for r in results if isinstance(r, Exception)]
+    if len(errors) == len(folders):
+        raise errors[0]
+    hits: List[Tuple[str, Any]] = []
+    failed: List[str] = []
+    truncated = False
+    for (path, _), result in zip(folders, results):
+        if isinstance(result, Exception):
+            logger.warning("search failed in a folder: %s", type(result).__name__)
+            failed.append(path)
+            continue
+        page, more = result
+        truncated = truncated or more is not None
+        hits.extend((path, item) for item in page)
+    hits.sort(key=lambda hit: getattr(hit[1], "datetime_received", None)
+              or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    next_offset = wanted if truncated or len(hits) > wanted else None
+    page_hits = hits[offset:wanted]
+    if sender_needle:
+        page_hits = [
+            h for h in page_hits
+            if _sender_matches_substring(h[1], sender_needle)
+        ]
+    return {
+        "hits": page_hits,
+        "total": (None if (truncated or failed or skipped or sender_needle)
+                  else len(hits)),
+        "next_offset": next_offset,
+        "searched": len(folders) - len(failed),
+        "failed": failed,
+        "skipped": skipped,
+    }
+
+
 async def _search_messages(ctx: Context, query: Optional[str] = None,
                            folder: str = "f:inbox", sender: Optional[str] = None,
                            from_: Optional[str] = None,
                            subject: Optional[str] = None, since: Optional[str] = None,
                            until: Optional[str] = None, is_unread: Optional[bool] = None,
                            has_attachments: Optional[bool] = None,
+                           categories: Optional[List[str]] = None,
+                           recursive: bool = False,
+                           flag_complete: Optional[bool] = None,
                            offset: int = 0, limit: int = 20,
                            mode: str = "keyword",
                            fresh: bool = False) -> Dict[str, Any]:
@@ -378,35 +688,51 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                         "pass `sender` only — `from_` is its deprecated alias.")
     sender = sender or from_
     structured_given = any(
-        v is not None for v in (sender, subject, since, until, is_unread, has_attachments)
+        v is not None for v in
+        (sender, subject, since, until, is_unread, has_attachments, categories,
+         flag_complete)
     )
     if query and structured_given:
         raise ToolError(
             "validation",
             "`query` (AQS) cannot be combined with the structured filters "
-            "(sender/subject/since/until/is_unread/has_attachments) — Exchange "
-            "runs them on different engines.",
+            "(sender/subject/since/until/is_unread/has_attachments/categories/"
+            "flag_complete) — "
+            "Exchange runs them on different engines.",
             hint="Either fold everything into the AQS string "
-                 "(e.g. 'from:ahmed subject:rfp received>=2026-06-01') or drop "
+                 "(e.g. 'from:alice@example.com subject:rfp received>=2026-06-01') or drop "
                  "`query` and use only structured filters.",
         )
     tz = ctx.settings.ews_tz
+    whole_mailbox = (folder or "").strip().lower() == ALL_FOLDERS
+    fan_out = whole_mailbox or bool(recursive)
+    if fan_out and offset + limit > MAX_FANOUT_WINDOW:
+        raise ToolError(
+            "validation",
+            f"offset + limit ({offset + limit}) may not exceed "
+            f"{MAX_FANOUT_WINDOW} on a multi-folder search.",
+            hint="Narrow the search with `since`/`until` or `subject`, "
+                 "or search one folder.",
+        )
+    since_dt = parse_when(since, "since", tz) if since else None
+    until_dt = parse_when(until, "until", tz) if until else None
 
     # ---- cache-first: local FTS + SQL filters, exact COUNT(*) total -------
+    # Multi-folder fan-out (`f:all`, `recursive`) and `flag_complete` (not
+    # stored in the mirror schema) always run live.
     folder_key = _cache_folder_key(ctx, folder)
-    if not fresh and folder_key:
+    if not fresh and not fan_out and flag_complete is None and folder_key:
         as_of = _cache_watermark(ctx, folder_key)
         if as_of:
             try:
-                since_ts = (int(parse_when(since, "since", tz).timestamp())
-                            if since else None)
-                until_ts = (int(parse_when(until, "until", tz).timestamp())
-                            if until else None)
                 rows, total = await asyncio.to_thread(
                     ctx.cache.search_messages,
                     folders=[folder_key], text=query, sender=sender,
-                    subject=subject, since_ts=since_ts, until_ts=until_ts,
+                    subject=subject,
+                    since_ts=int(since_dt.timestamp()) if since_dt else None,
+                    until_ts=int(until_dt.timestamp()) if until_dt else None,
                     is_unread=is_unread, has_attachments=has_attachments,
+                    categories=categories,
                     offset=offset, limit=limit,
                 )
                 cards = await asyncio.to_thread(
@@ -419,19 +745,25 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                 logger.warning("cache search failed (%s) — falling back live", exc)
 
     # ---- live path ---------------------------------------------------------
-    filters: Dict[str, Any] = {}
-    if subject:
-        filters["subject__icontains"] = subject
-    if since:
-        filters["datetime_received__gte"] = parse_when(since, "since", tz)
-    if until:
-        filters["datetime_received__lte"] = parse_when(until, "until", tz)
-    if is_unread is not None:
-        filters["is_read"] = not is_unread
-    if has_attachments is not None:
-        filters["has_attachments"] = bool(has_attachments)
+    unfiltered = (
+        not query and not sender and not subject and not categories
+        and since_dt is None and until_dt is None
+        and is_unread is None and has_attachments is None
+        and flag_complete is None
+    )
 
-    unfiltered = not query and not filters and not sender
+    def build_qs(target: Any) -> Any:
+        return _build_queryset(
+            target,
+            query=query,
+            subject=subject,
+            categories=categories,
+            since_dt=since_dt,
+            until_dt=until_dt,
+            is_unread=is_unread,
+            has_attachments=has_attachments,
+            flag_complete=flag_complete,
+        )
 
     def work(account: Any) -> Tuple[List[Any], Optional[int], Optional[int]]:
         target = ctx.gateway.resolve_folder(account, folder, ctx.aliaser)
@@ -444,25 +776,382 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                 total = getattr(target, "total_count", None)
             except Exception:
                 total = None
-        qs = target.filter(query) if query else target.filter(**filters)
-        page, next_off = paginate(_project(qs), offset=offset, limit=limit)
+        qs = build_qs(target)
+        if (total is None and not sender
+                and (categories or flag_complete is True) and not query):
+            # Matching sets for categories and completed flags are small by
+            # construction; flag_complete=False spans most of the folder, so
+            # its total stays None and next_offset indicates more pages.
+            try:
+                total = qs.count()
+            except Exception:
+                total = None
+        qs = _project(qs)
+        page, next_off = paginate(qs, offset=offset, limit=limit)
         return page, next_off, total
 
-    items, next_offset, total = await ctx.gateway.call(work)
-    if sender:
-        needle = sender.strip().lower()
-
-        def hit(it: Any) -> bool:
-            sd = getattr(it, "sender", None)
-            email = (getattr(sd, "email_address", "") or "").lower()
-            name = (getattr(sd, "name", "") or "").lower()
-            return needle in email or needle in name
-
-        items = [it for it in items if hit(it)]
-        total = None  # client-side post-filter: the upstream total no longer applies
+    sender_needle = sender.strip().lower() if sender else None
+    found: Dict[str, Any] = {}
+    if fan_out:
+        root_ref = None if whole_mailbox else folder
+        found = await _search_all_folders(
+            ctx, build_qs, offset=offset, limit=limit,
+            root_folder=root_ref, sender_needle=sender_needle,
+        )
+        paired = list(found["hits"])
+        next_offset, total = found["next_offset"], found["total"]
+    else:
+        single_items, next_offset, total = await ctx.gateway.call(work)
+        paired = [("", it) for it in single_items]
+        if sender_needle:
+            paired = [(path, it) for path, it in paired
+                      if _sender_matches_substring(it, sender_needle)]
+            total = None  # client-side post-filter: upstream total no longer applies
+    items = [it for _, it in paired]
     cards = await _cards_off_loop(ctx, items, tz)
-    return _stamp(envelope(cards, total_available=total, offset=offset,
-                           next_offset=next_offset), "live")
+    if fan_out:
+        for (path, _), card in zip(paired, cards):
+            card["folder"] = path
+    out = envelope(cards, total_available=total, offset=offset,
+                   next_offset=next_offset)
+    if fan_out:
+        out["folders_searched"] = found["searched"]
+        if found["failed"]:
+            out["folders_failed"] = found["failed"]
+        if found["skipped"]:
+            out["folders_skipped"] = found["skipped"]
+    return _stamp(out, "live")
+
+
+# --------------------------------------------------------------------------
+# 2b. check_messages: a whole list in one call
+# --------------------------------------------------------------------------
+
+CHECK_MAX_VALUES = 200
+CHECK_MAX_HITS = 5
+
+
+def _parse_values(raw: Any) -> List[str]:
+    """String array, JSON array string, or values separated by commas,
+    semicolons or new lines; empty entries and duplicates are dropped, order kept."""
+    if isinstance(raw, list):
+        if not all(isinstance(item, str) for item in raw):
+            raise ToolError("validation", "`values` array items must be strings.")
+        items = list(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        items = []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                items = [str(item) for item in parsed] if isinstance(parsed, list) else []
+            except ValueError:
+                items = []
+        if not items:
+            items = re.split(r"[,;\n]+", text)
+    elif raw is None:
+        items = []
+    else:
+        raise ToolError("validation", "`values` must be a string or an array of strings.")
+    seen: set = set()
+    out: List[str] = []
+    for item in (i.strip() for i in items):
+        if item and item.lower() not in seen:
+            seen.add(item.lower())
+            out.append(item)
+    return out
+
+
+def _word_match(term: str, text: str) -> bool:
+    """Whole word: "RFP-12" does not match inside "RFP-123"."""
+    return re.search(r"(?i)(^|[^\w])" + re.escape(term) + r"($|[^\w])", text or "") is not None
+
+
+def _aqs_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _aqs_sender_query(
+    term: str,
+    since_dt: Optional[datetime],
+    until_dt: Optional[datetime],
+    tz: str,
+) -> str:
+    parts = [f'from:"{_aqs_escape(term)}"']
+    if since_dt is not None:
+        parts.append(
+            f"received>={since_dt.astimezone(ZoneInfo(tz)).date().isoformat()}"
+        )
+    if until_dt is not None:
+        parts.append(
+            f"received<={until_dt.astimezone(ZoneInfo(tz)).date().isoformat()}"
+        )
+    return " ".join(parts)
+
+
+def _split_from(from_field: str) -> Tuple[str, str]:
+    text = (from_field or "").strip()
+    if "<" in text and text.endswith(">"):
+        name, _, addr = text.rpartition("<")
+        return name.strip(), addr[:-1].strip()
+    if "@" in text:
+        return "", text
+    return text, ""
+
+
+def _sender_match(term: str, from_field: str) -> bool:
+    """Confirm a sender card: whole-word on display name; exact/domain/word on address."""
+    needle = (term or "").strip()
+    if not needle:
+        return False
+    name, email = _split_from(from_field)
+    if name and _word_match(needle, name):
+        return True
+    if not email:
+        return False
+    low_email = email.lower()
+    low_needle = needle.lower()
+    if low_needle.startswith("@"):
+        return low_email.endswith(low_needle)
+    if "@" in low_needle:
+        return low_email == low_needle
+    return _word_match(needle, email)
+
+
+def _card_in_window(
+    card: Dict[str, Any],
+    since_dt: Optional[datetime],
+    until_dt: Optional[datetime],
+) -> bool:
+    if since_dt is None and until_dt is None:
+        return True
+    raw = card.get("date")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return True
+    if since_dt is not None and dt < since_dt:
+        return False
+    if until_dt is not None and dt > until_dt:
+        return False
+    return True
+
+
+def _row_from(row: Any) -> str:
+    name = row["sender_name"]
+    email = row["sender_email"] or ""
+    return f"{name} <{email}>" if name and name != email else email
+
+
+async def _check_messages(ctx: Context, values: Any, field: str = "subject",
+                          folder: str = "f:inbox", since: Optional[str] = None,
+                          until: Optional[str] = None,
+                          only_missing: bool = False,
+                          fresh: bool = False,
+                          recursive: bool = False) -> Dict[str, Any]:
+    norm_folder = (folder or "f:inbox").strip() or "f:inbox"
+    if (norm_folder.lower() == ALL_FOLDERS
+            or bool(recursive)
+            or norm_folder.endswith("/*")):
+        raise ToolError(
+            "validation",
+            "`check_messages` requires a single folder (`f:all` and recursive "
+            "scopes are not supported).",
+            hint="Pass a single folder such as `f:inbox` or `f:sent`.",
+        )
+    terms = _parse_values(values)
+    if not terms:
+        raise ToolError("validation", "`values` is empty.")
+    if len(terms) > CHECK_MAX_VALUES:
+        raise ToolError("validation",
+                        f"at most {CHECK_MAX_VALUES} values per call, got {len(terms)}.")
+    if field not in ("subject", "sender"):
+        raise ToolError("validation", "`field` must be 'subject' or 'sender'.")
+
+    tz = ctx.settings.ews_tz if ctx is not None else "UTC"
+    since_dt = parse_when(since, "since", tz) if since else None
+    until_dt = parse_when(until, "until", tz) if until else None
+    folder_key = _cache_folder_key(ctx, norm_folder) if ctx is not None else None
+    mirror_as_of = (
+        _cache_watermark(ctx, folder_key)
+        if (ctx is not None and not fresh and folder_key)
+        else None
+    )
+    since_ts = int(since_dt.timestamp()) if since_dt is not None else None
+    until_ts = int(until_dt.timestamp()) if until_dt is not None else None
+
+    gate = asyncio.Semaphore(4)
+    aborted = False
+
+    async def one(term: str) -> Tuple[List[Dict[str, Any]], str, Optional[str]]:
+        async with gate:
+            if aborted:
+                return [], "live", None
+            if mirror_as_of and ctx is not None and ctx.cache is not None:
+                try:
+                    rows, _total = await asyncio.to_thread(
+                        ctx.cache.search_messages,
+                        folders=[folder_key],
+                        sender=term if field == "sender" else None,
+                        subject=term if field == "subject" else None,
+                        since_ts=since_ts,
+                        until_ts=until_ts,
+                        offset=0,
+                        limit=50,
+                    )
+                    matched_rows: List[Any] = []
+                    for r in rows:
+                        if field == "subject":
+                            if not _word_match(term, r["subject"] or ""):
+                                continue
+                        else:
+                            if not _sender_match(term, _row_from(r)):
+                                continue
+                            if not _card_in_window({"date": r["date_iso"]},
+                                                   since_dt, until_dt):
+                                continue
+                        matched_rows.append(r)
+                        if len(matched_rows) >= CHECK_MAX_HITS:
+                            break
+                    if matched_rows:
+                        def build_cached() -> List[Dict[str, Any]]:
+                            minted = ctx.aliaser.alias_many([
+                                (r["ews_id"], "m", r["changekey"],
+                                 r["internet_message_id"])
+                                for r in matched_rows if r["ews_id"]
+                            ])
+                            return [{
+                                "id": (
+                                    minted.get(r["ews_id"])
+                                    or ctx.aliaser.alias_for(
+                                        r["ews_id"], "m",
+                                        changekey=r["changekey"],
+                                        internet_message_id=r["internet_message_id"],
+                                    )
+                                ),
+                                "subject": r["subject"] or "",
+                                "from": _row_from(r),
+                                "date": r["date_iso"],
+                            } for r in matched_rows]
+
+                        trimmed = await asyncio.to_thread(build_cached)
+                    else:
+                        trimmed = []
+                    as_of_iso = datetime.fromtimestamp(
+                        mirror_as_of, tz=timezone.utc,
+                    ).isoformat(timespec="seconds")
+                    return trimmed, "cache", as_of_iso
+                except ToolError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "cache check_messages failed (%s) — falling back live", exc,
+                    )
+
+            def work(account: Any) -> List[Any]:
+                target = ctx.gateway.resolve_folder(account, norm_folder, ctx.aliaser)
+                if field == "subject":
+                    qs = _build_queryset(
+                        target, subject=term, since_dt=since_dt, until_dt=until_dt,
+                    )
+                else:
+                    aqs = _aqs_sender_query(term, since_dt, until_dt, tz)
+                    qs = _build_queryset(target, query=aqs)
+                qs = _project(qs, fields=_CHECK_PROJECTION)
+                return list(qs[0:50])
+
+            items = await ctx.gateway.call(work)
+            matched_live: List[Tuple[Any, str, str, Optional[str]]] = []
+            for it in items:
+                subj = getattr(it, "subject", "") or ""
+                sender_str = _from(it)
+                date_iso = fmt_dt(getattr(it, "datetime_received", None), tz)
+                if field == "subject":
+                    if not _word_match(term, subj):
+                        continue
+                else:
+                    if not _sender_match(term, sender_str):
+                        continue
+                    if not _card_in_window({"date": date_iso}, since_dt, until_dt):
+                        continue
+                matched_live.append((it, subj, sender_str, date_iso))
+                if len(matched_live) >= CHECK_MAX_HITS:
+                    break
+            if matched_live:
+                def build_live() -> List[Dict[str, Any]]:
+                    minted = ctx.aliaser.alias_many([
+                        (str(it.id), "m", getattr(it, "changekey", None), None)
+                        for it, _s, _f, _d in matched_live if getattr(it, "id", None)
+                    ])
+                    out_cards: List[Dict[str, Any]] = []
+                    for it, subj, sender_str, date_iso in matched_live:
+                        raw_id = getattr(it, "id", None)
+                        key = str(raw_id) if raw_id else ""
+                        out_cards.append({
+                            "id": (
+                                (minted.get(key) or ctx.aliaser.alias_for(
+                                    key, "m", changekey=getattr(it, "changekey", None),
+                                )) if key else None
+                            ),
+                            "subject": subj,
+                            "from": sender_str,
+                            "date": date_iso,
+                        })
+                    return out_cards
+
+                trimmed = await asyncio.to_thread(build_live)
+            else:
+                trimmed = []
+            return trimmed, "live", None
+
+    tasks = [asyncio.create_task(one(term)) for term in terms]
+    first_exc: Optional[BaseException] = None
+    try:
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_EXCEPTION,
+            )
+            for t in tasks:
+                if t in done and not t.cancelled():
+                    exc = t.exception()
+                    if exc is not None and first_exc is None:
+                        first_exc = exc
+            if first_exc is not None:
+                aborted = True
+                for p in pending:
+                    p.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                break
+    except BaseException:
+        aborted = True
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    if first_exc is not None:
+        raise first_exc
+    outcomes = [t.result() for t in tasks]
+    found = {term: hits for term, (hits, _src, _ao) in zip(terms, outcomes) if hits}
+    missing = [term for term in terms if term not in found]
+    out: Dict[str, Any] = {"values_checked": len(terms), "found_count": len(found),
+                           "missing_count": len(missing), "missing": missing}
+    if not only_missing:
+        out["found"] = found
+    if all(src == "cache" for _hits, src, _ao in outcomes):
+        out["source"] = "cache"
+        as_of_iso = next((ao for _hits, _src, ao in outcomes if ao), None)
+        if as_of_iso:
+            out["as_of"] = as_of_iso
+        elif mirror_as_of:
+            _stamp(out, "cache", mirror_as_of)
+    else:
+        _stamp(out, "live")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -494,10 +1183,32 @@ async def _get_message(ctx: Context, id: str, format: str = "full",
             lambda account: _fetch_one(account, raw_id, only=list(_PROJECTION)))
         return _stamp({"ok": True, "message": msg_card(item, ctx.aliaser, tz)},
                       "live")
-    item = await ctx.gateway.call(lambda account: _fetch_one(account, raw_id))
+
+    def work(account: Any) -> Tuple[Any, Dict[int, str]]:
+        fetched = _fetch_one(account, raw_id)
+        smime_by_idx: Dict[int, str] = {}
+        for idx, att in enumerate(getattr(fetched, "attachments", None) or []):
+            name = getattr(att, "name", f"attachment-{idx}")
+            content_type = getattr(att, "content_type", None)
+            if not is_pkcs7_candidate(name, content_type):
+                continue
+            size = getattr(att, "size", None)
+            if isinstance(size, (int, float)) and size > _SMIME_SNIFF_MAX_BYTES:
+                continue
+            try:
+                raw = _read_attachment_bytes(att)
+            except Exception:
+                raw = None
+            kind = sniff_smime_type(name, content_type, raw)
+            if kind:
+                smime_by_idx[idx] = kind
+        return fetched, smime_by_idx
+
+    item, smime_by_idx = await ctx.gateway.call(work)
     return _stamp({"ok": True, "message": msg_full(
         item, ctx.aliaser, tz, ctx.settings.body_max_chars,
         include_html=bool(include_html),
+        smime_types=smime_by_idx,
     )}, "live")
 
 
@@ -674,35 +1385,73 @@ async def _get_attachment(ctx: Context, message_id: str,
         att = _pick_attachment(atts, attachment)
         name = getattr(att, "name", "") or "attachment"
         content_type = getattr(att, "content_type", None)
+        size = getattr(att, "size", None)
         out: Dict[str, Any] = {
             "ok": True,
             "name": name,
-            "size_bytes": getattr(att, "size", None),
+            "size_bytes": size,
             "content_type": content_type,
         }
+        pkcs7 = is_pkcs7_candidate(name, content_type)
+        oversized_sniff = (
+            isinstance(size, (int, float))
+            and not isinstance(size, bool)
+            and size > _SMIME_SNIFF_MAX_BYTES
+        )
+        if pkcs7 and oversized_sniff and mode in ("info", "auto"):
+            out["mode"] = "info"
+            out["hint"] = (
+                "PKCS#7 attachment exceeds the 5 MiB S/MIME sniff limit — "
+                "metadata only. Call again with mode='save' or mode='text' "
+                "to download the bytes."
+            )
+            return out
+        data: Optional[bytes] = None
+        bytes_loaded = False
+        smime_type: Optional[str] = None
+        if pkcs7:
+            data = _read_attachment_bytes(att)
+            bytes_loaded = True
+            smime_type = sniff_smime_type(name, content_type, data)
+            if smime_type:
+                out["smime_type"] = smime_type
         chosen = mode
         if mode == "auto":
-            chosen = "text" if _is_texty(name, content_type) else "info"
-            if chosen == "info":
-                out["hint"] = ("Binary attachment — metadata only. Call again "
-                               "with mode='save' to write it to disk.")
+            if smime_type == "enveloped":
+                chosen = "info"
+                out["hint"] = ("S/MIME encrypted (PKCS#7 EnvelopedData) — the "
+                               "content is not readable without the recipient's "
+                               "private key.")
+            elif smime_type == "signed":
+                chosen = "text"
+            else:
+                chosen = "text" if _is_texty(name, content_type) else "info"
+                if chosen == "info":
+                    out["hint"] = ("Binary attachment — metadata only. Call again "
+                                   "with mode='save' to write it to disk.")
         if chosen == "info":
             out["mode"] = "info"
             return out
-        content = getattr(att, "content", None)  # FileAttachment bytes (5.0.3)
-        if not isinstance(content, (bytes, bytearray)):
+        if not bytes_loaded:
+            data = _read_attachment_bytes(att)
+        if data is None:
             raise ToolError(
                 "validation",
                 f"Attachment {name!r} has no retrievable bytes (item attachment?).",
                 hint="Only file attachments can be read; use mode='info'.",
             )
-        data = bytes(content)
         if chosen == "text":
             text = data.decode("utf-8", errors="replace")
             out["mode"] = "text"
             out["text"] = text[:_TEXT_CAP]
             if len(text) > _TEXT_CAP:
                 out["truncated"] = True
+            if smime_type == "signed":
+                out["hint"] = ("Signed, not encrypted (PKCS#7 SignedData) — this "
+                               "is the raw DER wrapper decoded as text, so the "
+                               "certificate/signature bytes around the readable "
+                               "message content appear as � replacement "
+                               "characters.")
             return out
         safe = re.sub(r"[^\w.\-]+", "_", name).strip("._") or "attachment.bin"
         dest = Path(ctx.settings.data_dir) / "attachments"
@@ -847,8 +1596,10 @@ TOOLS: List[ToolSpec] = [
             "{id, name, path, total, unread, children}; `id` is a short folder "
             "alias (f7) reusable as a `folder`/`parent` argument anywhere. "
             "Well-known folders also carry `wk` (e.g. 'f:inbox') — prefer "
-            "passing that stable alias. Set include_empty=false to hide "
-            "folders with zero items."
+            "passing that stable alias. Rows also carry the raw EWS FolderClass "
+            "as `folder_class` when Exchange reports one (e.g. 'IPF.Note' for "
+            "mail, 'IPF.Appointment' for calendar). Set include_empty=false to "
+            "hide folders with zero items."
         ),
         side_effect_class="read",
         requires_ews=True,
@@ -869,9 +1620,10 @@ TOOLS: List[ToolSpec] = [
         name="search_messages",
         description=(
             "Search mail. TWO ENGINES, mutually exclusive: pass `query` (an "
-            "Exchange AQS string, e.g. 'from:ahmed subject:rfp hasattachment:yes') "
+            "Exchange AQS string, e.g. 'from:alice@example.com subject:rfp hasattachment:yes') "
             "OR the structured filters (sender/subject/since/until/is_unread/"
-            "has_attachments) — combining `query` with any structured filter is "
+            "has_attachments/categories/flag_complete) — combining `query` with any "
+            "structured filter is "
             "a validation error. `sender` is matched client-side against the "
             "fetched page's sender email/name, so total_available is unknown "
             "when it is used. Results are compact cards, newest first; their "
@@ -889,12 +1641,18 @@ TOOLS: List[ToolSpec] = [
             },
             "folder": {
                 "type": "string", "default": "f:inbox",
-                "description": "Folder alias (f:inbox, f:sent, f7), path, or raw id.",
+                "description": "Folder alias (f:inbox, f:sent, f7), path, raw id, or "
+                               "f:all for the whole mailbox: all mail folders with "
+                               "their subfolders, without deleted items, junk, drafts "
+                               "and outbox; each hit then names its folder.",
             },
             "sender": {
                 "type": "string",
-                "description": "Sender substring, matched client-side on the "
-                               "fetched page (email or display name).",
+                "description": "Sender email or display-name substring, "
+                               "matched within each page; keep paging while "
+                               "next_offset is set (a page may hold fewer "
+                               "than `limit` items or none, and "
+                               "total_available is null on live searches).",
             },
             "from_": {
                 "type": "string",
@@ -914,6 +1672,28 @@ TOOLS: List[ToolSpec] = [
             },
             "is_unread": {"type": "boolean"},
             "has_attachments": {"type": "boolean"},
+            "categories": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Match messages carrying all listed Outlook "
+                               "categories; live search uses contains matching "
+                               "whereas the local mirror matches exact category "
+                               "elements. Cannot combine with `query`.",
+            },
+            "recursive": {
+                "type": "boolean", "default": False,
+                "description": "Search `folder` and all mail folders under it, "
+                               "merged newest first; each card carries `folder` "
+                               "and the result reports `folders_searched`. "
+                               "Always runs live.",
+            },
+            "flag_complete": {
+                "type": "boolean",
+                "description": "true matches messages whose follow-up flag is "
+                               "marked Complete; false matches all other "
+                               "messages (unflagged or still-open flag). Always "
+                               "runs live and cannot combine with `query`.",
+            },
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
             "mode": {
@@ -928,15 +1708,50 @@ TOOLS: List[ToolSpec] = [
         handler=_search_messages,
     ),
     ToolSpec(
+        name="check_messages",
+        description=(
+            "Check a whole list of values against one mail folder in one call: "
+            "which values occur as a whole word in a message subject (or in the "
+            "sender name/address) and which are missing. Returns up to 5 matching "
+            "cards per value. Use this instead of one search_messages call per value."
+        ),
+        side_effect_class="read",
+        requires_ews=True,
+        input_schema=_schema({
+            "values": {
+                "type": ["string", "array"],
+                "items": {"type": "string"},
+                "description": "Values separated by commas or new lines, or an "
+                               "array of strings (a JSON array string is "
+                               "accepted too). At most 200.",
+            },
+            "field": {"type": "string", "enum": ["subject", "sender"],
+                      "description": "Where to look for each value (default subject)."},
+            "folder": {
+                "type": "string",
+                "description": "Single mail folder alias, path, or raw id, e.g. "
+                               "f:inbox (default) or f:sent (f:all and recursive "
+                               "scopes are not supported).",
+            },
+            "since": {"type": "string", "description": "Received at or after (ISO date)."},
+            "until": {"type": "string", "description": "Received at or before (ISO date)."},
+            "only_missing": {"type": "boolean",
+                             "description": "Return only the values without a match."},
+            "fresh": dict(_FRESH_PROPERTY),
+        }, ["values"]),
+        handler=_check_messages,
+    ),
+    ToolSpec(
         name="get_message",
         description=(
             "Fetch one message by id (short alias from search results, e.g. "
             "m12; raw EWS ids also work). format='full' (default) returns "
             "recipients, the cleaned body (quoted history stripped — use "
             "get_thread for the conversation) and the attachment inventory; "
-            "format='concise' returns the compact card. A not_found means the "
-            "id went stale (items move) — re-run search_messages and retry "
-            "with a fresh id."
+            "format='concise' returns the compact card. `flag_complete` is "
+            "only reported when read live, i.e. with fresh=true. A not_found "
+            "means the id went stale (items move) — re-run search_messages "
+            "and retry with a fresh id."
         ),
         side_effect_class="read",
         requires_ews=True,
@@ -986,9 +1801,14 @@ TOOLS: List[ToolSpec] = [
             "flagged) for text-like attachments (text/* content type or "
             ".txt/.csv/.md/.log/.json name); 'save' → write the bytes under "
             "the server data dir and return saved_path; 'auto' (default) → "
-            "text when text-like, otherwise info plus a hint. When the message "
-            "has several attachments you MUST pick one via `attachment` (a "
-            "name, or a zero-based index as a string)."
+            "text when text-like, otherwise info plus a hint. An smime.p7m "
+            "attachment (application/pkcs7-mime) is sniffed and reported as "
+            "`smime_type: signed|enveloped` — signed is NOT encrypted (auto "
+            "decodes as text, cert/signature bytes show as replacement chars); "
+            "enveloped IS encrypted (auto stays info; content is unrecoverable "
+            "without the recipient's private key). When the message has "
+            "several attachments you MUST pick one via `attachment` (a name, "
+            "or a zero-based index as a string)."
         ),
         side_effect_class="read",
         requires_ews=True,

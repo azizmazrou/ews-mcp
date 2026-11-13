@@ -1,7 +1,7 @@
 # ews-mcp 4.5 — Exchange (EWS) as a safe, fast MCP tool surface
 
 An MCP server that turns an on-prem Exchange mailbox into a lean,
-safety-gated tool surface for an LLM assistant: **28 tools**, alias-only
+safety-gated tool surface for an LLM assistant: **30 tools**, alias-only
 ids, token-lean DTOs, a local cache mirror with Arabic-correct full-text
 search, and a two-phase confirm flow that makes autonomous sending
 tamper-evident.
@@ -17,7 +17,7 @@ your MCP client (Claude Code, Claude Desktop, or any other) starts
 `ewsmcp` as a child process and talks to it over stdin/stdout. There is
 no port, no API key, and nothing listening on the network — and because
 it runs as a normal process on your machine, it reaches Exchange through
-whatever network your machine has, **including a corporate VPN**. If
+whatever network your machine has, **including a workstation VPN**. If
 your Exchange endpoint is only reachable from your workstation, this is
 the mode you want; a container or a remote host would not have that
 route.
@@ -73,7 +73,7 @@ credentials in `env`. Prefer a file? Copy [`.env.example`](.env.example)
 to `.env` in the directory you launch `ewsmcp` from — it auto-loads.
 
 That is the whole setup. The defaults are safe: capability tier `draft`
-(23 read + draft tools; nothing can send), `SEND_ENABLED=false` until
+(25 read + draft tools; nothing can send), `SEND_ENABLED=false` until
 you flip it, and mail-at-rest (aliases, audit chain, cache) goes to
 `~/.ewsmcp`. The server **refuses cloud-synced folders** for that data —
 if your home directory lives in OneDrive/Dropbox/iCloud, set `DATA_DIR`
@@ -106,21 +106,31 @@ MCP_TRANSPORT=http MCP_PORT=8000 MCP_API_KEY=<long-random-string> ewsmcp
 - Plain REST for scripts: `POST /api/tools/<name>` with an `x-api-key`
   header; OpenAPI at `/openapi.json`.
 - Health: `GET /livez`, `/readyz`, `/health`.
+- OAuth discovery paths (`/.well-known/oauth-*`, `/register`) always
+  return 404 — this server implements no OAuth, so clients fall back to
+  configured headers instead of treating a 401 as missing OAuth metadata.
+  MCP clients that probe `/mcp` unauthenticated before attaching
+  configured headers may still interpret an initial 401 as an OAuth
+  challenge; for those clients, omit `MCP_API_KEY` and restrict network
+  access instead (loopback binding or an internal container network).
+  `x-api-key` on `/api/tools/<name>` is unaffected.
 
 Docker (containerized HTTP mode — note a container only sees the
-network of its host, not your workstation's VPN):
+network of its host, not your workstation's VPN; see
+[`docker-compose.example.yml`](docker-compose.example.yml) for a
+loopback-bound, read-tier Compose setup):
 
 ```bash
 docker build -t ews-mcp:dev .
-docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
+docker run --rm -p 127.0.0.1:8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 ```
 
 ## Why it looks like this
 
-- **Token economy.** One legacy detail call shipped 115 kB of duplicated
-  raw HTML for a 150-char message. Here a search result is a ~60-token
-  card, bodies are cleaned once at sync time (bilingual quoted-history +
-  signature stripping), and raw HTML requires an explicit flag.
+- **Token economy.** Raw HTML bodies often exceed 100 kB for a short
+  message. Here a search result is a ~60-token card, bodies are cleaned
+  once at sync time (bilingual quoted-history + signature stripping), and
+  raw HTML requires an explicit flag.
 - **Ids the model can actually copy.** Raw EWS ids are ~150 chars of
   case-sensitive base64 that change when items move. Tools emit short
   aliases (`m12`, `e3`) that survive moves and restarts.
@@ -134,19 +144,26 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
   fall back to live EWS transparently. Arabic searches match across
   orthographic variants (alef/hamza forms, teh marbuta, diacritics,
   Arabic-Indic digits).
-- **Never-exit boot.** Transports bind before any Exchange contact;
-  `/livez` is up immediately, `/readyz` reports the warmup honestly, and
-  the connection manager owns recovery.
+- **Never-exit boot, lockout-safe auth.** Transports bind before any
+  Exchange contact; `/livez` is up immediately, `/readyz` reports the
+  warmup honestly, and the connection manager owns recovery. If Exchange
+  answers HTTP 401, `RejectingFaultTolerance` aborts on the first response
+  and the gateway's authentication circuit breaker enforces a 15-minute
+  cooldown and a 3-rejection process cap (`state="auth_failed"`) so a
+  wrong password never loops into a directory account lockout.
 
 ## Configuration (env)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `EWS_SERVER_URL` / `EWS_EMAIL` / `EWS_USERNAME` / `EWS_PASSWORD` | — | Exchange endpoint + credentials (auth auto-negotiation; never pinned) |
+| `EWS_SERVER_URL` / `EWS_EMAIL` / `EWS_USERNAME` / `EWS_PASSWORD` | — | Exchange endpoint + credentials (auth auto-negotiation; blank `EWS_AUTH_TYPE_FORCE` is unset) |
+| `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` / `EWS_AUTH_MAX_REJECTIONS` | `900` / `3` | Lockout guard on HTTP 401 rejections: cooldown between probes (min `60`) and permanent per-process cap (`1`–`10`); values outside fail startup validation. `EWS_AUTH_MAX_REJECTIONS` counts rejected submissions (matching directory lockout counters), so concurrent requests already in flight when the first 401 arrives are each counted and a burst can reach the cap at once |
 | `EWS_CAPABILITY_TIER` | `draft` | `read` ⊂ `draft` ⊂ `full` — above-tier tools are unregistered AND refused |
 | `SEND_ENABLED` | `false` | Global send kill-switch (blocks every send-class tool) |
 | `EWS_RECIPIENT_ALLOWLIST` / `EWS_RECIPIENT_DENYLIST` | — | Glob lists enforced on argument-borne AND draft-resolved recipients |
 | `EWS_MAX_SENDS_PER_HOUR` | `10` | Send rate cap |
+| `EWS_ATTACHMENT_DIR` | `""` (off) | Single directory from which `create_draft` / `add_draft_attachment` may read relative `path` attachments |
+| `EWS_MAX_ATTACHMENT_MB` | `25` | Per-call attachment ceiling in MiB (`1`–`50`); HTTP request body limit is derived from this at start-up |
 | `SEND_CONFIRM_SECRET` | per-process | HMAC secret for confirm tokens (set it to survive restarts) |
 | `CONFIRM_TTL_SECONDS` | `600` | Confirm token lifetime |
 | `MCP_TRANSPORT` / `MCP_HOST` / `MCP_PORT` / `MCP_API_KEY` | stdio | HTTP serving + bearer auth (all unused in stdio mode) |
@@ -158,7 +175,7 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 | `EWS_CACHE_PURGE_ON_BOOT` | `false` | Admin path: wipe the mirror and resync |
 | `EWS_SEMANTIC_INDEX` | `none` | `pgvector` enables the optional vector tier (+`find_similar`) |
 | `EWS_SEMANTIC_PG_DSN` / `EWS_SEMANTIC_OLLAMA_URL` / `EWS_SEMANTIC_MODEL` | — | Vector tier wiring (requires `psycopg`, not a core dependency) |
-| `EWS_TZ` | `Asia/Riyadh` | Server timezone for date grammar + display |
+| `EWS_TZ` | `UTC` | Server timezone for date grammar + display |
 
 ## The send flow (two-phase, content-bound)
 
@@ -177,7 +194,7 @@ send_draft(draft_id="d1", confirm_token="…")
 ## Health & operations
 
 `GET /livez` (process up), `GET /readyz` (connection state, honest 503
-while warming), `GET /health` (tool count), `GET /metrics` (Prometheus,
+while warming or `auth_failed` when credentials are rejected), `GET /health` (tool count), `GET /metrics` (Prometheus,
 bearer-authenticated), `get_server_status` tool (connection, tier,
 kill-switch, cache watermarks, sync status — works while cold and over
 stdio too). Audit chain:

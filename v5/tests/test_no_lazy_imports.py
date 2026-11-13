@@ -1,8 +1,8 @@
 """AST sentinel: no ``exchangelib`` imports inside function bodies in v5.
 
-Lifted from the v3 sentinel (two production outages: a lazy ``OofReply``
-and a lazy ``FileAttachment`` import each failed only at CALL time after
-an exchangelib upgrade, because unit tests patched the same lazy path).
+Lifted from the v3 sentinel (lazy ``OofReply`` and ``FileAttachment``
+imports failed only at CALL time after an exchangelib upgrade, because
+unit tests patched the same lazy path).
 v5 policy is stricter: NO exemptions — every exchangelib import lives at
 module top where a removed symbol fails at import/collection time.
 """

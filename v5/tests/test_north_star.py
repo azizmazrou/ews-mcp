@@ -117,8 +117,8 @@ def test_north_star_two_calls_under_two_k_tokens(tmp_path):
 
 
 def test_north_star_search_is_fast_warm(tmp_path):
-    """<100ms warm is a production claim; in CI we only pin the shape of
-    the guarantee — a pure-SQLite read with no EWS round trip."""
+    """<100ms warm is the local-storage target; in CI we only pin the shape
+    of the guarantee — a pure-SQLite read with no EWS round trip."""
     ctx = Context(
         settings=make_settings(),
         gateway=CountingGateway(MagicMock()),
@@ -134,4 +134,4 @@ def test_north_star_search_is_fast_warm(tmp_path):
     elapsed_ms = (time.perf_counter() - start) * 1000
     assert res["source"] == "cache"
     assert ctx.gateway.calls == 0
-    assert elapsed_ms < 1500  # generous CI bound; warm prod target is <100ms
+    assert elapsed_ms < 1500  # generous CI bound; warm target is <100ms

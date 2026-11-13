@@ -1,0 +1,50 @@
+# Example single-service Compose file for ews-mcp (4.5 line).
+# Supply credentials and settings in a local .env file (chmod 600, never committed).
+# Safe defaults: loopback-only port binding, read capability tier, sends disabled.
+
+services:
+  ews-mcp:
+    # Pin an exact immutable release tag (for example v4.5.0a2), never :latest.
+    image: ${EWS_MCP_IMAGE:?set EWS_MCP_IMAGE to a pinned v4.5.x image reference}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      EWS_SERVER_URL: ${EWS_SERVER_URL:?}
+      EWS_EMAIL: ${EWS_EMAIL:?}
+      EWS_USERNAME: ${EWS_USERNAME:?}
+      EWS_PASSWORD: ${EWS_PASSWORD:?}
+      EWS_INSECURE_SKIP_VERIFY: ${EWS_INSECURE_SKIP_VERIFY:-false}
+      EWS_TZ: ${EWS_TZ:-UTC}
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      MCP_API_KEY: ${MCP_API_KEY:?set MCP_API_KEY to a random bearer token}
+      EWS_CAPABILITY_TIER: ${EWS_CAPABILITY_TIER:-read}
+      SEND_ENABLED: ${SEND_ENABLED:-false}
+      DATA_DIR: /data
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ewsmcp_data:/data
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # /livez checks the server process so a cold Exchange does not restart the container.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  ewsmcp_data:

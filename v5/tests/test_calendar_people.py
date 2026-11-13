@@ -2,17 +2,26 @@
 
 Same harness as test_dispatcher: make_settings + Context with a fake
 gateway whose ``call`` runs the work function against a MagicMock
-account synchronously. All datetimes are tz-aware Asia/Riyadh.
+account synchronously. All datetimes use FIXED_OFFSET_TZ (UTC+3 without DST).
 """
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
-from conftest import make_settings
+import pytest
+from exchangelib.recurrence import (
+    AbsoluteMonthlyPattern,
+    AbsoluteYearlyPattern,
+    DailyPattern,
+    Recurrence,
+    WeeklyPattern,
+)
+
+from conftest import FIXED_OFFSET_TZ, make_settings
 from ewsmcp import __version__
 from ewsmcp.audit import AuditLog
 from ewsmcp.ids import get_aliaser
@@ -20,7 +29,7 @@ from ewsmcp.tools import calendar_people
 from ewsmcp.tools.base import Context, dispatch
 from ewsmcp.tools.calendar_people import merge_busy_and_find_slots
 
-TZ = ZoneInfo("Asia/Riyadh")
+TZ = ZoneInfo(FIXED_OFFSET_TZ)
 SPEC = {s.name: s for s in calendar_people.TOOLS}
 
 
@@ -33,6 +42,7 @@ class _FakeGateway:
 
 
 def _ctx(tmp_path, account, **settings_overrides) -> Context:
+    settings_overrides.setdefault("ews_tz", FIXED_OFFSET_TZ)
     return Context(
         settings=make_settings(**settings_overrides),
         gateway=_FakeGateway(account),
@@ -143,7 +153,7 @@ def test_list_events_relative_dates_today_plus_7d(tmp_path):
     start = kwargs["start"]
     assert (start.hour, start.minute, start.second) == (0, 0, 0)
     assert start.date() in {before.date(), after.date()}
-    assert str(start.tzinfo) == "Asia/Riyadh"
+    assert str(start.tzinfo) == FIXED_OFFSET_TZ
     assert kwargs["end"] - start == timedelta(days=7)
 
 
@@ -162,10 +172,10 @@ def test_get_event_attendees_body_and_flags(tmp_path):
     raw = "RAW-EVENT-FULL"
     ev = _event(raw, subject="Budget review")
     ev.required_attendees = [SimpleNamespace(
-        mailbox=SimpleNamespace(name="Ahmed", email_address="ahmed@corp.example"),
+        mailbox=SimpleNamespace(name="Alice", email_address="alice@corp.example"),
         response_type="Accept")]
     ev.optional_attendees = [SimpleNamespace(
-        mailbox=SimpleNamespace(name=None, email_address="sara@corp.example"),
+        mailbox=SimpleNamespace(name=None, email_address="bob@corp.example"),
         response_type="Decline")]
     ev.organizer = SimpleNamespace(name="Boss", email_address="boss@corp.example")
     ev.text_body = "Agenda attached."
@@ -182,12 +192,105 @@ def test_get_event_attendees_body_and_flags(tmp_path):
     assert event["id"] == alias
     assert event["organizer"] == "Boss <boss@corp.example>"
     assert event["attendees"] == [
-        {"email": "ahmed@corp.example", "response": "Accept", "name": "Ahmed"},
-        {"email": "sara@corp.example", "response": "Decline"},
+        {"email": "alice@corp.example", "response": "Accept", "name": "Alice"},
+        {"email": "bob@corp.example", "response": "Decline"},
     ]
     assert event["body"] == "Agenda attached."
     assert event["recurring"] is True
     assert event["my_response"] == "Organizer"
+
+
+def test_all_day_event_keeps_its_dates(tmp_path):
+    # exchangelib hands back dates, not datetimes, for all-day items.
+    from datetime import date
+    from ewsmcp.cache.sync import row_from_event
+    from ewsmcp.dto import event_card
+    ev = _event("RAW-ALLDAY", subject="Holiday",
+                start=date(2026, 11, 3), end=date(2026, 11, 4))
+    ev.is_all_day = True
+    card = event_card(ev, get_aliaser(str(tmp_path / "mem")), "Europe/Berlin")
+    assert (card["start"], card["end"]) == ("2026-11-03", "2026-11-04")
+    assert card["all_day"] is True
+    row = row_from_event(ev, "Europe/Berlin")
+    assert row["start_iso"] == "2026-11-03"
+    assert row["start_ts"] == int(
+        datetime(2026, 11, 3, tzinfo=ZoneInfo("Europe/Berlin")).timestamp())
+    assert row["end_ts"] > row["start_ts"]
+
+
+def _get(tmp_path, ev):
+    account = MagicMock()
+    account.fetch.return_value = iter([ev])
+    ctx = _ctx(tmp_path, account)
+    return _run(ctx, "get_event", {"id": ctx.aliaser.alias_for("RAW-S", "e")})["event"]
+
+
+def _series_event(kind):
+    ev = MagicMock()
+    ev.id = "RAW-S"
+    ev.subject = "Sync"
+    ev.type = kind
+    ev.required_attendees = ev.optional_attendees = None
+    ev.organizer = None
+    ev.text_body = ""
+    ev.my_response_type = "Organizer"
+    return ev
+
+
+def test_get_event_reads_the_rule_from_the_master_of_an_occurrence(tmp_path):
+    ev = _series_event("Occurrence")
+    master = ev.recurring_master.return_value
+    master.recurrence = Recurrence(pattern=WeeklyPattern(interval=1, weekdays=[4]),
+                                   start=date(2026, 11, 12))
+    event = _get(tmp_path, ev)
+    master.refresh.assert_called_once_with()
+    assert event["type"] == "Occurrence"
+    assert event["recurrence"] == {"frequency": "weekly", "interval": 1,
+                                   "weekdays": ["thursday"], "first_date": "2026-11-12"}
+
+
+def test_get_event_describes_series_boundaries(tmp_path):
+    ev = _series_event("RecurringMaster")
+    ev.recurrence = Recurrence(pattern=AbsoluteMonthlyPattern(interval=2, day_of_month=12),
+                               start=date(2026, 11, 12), end=date(2027, 6, 30))
+    assert _get(tmp_path, ev)["recurrence"] == {
+        "frequency": "monthly", "interval": 2, "day_of_month": 12,
+        "first_date": "2026-11-12", "until": "2027-06-30"}
+
+    ev = _series_event("RecurringMaster")
+    ev.recurrence = Recurrence(pattern=DailyPattern(interval=1), start=date(2026, 11, 12), number=5)
+    assert _get(tmp_path, ev)["recurrence"] == {
+        "frequency": "daily", "interval": 1, "first_date": "2026-11-12", "count": 5}
+
+
+def test_get_event_reports_a_pattern_it_cannot_write(tmp_path):
+    ev = _series_event("RecurringMaster")
+    ev.recurrence = Recurrence(pattern=AbsoluteYearlyPattern(day_of_month=12, month=11),
+                               start=date(2026, 11, 12))
+    rule = _get(tmp_path, ev)["recurrence"]
+    assert rule["frequency"] == "other" and rule["pattern"]
+
+
+def test_get_event_single_event_has_no_rule(tmp_path):
+    event = _get(tmp_path, _series_event("Single"))
+    assert "recurrence" not in event and event["type"] == "Single"
+
+
+@pytest.mark.parametrize("sent", [True, False])
+def test_get_event_reports_invitation_status_to_the_organizer(tmp_path, sent):
+    ev = _series_event("Single")
+    ev.required_attendees = [SimpleNamespace(
+        mailbox=SimpleNamespace(name=None, email_address="a@corp.example"), response_type="Unknown")]
+    ev.meeting_request_was_sent = sent
+    assert _get(tmp_path, ev)["invitations_sent"] is sent
+
+
+def test_get_event_hides_invitation_status_from_an_attendee(tmp_path):
+    ev = _series_event("Single")
+    ev.required_attendees = [SimpleNamespace(
+        mailbox=SimpleNamespace(name=None, email_address="a@corp.example"), response_type="Accept")]
+    ev.my_response_type = "Accept"
+    assert "invitations_sent" not in _get(tmp_path, ev)
 
 
 def test_get_event_per_item_exception_maps_to_not_found(tmp_path):
@@ -325,32 +428,32 @@ def _contact(raw_id, name, email, title=None, company=None, phone=None):
 
 def test_find_people_auto_merges_and_gal_wins_duplicates(tmp_path):
     gal_entry = (
-        SimpleNamespace(name="Ahmed Al-X", email_address="ahmed@corp.example"),
-        SimpleNamespace(display_name="Ahmed Al-X", job_title="Director",
+        SimpleNamespace(name="Alice Example", email_address="alice@corp.example"),
+        SimpleNamespace(display_name="Alice Example", job_title="Director",
                         company_name="Acme",
-                        phone_numbers=[SimpleNamespace(phone_number="+966500000001")]),
+                        phone_numbers=[SimpleNamespace(phone_number="+15550100")]),
     )
     account = MagicMock()
     account.protocol.resolve_names.return_value = [gal_entry]
     account.contacts.all.return_value = [
-        _contact("C-RAW-1", "Ahmed (personal)", "AHMED@corp.example"),  # dup of GAL
-        _contact("C-RAW-2", "Ahmed Junior", "junior@else.example",
-                 title="Analyst", company="Elsewhere", phone="+966500000002"),
-        _contact("C-RAW-3", "Sara", "sara@x.example"),  # no query match
+        _contact("C-RAW-1", "Alice (personal)", "ALICE@corp.example"),  # dup of GAL
+        _contact("C-RAW-2", "Alice Ops", "ops@else.example",
+                 title="Analyst", company="Elsewhere", phone="+15550101"),
+        _contact("C-RAW-3", "Bob", "bob@x.example"),  # no query match
     ]
     ctx = _ctx(tmp_path, account)
-    res = _run(ctx, "find_people", {"query": "ahmed"})
+    res = _run(ctx, "find_people", {"query": "alice"})
     assert res["ok"] is True
     account.protocol.resolve_names.assert_called_once_with(
-        ["ahmed"], return_full_contact_data=True)
-    assert [p["email"] for p in res["items"]] == ["ahmed@corp.example",
-                                                  "junior@else.example"]
+        ["alice"], return_full_contact_data=True)
+    assert [p["email"] for p in res["items"]] == ["alice@corp.example",
+                                                  "ops@else.example"]
     gal_person = res["items"][0]
     assert gal_person["source"] == "gal"
-    assert gal_person["name"] == "Ahmed Al-X"  # GAL won the duplicate
+    assert gal_person["name"] == "Alice Example"  # GAL won the duplicate
     assert gal_person["title"] == "Director"
     assert gal_person["company"] == "Acme"
-    assert gal_person["phone"] == "+966500000001"
+    assert gal_person["phone"] == "+15550100"
     assert gal_person["id"] == "p1"
     contact_person = res["items"][1]
     assert contact_person["source"] == "contacts"
@@ -366,9 +469,9 @@ def test_find_people_gal_no_results_exception_is_skipped(tmp_path):
     account.protocol.resolve_names.return_value = [
         ErrorNameResolutionNoResults("no results")]
     account.contacts.all.return_value = [
-        _contact("C-RAW-9", "Ahmed Junior", "junior@else.example")]
+        _contact("C-RAW-9", "Alice Ops", "ops@else.example")]
     ctx = _ctx(tmp_path, account)
-    res = _run(ctx, "find_people", {"query": "junior"})
+    res = _run(ctx, "find_people", {"query": "ops"})
     assert res["ok"] is True
     assert [p["source"] for p in res["items"]] == ["contacts"]
 
@@ -376,10 +479,10 @@ def test_find_people_gal_no_results_exception_is_skipped(tmp_path):
 def test_find_people_source_contacts_never_hits_gal(tmp_path):
     account = MagicMock()
     account.contacts.all.return_value = [
-        _contact("C-RAW-5", "Ahmed Junior", "junior@else.example")]
+        _contact("C-RAW-5", "Alice Ops", "ops@else.example")]
     ctx = _ctx(tmp_path, account)
-    res = _run(ctx, "find_people", {"query": "ahmed", "source": "contacts"})
-    assert [p["email"] for p in res["items"]] == ["junior@else.example"]
+    res = _run(ctx, "find_people", {"query": "alice", "source": "contacts"})
+    assert [p["email"] for p in res["items"]] == ["ops@else.example"]
     account.protocol.resolve_names.assert_not_called()
 
 
@@ -447,3 +550,129 @@ def test_get_server_status_not_cold_gated_while_connecting(tmp_path):
     assert res["ok"] is True
     assert res["connection"]["state"] == "connecting"
     assert res["connection"]["attempts"] == 4
+
+
+def test_get_event_reports_the_reminder(tmp_path):
+    def get(ev):
+        account = MagicMock()
+        account.fetch.return_value = iter([ev])
+        ctx = _ctx(tmp_path, account)
+        return _run(ctx, "get_event", {"id": ctx.aliaser.alias_for("RAW-R", "e")})["event"]
+
+    def event(reminder_is_set):
+        ev = MagicMock()
+        ev.id = "RAW-R"
+        ev.required_attendees = ev.optional_attendees = None
+        ev.organizer = None
+        ev.text_body = ""
+        ev.reminder_is_set = reminder_is_set
+        ev.reminder_minutes_before_start = 15
+        return ev
+
+    assert get(event(True))["reminder_minutes"] == 15
+    assert get(event(False))["reminder_minutes"] is None
+
+
+def test_check_availability_passes_ewstimezone_for_named_zone_and_fixed_offset(tmp_path):
+    from exchangelib import EWSTimeZone
+
+    account_named = MagicMock()
+    account_named.protocol.get_free_busy_info.return_value = iter([
+        SimpleNamespace(calendar_events=[]),
+    ])
+    ctx_named = _ctx(tmp_path / "named", account_named, ews_tz="Europe/Berlin")
+    res_named = _run(ctx_named, "check_availability", {
+        "attendees": ["ops@example.com"],
+        "start": "2026-06-15T09:00",
+        "end": "2026-06-15T11:00",
+    })
+    assert res_named["ok"] is True
+    kw_named = account_named.protocol.get_free_busy_info.call_args.kwargs
+    assert isinstance(kw_named["start"].tzinfo, EWSTimeZone)
+    assert isinstance(kw_named["end"].tzinfo, EWSTimeZone)
+    assert kw_named["start"].tzinfo.ms_id
+    assert (kw_named["start"].hour, kw_named["end"].hour) == (9, 11)
+
+    account_fixed = MagicMock()
+    account_fixed.protocol.get_free_busy_info.return_value = iter([
+        SimpleNamespace(calendar_events=[]),
+    ])
+    ctx_fixed = _ctx(tmp_path / "fixed", account_fixed, ews_tz=FIXED_OFFSET_TZ)
+    res_fixed = _run(ctx_fixed, "check_availability", {
+        "attendees": ["ops@example.com"],
+        "start": "2026-06-15T07:00+01:00",
+        "end": "2026-06-15T09:00+01:00",
+    })
+    assert res_fixed["ok"] is True
+    kw_fixed = account_fixed.protocol.get_free_busy_info.call_args.kwargs
+    assert isinstance(kw_fixed["start"].tzinfo, EWSTimeZone)
+    assert isinstance(kw_fixed["end"].tzinfo, EWSTimeZone)
+    assert kw_fixed["start"].tzinfo.ms_id
+    assert (kw_fixed["start"].hour, kw_fixed["end"].hour) == (9, 11)
+
+
+@pytest.mark.parametrize("tz_name, expected_offset", [
+    (FIXED_OFFSET_TZ, "+03:00"),
+    ("UTC", "+00:00"),
+])
+def test_check_availability_treats_naive_busy_events_as_requested_zone(
+    tmp_path, tz_name, expected_offset,
+):
+    # Free/busy CalendarEvent boundaries arrive naive from exchangelib; testing
+    # two distinct zones guarantees at least one differs from any host timezone.
+    naive_busy = SimpleNamespace(
+        start=datetime(2026, 6, 15, 9, 0),
+        end=datetime(2026, 6, 15, 10, 0),
+        busy_type="Busy",
+    )
+    assert naive_busy.start.tzinfo is None
+    account = MagicMock()
+    account.protocol.get_free_busy_info.return_value = iter([
+        SimpleNamespace(calendar_events=[naive_busy]),
+    ])
+    ctx = _ctx(tmp_path, account, ews_tz=tz_name)
+    res = _run(ctx, "check_availability", {
+        "attendees": ["ops@example.com"],
+        "start": "2026-06-15T09:00",
+        "end": "2026-06-15T10:30",
+    })
+    assert res["ok"] is True
+    assert res["per_attendee"]["ops@example.com"] == [{
+        "start": f"2026-06-15T09:00{expected_offset}",
+        "end": f"2026-06-15T10:00{expected_offset}",
+        "status": "Busy",
+    }]
+    assert res["slots"] == [{
+        "start": f"2026-06-15T10:00{expected_offset}",
+        "end": f"2026-06-15T10:30{expected_offset}",
+    }]
+
+
+@pytest.mark.parametrize("kind, fail_mode", [
+    ("Occurrence", "refresh"),
+    ("Exception", "refresh"),
+    ("Occurrence", "master_call"),
+])
+def test_get_event_returns_occurrence_when_master_cannot_be_loaded(
+    tmp_path, kind, fail_mode,
+):
+    ev = _series_event(kind)
+    ev.is_recurring = True
+    ev.recurrence = None
+    if fail_mode == "refresh":
+        ev.recurring_master.return_value.refresh.side_effect = RuntimeError(
+            "ErrorItemNotFound: recurring master not in attendee mailbox"
+        )
+    else:
+        ev.recurring_master.side_effect = RuntimeError("ErrorAccessDenied")
+    account = MagicMock()
+    account.fetch.return_value = iter([ev])
+    ctx = _ctx(tmp_path, account)
+    alias = ctx.aliaser.alias_for("RAW-OCC", "e")
+    res = _run(ctx, "get_event", {"id": alias})
+    assert res["ok"] is True
+    event = res["event"]
+    assert event["recurring"] is True
+    assert event["type"] == kind
+    assert "recurrence" not in event
+

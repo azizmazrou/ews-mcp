@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only live smoke against a RUNNING v5 server (canary or local).
+"""Read-only live smoke against a RUNNING v5 server.
 
 Exercises the north-star read path against real Exchange data and prints
 per-step latency + response size. READ-ONLY by default; the draft step
