@@ -33,6 +33,8 @@
 - `send_draft` sends exactly what was previewed: the confirm gate hands the handler the hash it verified, the handler fetches the draft once, re-checks the hash on that object and sends that object; a draft changed after the preview is refused with `confirm_invalid`. Draft tools (`update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft`) are serialised per draft. Before, a change landing between verification and sending went out unreviewed.
 - `update_draft` refuses items outside Drafts, like the other draft tools.
 - A tool call that completed is no longer reported as `auth_failed` because another call saw a 401 at the same time.
+- A 401 that says the account is locked out is counted and raised at once even when the response also carries `Connection: close` (the library would report it as a busy server and retry).
+- Only an authenticated round trip closes the authentication breaker: after the cooldown the next call probes first, so a call answered from memory can no longer reset the count.
 - After a 401 inside a tool call the connection manager always arms one recovery probe after the cooldown, also with the heartbeat disabled; a half-open probe keeps its claim until the worker finishes.
 - `set_oof`, `create_event` and `update_event` accept times with an explicit non-zero UTC offset (they failed with `UnknownTimeZone`): aware inputs are converted to the configured named zone.
 - `update_messages(flag_complete=false)` only clears a completed flag; an open follow-up flag is left alone.

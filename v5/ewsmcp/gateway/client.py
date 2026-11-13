@@ -129,6 +129,9 @@ def _www_authenticate_schemes(response: Any) -> List[str]:
     return schemes
 
 
+_LOCKED_OUT_MARKER = b"currently locked out"
+
+
 class RejectingFaultTolerance(FaultTolerance):
     """FaultTolerance policy that raises UnauthorizedError immediately on 401.
 
@@ -159,20 +162,27 @@ class RejectingFaultTolerance(FaultTolerance):
                 if isinstance(raw_body, str)
                 else bytes(raw_body)
             )
-            if b"currently locked out" not in body:
-                schemes = _www_authenticate_schemes(response)
-                offered = ", ".join(schemes) if schemes else "none"
-                configured = self.configured_auth_type or "auto-negotiated"
-                logger.warning(
-                    "Exchange HTTP 401 rejection: WWW-Authenticate schemes [%s]; "
-                    "ews_auth_type_force=%s",
-                    offered,
-                    configured,
-                )
-                err = UnauthorizedError("Exchange rejected credentials (HTTP 401)")
-                if self._on_rejection is not None:
-                    self._on_rejection()
-                raise err
+            locked_out = _LOCKED_OUT_MARKER in body
+            schemes = _www_authenticate_schemes(response)
+            offered = ", ".join(schemes) if schemes else "none"
+            configured = self.configured_auth_type or "auto-negotiated"
+            logger.warning(
+                "Exchange HTTP 401 rejection%s: WWW-Authenticate schemes [%s]; "
+                "ews_auth_type_force=%s",
+                " (account locked out)" if locked_out else "",
+                offered,
+                configured,
+            )
+            # Raised here for the locked-out case too: the library checks a
+            # `Connection: close` header first and would report a locked
+            # account as a busy server, to be retried.
+            err = UnauthorizedError(
+                "The referenced account is currently locked out" if locked_out
+                else "Exchange rejected credentials (HTTP 401)"
+            )
+            if self._on_rejection is not None:
+                self._on_rejection()
+            raise err
         return super().raise_response_errors(response)
 
 
@@ -518,11 +528,25 @@ class EWSGateway:
             try:
                 if not claimed:
                     self._breaker.check_open()
-                call_seq = self._breaker.seq
                 t401_before = _thread_401_seq()
                 tbrk_before = _thread_breaker_seq(self._breaker)
                 try:
                     account = self._get_or_build_account()
+                    if claimed:
+                        # Half-open: prove the credentials with a real round
+                        # trip first. Only that may close the breaker; a
+                        # function that answers from memory must not.
+                        account.root.refresh()
+                        if (
+                            _thread_401_seq() != t401_before
+                            or _thread_breaker_seq(self._breaker) != tbrk_before
+                        ):
+                            # The probe saw a 401 that something swallowed.
+                            err = self._handle_swallowed_auth_rejection(tbrk_before)
+                            claim_released = True
+                            raise err
+                        self._breaker.record_success()
+                        claim_released = True
                     out = fn(account)
                 except UnauthorizedError as exc:
                     err = self._handle_auth_rejection(exc, tbrk_before)
@@ -535,9 +559,6 @@ class EWSGateway:
                     err = self._handle_swallowed_auth_rejection(tbrk_before)
                     claim_released = True
                     raise err
-                if self._breaker.seq == call_seq:
-                    self._breaker.record_success()
-                    claim_released = True
                 return out
             finally:
                 if claimed and not claim_released:

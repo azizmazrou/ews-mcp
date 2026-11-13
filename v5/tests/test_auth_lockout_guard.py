@@ -18,7 +18,7 @@ import pytest
 import requests
 from conftest import make_settings
 from exchangelib import Account, Configuration, Credentials, DELEGATE, EWSTimeZone
-from exchangelib.errors import UnauthorizedError
+from exchangelib.errors import ErrorServerBusy, UnauthorizedError
 from exchangelib.protocol import BaseProtocol, CachingProtocol, FaultTolerance
 from exchangelib.version import EXCHANGE_2016, Version
 from requests.adapters import HTTPAdapter
@@ -344,7 +344,8 @@ def test_gateway_breaker_cooldown_single_probe_reset_and_permanent_cap():
     clock.advance(450)
     should_reject = False
     asyncio.run(probe_via_call())
-    assert exchange_calls == 3
+    # Half-open: the gateway probes first (one round trip), then runs the call.
+    assert exchange_calls == 4
     assert gw.auth_status()["rejections"] == 0
     assert gw.auth_status()["permanent"] is False
 
@@ -364,7 +365,7 @@ def test_gateway_breaker_cooldown_single_probe_reset_and_permanent_cap():
             assert gw.auth_status()["permanent"] is True
 
     calls_at_cap = exchange_calls
-    assert calls_at_cap == 6
+    assert calls_at_cap == 7
 
     # Permanently open: never tries again regardless of elapsed time.
     should_reject = False
@@ -390,33 +391,44 @@ def test_gateway_half_open_allows_only_one_concurrent_probe():
     account = MagicMock(name="account")
     gw._account = account
 
-    def slow_reject(_acc):
+    tool_runs = 0
+
+    def reject(_acc):
+        nonlocal exchange_calls, tool_runs
+        exchange_calls += 1
+        tool_runs += 1
+        raise UnauthorizedError("HTTP 401")
+
+    def slow_rejecting_probe():
         nonlocal exchange_calls
         exchange_calls += 1
-        if exchange_calls == 2:
-            entered.set()
-            release.wait(timeout=5)
+        entered.set()
+        release.wait(timeout=5)
         raise UnauthorizedError("HTTP 401")
 
     with pytest.raises(ToolError):
-        asyncio.run(gw.call(slow_reject))
+        asyncio.run(gw.call(reject))
     assert exchange_calls == 1
 
     clock.advance(900)
+    # After the cooldown the next call is half-open: the gateway probes first.
+    account.root.refresh.side_effect = slow_rejecting_probe
 
     async def run_two():
-        t1 = asyncio.create_task(gw.call(slow_reject))
+        t1 = asyncio.create_task(gw.call(reject))
         await asyncio.to_thread(entered.wait, 5)
         # While t1's post-cooldown probe is in flight, t2 must fail fast.
         with pytest.raises(ToolError) as t2_err:
-            await gw.call(slow_reject)
+            await gw.call(reject)
         assert t2_err.value.code == "auth_failed"
         release.set()
         with pytest.raises(ToolError):
             await t1
 
     asyncio.run(run_two())
+    # The first rejection and exactly one probe; the tool function never ran again.
     assert exchange_calls == 2
+    assert tool_runs == 1
 
 
 def test_gateway_locked_out_response_opens_breaker_like_any_rejection(monkeypatch):
@@ -1156,10 +1168,6 @@ def test_connection_manager_arms_warmup_after_tool_401_without_heartbeat_or_sync
 def test_cancelling_half_open_caller_keeps_claim_until_worker_finishes():
     clock = FakeClock()
     gw = EWSGateway(_settings(ews_max_concurrency=2), clock=clock.now)
-    gw._account = SimpleNamespace(
-        root=SimpleNamespace(refresh=lambda: None),
-        protocol=SimpleNamespace(close=lambda: None),
-    )
     policy = RejectingFaultTolerance(
         max_wait=10,
         on_rejection=lambda: gw._breaker.record_rejection(),
@@ -1168,21 +1176,30 @@ def test_cancelling_half_open_caller_keeps_claim_until_worker_finishes():
     release = threading.Event()
     finished = threading.Event()
     probe_runs = 0
+    armed = {"on": False}
 
-    def slow_probe(_acct: Any) -> str:
+    def refresh() -> None:
+        # The gateway's own half-open probe; slow once armed.
         nonlocal probe_runs
+        if not armed["on"]:
+            return None
         probe_runs += 1
         running.set()
         release.wait(timeout=5)
         finished.set()
-        return "ok"
+
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=refresh),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
 
     async def active_worker_cancel() -> None:
         with pytest.raises(ToolError):
             await gw.call(lambda _a: policy.raise_response_errors(_HTTP_401))
         clock.advance(901)
+        armed["on"] = True
 
-        task = asyncio.create_task(gw.call(slow_probe))
+        task = asyncio.create_task(gw.call(lambda _a: "ok"))
         await asyncio.to_thread(running.wait, 5)
         assert gw._breaker._probe_in_flight is True
 
@@ -1190,7 +1207,7 @@ def test_cancelling_half_open_caller_keeps_claim_until_worker_finishes():
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        # Worker thread is still executing slow_probe — claim MUST stay held.
+        # Worker thread is still executing the probe — claim MUST stay held.
         assert gw._breaker._probe_in_flight is True
         with pytest.raises(ToolError) as bc_err:
             gw._breaker.before_call()
@@ -1255,3 +1272,62 @@ def test_cancelling_half_open_caller_keeps_claim_until_worker_finishes():
     finally:
         busy_release.set()
         gw_q._pool.shutdown(wait=True)
+
+
+def test_locked_out_401_with_connection_close_is_a_rejection_not_a_busy_server():
+    """The library checks `Connection: close` before the locked-out body and
+    would report a locked account as ErrorServerBusy, to be retried."""
+    resp = requests.Response()
+    resp.status_code = 401
+    resp._content = b"The referenced account is currently locked out"
+    resp.url = ENDPOINT
+    resp.headers["Connection"] = "close"
+    with pytest.raises(ErrorServerBusy):
+        FaultTolerance(max_wait=60).raise_response_errors(resp)
+
+    recorded = []
+    policy = RejectingFaultTolerance(max_wait=60, on_rejection=lambda: recorded.append(1))
+    with pytest.raises(UnauthorizedError) as exc_info:
+        policy.raise_response_errors(resp)
+    assert "locked out" in str(exc_info.value)
+    assert recorded == [1]
+
+
+def test_half_open_call_without_network_io_cannot_close_the_breaker():
+    """Only an authenticated round trip may reset the count. A half-open call
+    probes first; a function that answers from memory proves nothing."""
+    clock = FakeClock()
+    gw = EWSGateway(_settings(), clock=clock.now)
+    probes = []
+
+    def rejecting_probe() -> None:
+        probes.append(1)
+        raise UnauthorizedError("HTTP 401")
+
+    gw._account = SimpleNamespace(
+        root=SimpleNamespace(refresh=rejecting_probe),
+        protocol=SimpleNamespace(close=lambda: None),
+    )
+    ran = []
+    try:
+        gw._breaker.record_rejection()
+        clock.advance(901)
+        with pytest.raises(ToolError) as err:
+            asyncio.run(gw.call(lambda _a: ran.append(1) or "from memory"))
+        assert err.value.code == "auth_failed"
+        assert probes == [1] and ran == []
+        assert gw.auth_status()["rejections"] == 2
+
+        # Once the probe succeeds the breaker closes and the call runs.
+        gw._account.root.refresh = lambda: probes.append(1)
+        clock.advance(901)
+        assert asyncio.run(gw.call(lambda _a: ran.append(1) or "from memory")) == "from memory"
+        assert gw.auth_status()["rejections"] == 0
+        assert len(probes) == 2 and ran == [1]
+
+        # A closed breaker adds no probe to ordinary calls.
+        asyncio.run(gw.call(lambda _a: "again"))
+        assert len(probes) == 2
+    finally:
+        gw._pool.shutdown(wait=True)
+
