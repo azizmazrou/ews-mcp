@@ -96,6 +96,56 @@ def test_cold_gate_passes_local_tools(tmp_path):
     assert result.get("ran") is True
 
 
+class _AuthFailedManager:
+    state = "auth_failed"
+
+    def __init__(self, *, rejections=1, permanent=False, next_retry_in_s=900):
+        self._rejections = rejections
+        self._permanent = permanent
+        self._next = next_retry_in_s
+
+    def status(self):
+        return {
+            "state": "auth_failed",
+            "attempts": self._rejections,
+            "last_error": "UnauthorizedError: HTTP 401",
+            "last_success_age_s": None,
+            "next_retry_in_s": None if self._permanent else self._next,
+            "auth_rejections": self._rejections,
+            "auth_permanent": self._permanent,
+        }
+
+
+def test_auth_failed_gate_blocks_ews_tools_with_retry_when_permitted(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.manager = _AuthFailedManager(rejections=1, permanent=False, next_retry_in_s=900)
+    result = asyncio.run(dispatch(ctx, _spec(_ok_handler), {}))
+    assert result["ok"] is False
+    err = result["error"]
+    assert err["code"] == "auth_failed"
+    assert err["retry_after_s"] == 900
+    assert "retrying will not help" in err["hint"].lower()
+    assert "restart" in err["hint"].lower()
+
+
+def test_auth_failed_gate_omits_retry_after_when_permanent(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.manager = _AuthFailedManager(rejections=3, permanent=True, next_retry_in_s=None)
+    result = asyncio.run(dispatch(ctx, _spec(_ok_handler), {}))
+    assert result["ok"] is False
+    err = result["error"]
+    assert err["code"] == "auth_failed"
+    assert "retry_after_s" not in err
+    assert "retrying will not help" in err["hint"].lower()
+
+
+def test_auth_failed_gate_passes_local_tools(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.manager = _AuthFailedManager(rejections=3, permanent=True)
+    result = asyncio.run(dispatch(ctx, _spec(_ok_handler, requires_ews=False), {}))
+    assert result.get("ran") is True
+
+
 # --- two-phase confirm -------------------------------------------------------
 
 
@@ -182,6 +232,27 @@ def test_exception_mapping_throttled(tmp_path):
     result = asyncio.run(dispatch(ctx, _spec(boom), {}))
     assert result["error"]["code"] == "throttled"
     assert result["error"]["retry_after_s"]
+
+
+def test_exception_mapping_unauthorized_beats_throttling_and_avoids_401_false_positives():
+    from exchangelib.errors import UnauthorizedError
+    from ewsmcp.errors import map_exception
+
+    # UnauthorizedError wins even if message text contains throttling keywords.
+    auth_err = map_exception(UnauthorizedError("server busy back off ratelimit"))
+    assert auth_err.code == "auth_failed"
+    assert auth_err.hint is not None
+    assert "retrying will not help" in auth_err.hint.lower()
+
+    # Messages that merely contain digits "401" must NOT map to auth_failed.
+    assert map_exception(RuntimeError("failed on item 401 in batch")).code == "upstream_error"
+    assert map_exception(RuntimeError("id AAMk401xyz corrupted")).code == "upstream_error"
+    assert map_exception(ConnectionError("timed out after 4010 ms")).code == "upstream_unavailable"
+
+    class ErrorItemNotFound(Exception):
+        pass
+
+    assert map_exception(ErrorItemNotFound("item 401 missing")).code == "not_found"
 
 
 def test_circuit_opens_after_threshold(tmp_path):

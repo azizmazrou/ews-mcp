@@ -147,15 +147,20 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
   fall back to live EWS transparently. Arabic searches match across
   orthographic variants (alef/hamza forms, teh marbuta, diacritics,
   Arabic-Indic digits).
-- **Never-exit boot.** Transports bind before any Exchange contact;
-  `/livez` is up immediately, `/readyz` reports the warmup honestly, and
-  the connection manager owns recovery.
+- **Never-exit boot, lockout-safe auth.** Transports bind before any
+  Exchange contact; `/livez` is up immediately, `/readyz` reports the
+  warmup honestly, and the connection manager owns recovery. If Exchange
+  answers HTTP 401, `RejectingFaultTolerance` aborts on the first response
+  and the gateway's authentication circuit breaker enforces a 15-minute
+  cooldown and a 3-rejection process cap (`state="auth_failed"`) so a
+  wrong password never loops into a directory account lockout.
 
 ## Configuration (env)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `EWS_SERVER_URL` / `EWS_EMAIL` / `EWS_USERNAME` / `EWS_PASSWORD` | — | Exchange endpoint + credentials (auth auto-negotiation; never pinned) |
+| `EWS_SERVER_URL` / `EWS_EMAIL` / `EWS_USERNAME` / `EWS_PASSWORD` | — | Exchange endpoint + credentials (auth auto-negotiation; blank `EWS_AUTH_TYPE_FORCE` is unset) |
+| `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` / `EWS_AUTH_MAX_REJECTIONS` | `900` / `3` | Lockout guard on HTTP 401 rejections: cooldown between probes (min `60`) and permanent per-process cap (`1`–`10`); values outside fail startup validation |
 | `EWS_CAPABILITY_TIER` | `draft` | `read` ⊂ `draft` ⊂ `full` — above-tier tools are unregistered AND refused |
 | `SEND_ENABLED` | `false` | Global send kill-switch (blocks every send-class tool) |
 | `EWS_RECIPIENT_ALLOWLIST` / `EWS_RECIPIENT_DENYLIST` | — | Glob lists enforced on argument-borne AND draft-resolved recipients |
@@ -192,7 +197,7 @@ send_draft(draft_id="d1", confirm_token="…")
 ## Health & operations
 
 `GET /livez` (process up), `GET /readyz` (connection state, honest 503
-while warming), `GET /health` (tool count), `GET /metrics` (Prometheus,
+while warming or `auth_failed` when credentials are rejected), `GET /health` (tool count), `GET /metrics` (Prometheus,
 bearer-authenticated), `get_server_status` tool (connection, tier,
 kill-switch, cache watermarks, sync status — works while cold and over
 stdio too). Audit chain:

@@ -21,7 +21,17 @@ together with the pins, never the pins alone.
 import inspect
 
 import pytest
-from exchangelib import Account, CalendarItem, EWSDateTime, Message, OofSettings
+from exchangelib import (
+    BASIC,
+    Account,
+    CalendarItem,
+    Configuration,
+    Credentials,
+    EWSDateTime,
+    Message,
+    OofSettings,
+)
+from exchangelib.errors import ErrorServerBusy, UnauthorizedError
 from exchangelib.fields import IntegerField
 from exchangelib.folders import Folder
 from exchangelib.folders.collections import FolderCollection
@@ -31,6 +41,8 @@ from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
 from exchangelib.version import EXCHANGE_2016, Version
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+from ewsmcp.gateway.client import RejectingFaultTolerance
 
 
 def _params(func):
@@ -79,6 +91,7 @@ PINS = {
     Folder.refresh: ["self"],
     # --- reliability (gateway)
     FaultTolerance.__init__: ["self", "max_wait"],
+    FaultTolerance.raise_response_errors: ["self", "response"],
 }
 
 
@@ -198,3 +211,41 @@ def test_ewsdatetime_from_datetime_pin():
     assert callable(getattr(EWSDateTime, "from_datetime", None))
     assert _params(EWSDateTime.from_datetime) == ["d"]
 
+
+
+def test_unauthorized_error_exists_and_policy_override_matches_base():
+    """RejectingFaultTolerance depends on exchangelib.errors.UnauthorizedError
+    being a real exception distinct from ErrorServerBusy, and on overriding
+    FaultTolerance.raise_response_errors(self, response) with matching params."""
+    assert issubclass(UnauthorizedError, Exception)
+    assert not issubclass(UnauthorizedError, ErrorServerBusy)
+    assert issubclass(RejectingFaultTolerance, FaultTolerance)
+    assert _params(RejectingFaultTolerance.raise_response_errors) == [
+        "self", "response"
+    ]
+
+
+def test_cached_protocol_retry_policy_is_replaceable_via_protocol_config():
+    """CachingProtocol hands back one Protocol per (service_endpoint, credentials),
+    and Protocol.retry_policy reads protocol.config.retry_policy. _build_account
+    relies on both when a cached Protocol carries an earlier gateway's policy.
+    An explicit auth type and version keep this off the network."""
+    CachingProtocol.clear_cache()
+    try:
+        creds = Credentials("svc", "secret")
+        endpoint = "https://ews.example.com/EWS/Exchange.asmx"
+        version = Version(build=EXCHANGE_2016)
+        p1 = RejectingFaultTolerance(max_wait=60)
+        p2 = RejectingFaultTolerance(max_wait=120)
+        proto1 = Protocol(config=Configuration(
+            service_endpoint=endpoint, credentials=creds, auth_type=BASIC,
+            version=version, retry_policy=p1))
+        proto2 = Protocol(config=Configuration(
+            service_endpoint=endpoint, credentials=creds, auth_type=BASIC,
+            version=version, retry_policy=p2))
+        assert proto2 is proto1
+        assert proto2.retry_policy is p1
+        proto2.config.retry_policy = p2
+        assert proto1.retry_policy is p2
+    finally:
+        CachingProtocol.clear_cache()

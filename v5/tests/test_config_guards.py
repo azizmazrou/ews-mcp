@@ -7,6 +7,7 @@ hatch.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from conftest import make_settings
 
@@ -49,3 +50,56 @@ def test_attachment_settings_defaults_and_bounds():
     for out_of_range in (0, -1, 51, 100):
         with pytest.raises(Exception):
             make_settings(ews_max_attachment_mb=out_of_range)
+
+
+def test_empty_and_whitespace_auth_type_force_loads_as_unset(monkeypatch):
+    monkeypatch.setenv("EWS_AUTH_TYPE_FORCE", "")
+    assert make_settings().ews_auth_type_force is None
+    monkeypatch.setenv("EWS_AUTH_TYPE_FORCE", "   \t  ")
+    assert make_settings().ews_auth_type_force is None
+    assert make_settings(ews_auth_type_force="").ews_auth_type_force is None
+    assert make_settings(ews_auth_type_force="  ").ews_auth_type_force is None
+    assert make_settings(ews_auth_type_force=" NTLM ").ews_auth_type_force == "ntlm"
+    with pytest.raises(Exception):
+        make_settings(ews_auth_type_force="kerberos")
+
+
+def test_auth_breaker_setting_defaults():
+    s = make_settings()
+    assert s.ews_auth_failure_cooldown_seconds == 900
+    assert s.ews_auth_max_rejections == 3
+
+
+@pytest.mark.parametrize("valid", [60, 900, 3600])
+def test_auth_failure_cooldown_seconds_accepts_at_or_above_60(monkeypatch, valid):
+    assert (
+        make_settings(ews_auth_failure_cooldown_seconds=valid).ews_auth_failure_cooldown_seconds
+        == valid
+    )
+    monkeypatch.setenv("EWS_AUTH_FAILURE_COOLDOWN_SECONDS", str(valid))
+    assert make_settings().ews_auth_failure_cooldown_seconds == valid
+
+
+@pytest.mark.parametrize("invalid", [-60, -1, 0, 1, 59])
+def test_auth_failure_cooldown_seconds_rejects_below_60(monkeypatch, invalid):
+    with pytest.raises(ValidationError):
+        make_settings(ews_auth_failure_cooldown_seconds=invalid)
+    monkeypatch.setenv("EWS_AUTH_FAILURE_COOLDOWN_SECONDS", str(invalid))
+    with pytest.raises(ValidationError):
+        make_settings()
+
+
+@pytest.mark.parametrize("valid", [1, 3, 10])
+def test_auth_max_rejections_accepts_1_to_10(monkeypatch, valid):
+    assert make_settings(ews_auth_max_rejections=valid).ews_auth_max_rejections == valid
+    monkeypatch.setenv("EWS_AUTH_MAX_REJECTIONS", str(valid))
+    assert make_settings().ews_auth_max_rejections == valid
+
+
+@pytest.mark.parametrize("invalid", [-1, 0, 11, 100])
+def test_auth_max_rejections_rejects_outside_1_to_10(monkeypatch, invalid):
+    with pytest.raises(ValidationError):
+        make_settings(ews_auth_max_rejections=invalid)
+    monkeypatch.setenv("EWS_AUTH_MAX_REJECTIONS", str(invalid))
+    with pytest.raises(ValidationError):
+        make_settings()
