@@ -73,6 +73,9 @@ class _FakeGateway:
     def resolve_folder(self, account, ref, aliaser):
         return self.account.inbox
 
+    def mail_folders(self, account):
+        return self.account.mail_folders
+
 
 def _msg(raw_id, subject="Subj", sender="ahmed@corp.example", *, sender_name=None,
          dt=None, is_read=True, has_attachments=False, text_body="",
@@ -133,6 +136,55 @@ def test_pack_exports_seven_read_specs():
 
 
 # --- search_messages -----------------------------------------------------------
+
+
+def _whole_mailbox(tmp_path, folders):
+    account = _account()
+    account.mail_folders = list(folders.items())
+    return _ctx(tmp_path, account)
+
+
+def test_search_whole_mailbox_merges_folders_newest_first(tmp_path):
+    inbox = _Query([_msg("A=", subject="older", dt=datetime(2026, 6, 1, tzinfo=TZ))])
+    archive = _Query([_msg("B=", subject="newest", dt=datetime(2026, 6, 9, tzinfo=TZ)),
+                      _msg("C=", subject="oldest", dt=datetime(2026, 5, 1, tzinfo=TZ))])
+    ctx = _whole_mailbox(tmp_path, {"Inbox": inbox, "Inbox/Archive": archive})
+    res = _run(ctx, "search_messages", folder="f:all", query="from:ahmed")
+    assert [i["subject"] for i in res["items"]] == ["newest", "older", "oldest"]
+    assert [i["folder"] for i in res["items"]] == ["Inbox/Archive", "Inbox", "Inbox/Archive"]
+    assert res["total_available"] == 3 and res["next_offset"] is None
+    assert res["folders_searched"] == 2 and "folders_failed" not in res
+    assert inbox.filter_calls == [(("from:ahmed",), {})]
+
+
+def test_search_whole_mailbox_pages_over_the_merged_list(tmp_path):
+    days = [datetime(2026, 6, d, tzinfo=TZ) for d in range(1, 7)]
+    one = _Query([_msg(f"A{d.day}=", subject=str(d.day), dt=d) for d in reversed(days[::2])])
+    two = _Query([_msg(f"B{d.day}=", subject=str(d.day), dt=d) for d in reversed(days[1::2])])
+    ctx = _whole_mailbox(tmp_path, {"One": one, "Two": two})
+    first = _run(ctx, "search_messages", folder="f:all", subject="x", limit=2)
+    assert [i["subject"] for i in first["items"]] == ["6", "5"]
+    assert first["next_offset"] == 2 and first["total_available"] is None
+    second = _run(ctx, "search_messages", folder="f:all", subject="x", limit=2, offset=2)
+    assert [i["subject"] for i in second["items"]] == ["4", "3"]
+    assert second["next_offset"] == 4
+
+
+def test_search_whole_mailbox_reports_a_failed_folder(tmp_path):
+    broken = MagicMock(name="broken")
+    broken.filter.side_effect = RuntimeError("no access")
+    ctx = _whole_mailbox(tmp_path, {"Inbox": _Query([_msg("A=")]), "Secret": broken})
+    res = _run(ctx, "search_messages", folder="f:all", subject="x")
+    assert res["count"] == 1 and res["total_available"] is None
+    assert res["folders_failed"] == ["Secret"] and res["folders_searched"] == 1
+
+
+def test_search_whole_mailbox_fails_if_every_folder_fails(tmp_path):
+    broken = MagicMock(name="broken")
+    broken.filter.side_effect = RuntimeError("no access")
+    ctx = _whole_mailbox(tmp_path, {"Secret": broken})
+    res = _run(ctx, "search_messages", folder="f:all", subject="x")
+    assert res["ok"] is False
 
 
 def test_search_envelope_alias_ids_and_clean_snippet(tmp_path):

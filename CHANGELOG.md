@@ -54,6 +54,11 @@
   call and returns which values have matching messages and which are
   missing, instead of one `search_messages` call per value. 29 tools
   total (was 28).
+### Added
+- `v5`: `search_messages` accepts `folder: f:all` for the whole mailbox: one
+  search per mail folder with subfolders, merged newest first, without deleted
+  items, junk, drafts and outbox. Each hit names its folder, and the result
+  reports `folders_searched` and any `folders_failed`.
 
 ### Documentation
 - Repository-wide revamp: the root README is now a single front door
