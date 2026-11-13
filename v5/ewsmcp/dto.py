@@ -70,8 +70,15 @@ _PKCS7_OID_SIGNED = bytes.fromhex("06092a864886f70d010702")
 _PKCS7_OID_ENVELOPED = bytes.fromhex("06092a864886f70d010703")
 
 
+def is_pkcs7_candidate(name: Optional[str], content_type: Optional[str]) -> bool:
+    """True when filename or MIME type marks a PKCS#7 S/MIME attachment."""
+    ct = (content_type or "").lower()
+    nm = (name or "").lower()
+    return "pkcs7-mime" in ct or nm.endswith(".p7m")
+
+
 def sniff_smime_type(name: Optional[str], content_type: Optional[str],
-                      content: Any) -> Optional[str]:
+                     content: Any) -> Optional[str]:
     """Best-effort PKCS#7 content-type sniff for smime.p7m attachments.
 
     application/pkcs7-mime names BOTH signed (opaque-signing) and encrypted
@@ -80,9 +87,7 @@ def sniff_smime_type(name: Optional[str], content_type: Optional[str],
     ContentInfo.contentType OID at the start of the structure. Returns
     "signed" / "enveloped" / None (not a p7m, or bytes unavailable).
     """
-    ct = (content_type or "").lower()
-    nm = (name or "").lower()
-    if "pkcs7-mime" not in ct and not nm.endswith(".p7m"):
+    if not is_pkcs7_candidate(name, content_type):
         return None
     if not isinstance(content, (bytes, bytearray)):
         return None
@@ -127,8 +132,13 @@ def msg_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
 
 
 def msg_full(item: Any, aliaser: IdAliaser, tz: str, body_max_chars: int,
-             include_html: bool = False) -> Dict[str, Any]:
-    """MsgFull: card + cleaned body + recipients + attachment inventory."""
+             include_html: bool = False,
+             smime_types: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
+    """MsgFull: card + cleaned body + recipients + attachment inventory.
+
+    Never touches ``att.content`` (a lazy EWS GetAttachment property); any
+    ``smime_type`` hints are pre-sniffed inside the gateway worker.
+    """
     full = msg_card(item, aliaser, tz)
     full["to"] = _emails(getattr(item, "to_recipients", None))
     cc = _emails(getattr(item, "cc_recipients", None))
@@ -156,14 +166,14 @@ def msg_full(item: Any, aliaser: IdAliaser, tz: str, body_max_chars: int,
     for i, att in enumerate(getattr(item, "attachments", None) or []):
         name = getattr(att, "name", f"attachment-{i}")
         content_type = getattr(att, "content_type", None)
-        entry = {
+        entry: Dict[str, Any] = {
             "idx": i,
             "name": name,
             "size_bytes": getattr(att, "size", None),
             "content_type": content_type,
         }
-        smime_type = sniff_smime_type(name, content_type, getattr(att, "content", None))
-        if smime_type:
+        smime_type = (smime_types or {}).get(i)
+        if smime_type and is_pkcs7_candidate(name, content_type):
             entry["smime_type"] = smime_type
         attachments.append(entry)
     if attachments:

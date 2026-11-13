@@ -570,3 +570,79 @@ def test_get_event_reports_the_reminder(tmp_path):
 
     assert get(event(True))["reminder_minutes"] == 15
     assert get(event(False))["reminder_minutes"] is None
+
+
+def test_check_availability_passes_ewstimezone_for_named_zone_and_fixed_offset(tmp_path):
+    from exchangelib import EWSTimeZone
+
+    account_named = MagicMock()
+    account_named.protocol.get_free_busy_info.return_value = iter([
+        SimpleNamespace(calendar_events=[]),
+    ])
+    ctx_named = _ctx(tmp_path / "named", account_named, ews_tz="Europe/Berlin")
+    res_named = _run(ctx_named, "check_availability", {
+        "attendees": ["ops@example.com"],
+        "start": "2026-06-15T09:00",
+        "end": "2026-06-15T11:00",
+    })
+    assert res_named["ok"] is True
+    kw_named = account_named.protocol.get_free_busy_info.call_args.kwargs
+    assert isinstance(kw_named["start"].tzinfo, EWSTimeZone)
+    assert isinstance(kw_named["end"].tzinfo, EWSTimeZone)
+    assert kw_named["start"].tzinfo.ms_id
+    assert (kw_named["start"].hour, kw_named["end"].hour) == (9, 11)
+
+    account_fixed = MagicMock()
+    account_fixed.protocol.get_free_busy_info.return_value = iter([
+        SimpleNamespace(calendar_events=[]),
+    ])
+    ctx_fixed = _ctx(tmp_path / "fixed", account_fixed, ews_tz="Asia/Tokyo")
+    res_fixed = _run(ctx_fixed, "check_availability", {
+        "attendees": ["ops@example.com"],
+        "start": "2026-06-15T01:00+01:00",
+        "end": "2026-06-15T03:00+01:00",
+    })
+    assert res_fixed["ok"] is True
+    kw_fixed = account_fixed.protocol.get_free_busy_info.call_args.kwargs
+    assert isinstance(kw_fixed["start"].tzinfo, EWSTimeZone)
+    assert isinstance(kw_fixed["end"].tzinfo, EWSTimeZone)
+    assert kw_fixed["start"].tzinfo.ms_id
+    assert (kw_fixed["start"].hour, kw_fixed["end"].hour) == (9, 11)
+
+
+@pytest.mark.parametrize("tz_name, expected_offset", [
+    ("Asia/Tokyo", "+09:00"),
+    ("America/New_York", "-04:00"),
+])
+def test_check_availability_treats_naive_busy_events_as_requested_zone(
+    tmp_path, tz_name, expected_offset,
+):
+    # Free/busy CalendarEvent boundaries arrive naive from exchangelib; testing
+    # two distant zones guarantees at least one differs from any host timezone.
+    naive_busy = SimpleNamespace(
+        start=datetime(2026, 6, 15, 9, 0),
+        end=datetime(2026, 6, 15, 10, 0),
+        busy_type="Busy",
+    )
+    assert naive_busy.start.tzinfo is None
+    account = MagicMock()
+    account.protocol.get_free_busy_info.return_value = iter([
+        SimpleNamespace(calendar_events=[naive_busy]),
+    ])
+    ctx = _ctx(tmp_path, account, ews_tz=tz_name)
+    res = _run(ctx, "check_availability", {
+        "attendees": ["ops@example.com"],
+        "start": "2026-06-15T09:00",
+        "end": "2026-06-15T10:30",
+    })
+    assert res["ok"] is True
+    assert res["per_attendee"]["ops@example.com"] == [{
+        "start": f"2026-06-15T09:00{expected_offset}",
+        "end": f"2026-06-15T10:00{expected_offset}",
+        "status": "Busy",
+    }]
+    assert res["slots"] == [{
+        "start": f"2026-06-15T10:00{expected_offset}",
+        "end": f"2026-06-15T10:30{expected_offset}",
+    }]
+

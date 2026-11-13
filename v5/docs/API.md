@@ -78,9 +78,9 @@ Search mail. TWO ENGINES, mutually exclusive: pass `query` (an Exchange AQS stri
 | `until` | string | no | Window end: 'today', '+Nd', YYYY-MM-DD, or ISO datetime (server timezone). |
 | `is_unread` | boolean | no |  |
 | `has_attachments` | boolean | no |  |
-| `categories` | array | no | Match messages carrying ALL of these Outlook categories (exact names, e.g. ['Q1']). Cannot combine with `query`. |
-| `recursive` | boolean | no | Search `folder` AND every folder under it, in one request (via exchangelib's FolderCollection - not a per-folder loop). Use this instead of discovering subfolders and calling search_messages once per folder, which doesn't scale for a mailbox with many subfolders. Combines with `query` OR the structured filters. Always forces a live read (fresh=true) - the local mirror only tracks a fixed set of synced folders, not arbitrary subtrees. CAVEAT: total_available is always null for a recursive search - counting across multiple folders is unreliable in the underlying library, so this only returns individual items (each still correct), never a trustworthy total. Do not rely on total_available when recursive=true. (default `False`) |
-| `flag_complete` | boolean | no | true: only messages whose follow-up flag is marked Complete. false: only messages that are NOT marked Complete (covers both unflagged and still-open-flagged messages). Cannot combine with `query`. Always forces a live read (fresh=true) - the local mirror doesn't track this field. |
+| `categories` | array | no | Match messages carrying all listed Outlook categories (exact names). Cannot combine with `query`. |
+| `recursive` | boolean | no | Search `folder` and all mail folders under it, merged newest first; each card carries `folder` and the result reports `folders_searched`. Always runs live. (default `False`) |
+| `flag_complete` | boolean | no | true matches messages whose follow-up flag is marked Complete; false matches all other messages (unflagged or still-open flag). Always runs live and cannot combine with `query`. |
 | `offset` | integer | no | (default `0`) |
 | `limit` | integer | no | (default `20`) |
 | `mode` | string | no | semantic = hybrid FTS + vector retrieval (only when the semantic tier is enabled; requires `query`; other filters ignored). (one of: `keyword`, `semantic`; default `keyword`) |
@@ -92,16 +92,17 @@ Check a whole list of values against one mail folder in one call: which values o
 
 | parameter | type | required | description |
 |---|---|---|---|
-| `values` | string | yes | Values separated by commas or new lines; a JSON array of strings is accepted too. At most 200. |
+| `values` | string/array | yes | Values separated by commas or new lines, or an array of strings (a JSON array string is accepted too). At most 200. |
 | `field` | string | no | Where to look for each value (default subject). (one of: `subject`, `sender`) |
 | `folder` | string | no | Folder alias, e.g. f:inbox (default) or f:sent. |
 | `since` | string | no | Received at or after (ISO date). |
 | `until` | string | no | Received at or before (ISO date). |
 | `only_missing` | boolean | no | Return only the values without a match. |
+| `fresh` | boolean | no | true forces a live Exchange read instead of the local mirror (responses are stamped source=cache\|live). (default `False`) |
 
 #### `get_message` — read (min tier: read)
 
-Fetch one message by id (short alias from search results, e.g. m12; raw EWS ids also work). format='full' (default) returns recipients, the cleaned body (quoted history stripped — use get_thread for the conversation) and the attachment inventory; format='concise' returns the compact card. A not_found means the id went stale (items move) — re-run search_messages and retry with a fresh id.
+Fetch one message by id (short alias from search results, e.g. m12; raw EWS ids also work). format='full' (default) returns recipients, the cleaned body (quoted history stripped — use get_thread for the conversation) and the attachment inventory; format='concise' returns the compact card. `flag_complete` is only reported when read live, i.e. with fresh=true. A not_found means the id went stale (items move) — re-run search_messages and retry with a fresh id.
 
 | parameter | type | required | description |
 |---|---|---|---|

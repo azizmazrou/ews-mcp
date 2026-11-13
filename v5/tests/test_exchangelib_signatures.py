@@ -156,3 +156,23 @@ def test_protocol_cache_is_evictable():
     fresh session + auth negotiation; closing the protocol alone hands
     the same wedged instance back on the next build."""
     assert callable(getattr(CachingProtocol, "clear_cache", None))
+
+
+def test_flag_status_extended_property_pin():
+    """flag_property relies on Message.register and ExtendedProperty's
+    property_tag and property_type attributes."""
+    from exchangelib.extended_properties import ExtendedProperty
+    from ewsmcp.flag_property import FlagStatus, ensure_registered
+
+    assert callable(getattr(Message, "register", None))
+    assert callable(getattr(Message, "deregister", None))
+    assert _params(Message.register) == ["attr_name", "attr_cls"]
+    assert hasattr(ExtendedProperty, "property_tag")
+    assert hasattr(ExtendedProperty, "property_type")
+    assert issubclass(FlagStatus, ExtendedProperty)
+    assert FlagStatus.property_tag == 0x1090
+    assert FlagStatus.property_type == "Integer"
+    ensure_registered()
+    ensure_registered()
+    assert [f.name for f in Message.FIELDS].count("flag_status") == 1
+
