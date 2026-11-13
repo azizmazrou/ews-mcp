@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from exchangelib import FolderCollection
+
 from ..bodyclean import clean_body
 from ..dates import parse_when
 from ..dto import envelope, event_card, fmt_dt, msg_card, msg_full, sniff_smime_type
@@ -534,9 +536,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
             # discovering subfolders and issuing one search_messages call
             # per folder from the CALLER's side, doesn't scale: a mailbox
             # with ~100 inbox subfolders turns one Qx-style "count per
-            # category" refresh into ~900 separate tool calls. Local import:
-            # this is the only place in the tool pack that needs it.
-            from exchangelib import FolderCollection
+            # category" refresh into ~900 separate tool calls.
             scope = FolderCollection(account=account, folders=[target, *target.walk()])
         else:
             scope = target

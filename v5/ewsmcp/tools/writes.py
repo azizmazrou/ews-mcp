@@ -59,13 +59,12 @@ from exchangelib.recurrence import (
     WeeklyPattern,
 )
 
-from ..flag_property import ensure_registered as ensure_flag_status_registered
-
-ensure_flag_status_registered()
-
 from ..dates import parse_when
 from ..errors import ToolError, map_exception
+from ..flag_property import ensure_registered as ensure_flag_status_registered
 from .base import Context, ToolSpec
+
+ensure_flag_status_registered()
 
 logger = logging.getLogger(__name__)
 
