@@ -46,10 +46,15 @@ CALENDAR_WINDOW_DAYS = 14
 CALENDAR_MAX_ITEMS = 200
 
 
-def _ts(dt: Any, tz: Optional[str] = None) -> Optional[int]:
+def _ts(dt: Any, tz: Optional[str] = None, *, is_end: bool = False) -> Optional[int]:
     if isinstance(dt, date) and not isinstance(dt, datetime) and tz:
-        # All-day calendar items carry a date; it starts at midnight in tz.
-        dt = datetime.combine(dt, dtime(), ZoneInfo(tz))
+        # All-day calendar items carry a date; start is midnight of that day,
+        # while exchangelib reports end as the inclusive last date (so the
+        # exclusive upper bound is midnight at the start of the next day).
+        base = date(dt.year, dt.month, dt.day)
+        if is_end:
+            base = base + timedelta(days=1)
+        dt = datetime.combine(base, dtime(), ZoneInfo(tz))
     try:
         return int(dt.timestamp())
     except (AttributeError, OSError, OverflowError, ValueError, TypeError):
@@ -108,7 +113,7 @@ def row_from_event(item: Any, tz: str) -> Dict[str, Any]:
         "subject": getattr(item, "subject", "") or "",
         "start_ts": _ts(getattr(item, "start", None), tz),
         "start_iso": fmt_dt(getattr(item, "start", None), tz),
-        "end_ts": _ts(getattr(item, "end", None), tz),
+        "end_ts": _ts(getattr(item, "end", None), tz, is_end=True),
         "end_iso": fmt_dt(getattr(item, "end", None), tz),
         "location": str(getattr(item, "location", None) or "") or None,
         "organizer": getattr(organizer, "email_address", None),

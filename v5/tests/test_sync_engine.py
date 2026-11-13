@@ -6,9 +6,10 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from conftest import FIXED_OFFSET_TZ, make_settings
+from exchangelib import EWSDate
 
 from ewsmcp.cache.store import CacheStore
-from ewsmcp.cache.sync import SyncEngine, row_from_message
+from ewsmcp.cache.sync import SyncEngine, row_from_event, row_from_message
 
 TZ = ZoneInfo(FIXED_OFFSET_TZ)
 NOW = datetime(2026, 7, 10, 9, 0, tzinfo=TZ)
@@ -184,3 +185,77 @@ def test_slow_lane_syncs_folders_calendar_tasks(tmp_path):
     rows, total = store.task_rows()
     assert total == 1
     assert store.get_sync_state("item:tasks") == "TT-1"
+
+
+def test_all_day_one_day_and_three_day_events_appear_on_every_covered_day(tmp_path):
+    one_day = SimpleNamespace(
+        id="EV-1D",
+        changekey="CK-1",
+        subject="Company holiday",
+        start=EWSDate(2026, 7, 10),
+        end=EWSDate(2026, 7, 10),
+        location=None,
+        organizer=None,
+        is_recurring=False,
+        recurrence=None,
+        my_response_type=None,
+    )
+    three_day = SimpleNamespace(
+        id="EV-3D",
+        changekey="CK-3",
+        subject="Annual summit",
+        start=EWSDate(2026, 7, 10),
+        end=EWSDate(2026, 7, 12),
+        location=None,
+        organizer=None,
+        is_recurring=False,
+        recurrence=None,
+        my_response_type=None,
+    )
+    timed = SimpleNamespace(
+        id="EV-TIMED",
+        changekey="CK-T",
+        subject="Morning check-in",
+        start=datetime(2026, 7, 10, 9, 0, tzinfo=TZ),
+        end=datetime(2026, 7, 10, 9, 30, tzinfo=TZ),
+        location=None,
+        organizer=None,
+        is_recurring=False,
+        recurrence=None,
+        my_response_type=None,
+    )
+
+    row_1d = row_from_event(one_day, FIXED_OFFSET_TZ)
+    row_3d = row_from_event(three_day, FIXED_OFFSET_TZ)
+    row_timed = row_from_event(timed, FIXED_OFFSET_TZ)
+
+    # end_iso keeps the date Exchange reported, while end_ts advances to next-day midnight.
+    assert row_1d["start_iso"] == "2026-07-10"
+    assert row_1d["end_iso"] == "2026-07-10"
+    assert row_1d["end_ts"] - row_1d["start_ts"] == 86400
+
+    assert row_3d["start_iso"] == "2026-07-10"
+    assert row_3d["end_iso"] == "2026-07-12"
+    assert row_3d["end_ts"] - row_3d["start_ts"] == 3 * 86400
+
+    assert row_timed["end_ts"] - row_timed["start_ts"] == 1800
+
+    store = CacheStore(tmp_path / "mirror.db")
+    try:
+        store.replace_events([row_1d, row_3d])
+
+        def subjects_on(day_num):
+            day_start = datetime(2026, 7, day_num, 0, 0, tzinfo=TZ)
+            day_end = day_start + timedelta(days=1)
+            rows = store.events_window(
+                int(day_start.timestamp()), int(day_end.timestamp()), limit=10,
+            )
+            return [r["subject"] for r in rows]
+
+        assert subjects_on(9) == []
+        assert set(subjects_on(10)) == {"Company holiday", "Annual summit"}
+        assert subjects_on(11) == ["Annual summit"]
+        assert subjects_on(12) == ["Annual summit"]
+        assert subjects_on(13) == []
+    finally:
+        store.close()

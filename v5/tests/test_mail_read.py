@@ -21,6 +21,7 @@ from ewsmcp import dto
 from ewsmcp.audit import AuditLog
 from ewsmcp.cache.store import CacheStore
 from ewsmcp.errors import ToolError
+from ewsmcp.gateway.client import EWSGateway
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import mail_read
 from ewsmcp.tools.base import Context, dispatch
@@ -899,20 +900,21 @@ def test_list_folders_depth_and_include_empty(tmp_path):
     assert [row["name"] for row in res["items"]] == ["Inbox"]
 
 
-def test_check_messages_whole_word_and_missing(monkeypatch):
-    subjects = ["Review RFP-123 draft", "RFP-12 signed", "Lunch"]
-
-    async def fake_search(ctx, subject=None, **kwargs):
-        cards = [{"id": f"m{i}", "subject": s, "from": "a@b", "date": "2026-01-01"}
-                 for i, s in enumerate(subjects) if subject.lower() in s.lower()]
-        return {"ok": True, "items": cards, "count": len(cards)}
-
-    monkeypatch.setattr(mail_read, "_search_messages", fake_search)
-    out = asyncio.run(mail_read._check_messages(None, "RFP-12\nrfp-12, Budget"))
+def test_check_messages_whole_word_and_missing(tmp_path):
+    inbox = _Query([
+        _neutral_msg("RAW-0=", "Review RFP-123 draft"),
+        _neutral_msg("RAW-1=", "RFP-12 signed"),
+        _neutral_msg("RAW-2=", "Lunch"),
+    ])
+    ctx = _ctx(tmp_path, _account(inbox=inbox))
+    out = _run(ctx, "check_messages", values="RFP-12\nrfp-12, Budget")
+    assert out["ok"] is True
     assert out["values_checked"] == 2
     assert out["missing"] == ["Budget"]
-    assert [c["id"] for c in out["found"]["RFP-12"]] == ["m1"]
-    only = asyncio.run(mail_read._check_messages(None, '["Budget", "Lunch"]', only_missing=True))
+    assert [c["subject"] for c in out["found"]["RFP-12"]] == ["RFP-12 signed"]
+    assert out["found"]["RFP-12"][0]["id"].startswith("m")
+    only = _run(ctx, "check_messages", values='["Budget", "Lunch"]', only_missing=True)
+    assert only["ok"] is True
     assert only["missing"] == ["Budget"] and "found" not in only
 
 
@@ -1219,44 +1221,401 @@ def test_search_fanout_propagates_cancelled_and_fails_on_throttle(tmp_path):
     assert "folders_failed" not in res
 
 
-def test_search_fanout_applies_sender_filter_before_slicing(tmp_path):
-    inbox = _Query([
-        _msg("N6=", subject="other-6", sender="noise@example.com",
-             sender_name="Noise", dt=datetime(2026, 6, 6, tzinfo=TZ),
-             message_id="<N6@example.com>"),
-        _msg("T4=", subject="target-4", sender="ally@example.com",
-             sender_name="Ally", dt=datetime(2026, 6, 4, tzinfo=TZ),
-             message_id="<T4@example.com>"),
-    ])
-    sent = _Query([
-        _msg("N5=", subject="other-5", sender="noise@example.com",
-             sender_name="Noise", dt=datetime(2026, 6, 5, tzinfo=TZ),
-             message_id="<N5@example.com>"),
-        _msg("T3=", subject="target-3", sender="ally@example.com",
-             sender_name="Ally", dt=datetime(2026, 6, 3, tzinfo=TZ),
-             message_id="<T3@example.com>"),
-    ])
-    ctx_two = _whole_mailbox(tmp_path / "two", {"Inbox": inbox, "Sent": sent})
-    res = _run(ctx_two, "search_messages", folder="f:all",
-               sender="ally@example.com", limit=2)
-    assert res["ok"] is True
-    assert [i["subject"] for i in res["items"]] == ["target-4", "target-3"]
-    assert res["total_available"] is None
-    assert res["next_offset"] is None  # all matches returned, no folder truncated
-
-    archive = _Query([
-        _msg("T1=", subject="target-1", sender="ally@example.com",
-             sender_name="Ally", dt=datetime(2026, 6, 1, tzinfo=TZ),
-             message_id="<T1@example.com>"),
-    ])
-    ctx_three = _whole_mailbox(
-        tmp_path / "three", {"Inbox": inbox, "Sent": sent, "Archive": archive},
+def test_search_fanout_slices_page_before_sender_filter_and_matches_single_folder(tmp_path):
+    props = SPECS["search_messages"].input_schema["properties"]
+    assert (
+        "matched within each page; keep paging while next_offset is set"
+        in props["sender"]["description"]
     )
-    p1 = _run(ctx_three, "search_messages", folder="f:all",
-              sender="ally@example.com", offset=0, limit=2)
-    assert [i["subject"] for i in p1["items"]] == ["target-4", "target-3"]
-    assert p1["next_offset"] == 2
-    p2 = _run(ctx_three, "search_messages", folder="f:all",
-              sender="ally@example.com", offset=2, limit=2)
-    assert [i["subject"] for i in p2["items"]] == ["target-1"]
-    assert p2["next_offset"] is None
+    assert "contains" in props["categories"]["description"]
+    assert "exact" in props["categories"]["description"]
+
+    def make_mail(day, role):
+        return _msg(
+            f"ID-{day}=",
+            subject=f"{role}-{day}",
+            sender=f"{role}@example.com",
+            sender_name=role.title(),
+            dt=datetime(2026, 6, day, tzinfo=TZ),
+            message_id=f"<{day}@example.com>",
+        )
+
+    inbox_items = [
+        make_mail(20, "noise"),
+        make_mail(19, "noise"),
+        make_mail(18, "noise"),
+        make_mail(17, "noise"),
+        make_mail(16, "target"),
+        make_mail(15, "target"),
+        make_mail(14, "target"),
+    ]
+    ctx_single = _ctx(tmp_path / "single", _account(inbox=_Query(inbox_items)))
+    ctx_fanout = _whole_mailbox(tmp_path / "fanout", {
+        "Inbox": _Query(inbox_items),
+        "Inbox/Sub": _Query([make_mail(10, "noise")]),
+        "Archive": _Query([make_mail(9, "noise")]),
+    })
+
+    def collect_pages(ctx_under_test, **kwargs):
+        pages = []
+        seen = []
+        off = 0
+        for _ in range(10):
+            res = _run(ctx_under_test, "search_messages", offset=off, limit=2, **kwargs)
+            assert res["ok"] is True
+            assert res["total_available"] is None
+            pages.append(res)
+            seen.extend(item["subject"] for item in res["items"])
+            if res["next_offset"] is None:
+                break
+            off = res["next_offset"]
+        assert pages[-1]["next_offset"] is None
+        return pages, seen
+
+    _single_pages, single_seen = collect_pages(
+        ctx_single, folder="f:inbox", sender="target", fresh=True,
+    )
+    assert single_seen == ["target-16", "target-15", "target-14"]
+
+    fanout_pages, fanout_seen = collect_pages(
+        ctx_fanout, folder="f:all", sender="target",
+    )
+    # Pages 0 and 1 hold only newer noise items, yet next_offset keeps advancing.
+    assert fanout_pages[0]["items"] == [] and fanout_pages[0]["next_offset"] == 2
+    assert fanout_pages[1]["items"] == [] and fanout_pages[1]["next_offset"] == 4
+    assert fanout_seen == single_seen
+
+    rec_pages, rec_seen = collect_pages(
+        ctx_fanout, folder="Inbox", recursive=True, sender="target",
+    )
+    assert rec_pages[0]["items"] == [] and rec_pages[0]["next_offset"] == 2
+    assert rec_seen == single_seen
+
+
+def test_check_messages_rejects_f_all_and_recursive_scopes(tmp_path):
+    class _CountingGateway(_FakeGateway):
+        def __init__(self, account):
+            super().__init__(account)
+            self.calls = 0
+
+        async def call(self, fn):
+            self.calls += 1
+            return await super().call(fn)
+
+    account = _account()
+    account.mail_folders = [("Inbox", _Query([_neutral_msg("M1=", "RFP-1")]))]
+    ctx = _ctx(tmp_path, account)
+    ctx.gateway = _CountingGateway(account)
+
+    for bad_folder in ("f:all", "F:ALL", "Inbox/*"):
+        res = _run(ctx, "check_messages", values=["RFP-1"], folder=bad_folder)
+        assert res["ok"] is False
+        assert res["error"]["code"] == "validation"
+        assert "single folder" in res["error"]["message"].lower()
+
+    with pytest.raises(ToolError) as exc_info:
+        asyncio.run(
+            mail_read._check_messages(
+                ctx, ["RFP-1"], folder="f:inbox", recursive=True,
+            )
+        )
+    assert exc_info.value.code == "validation"
+    assert "single folder" in exc_info.value.message.lower()
+    assert ctx.gateway.calls == 0
+
+
+def test_check_messages_cancels_siblings_on_first_failure(tmp_path):
+    class ErrorServerBusy(Exception):
+        pass
+
+    class _FailFirstGateway(_FakeGateway):
+        def __init__(self, account):
+            super().__init__(account)
+            self.calls = 0
+
+        async def call(self, fn):
+            self.calls += 1
+            call_num = self.calls
+            await asyncio.sleep(0.02)
+            if call_num == 1:
+                raise ErrorServerBusy("Server busy, back off")
+            return fn(self.account)
+
+    account = _account(inbox=_Query([_neutral_msg("M1=", "RFP-1 update")]))
+    ctx = _ctx(tmp_path, account)
+    gw = _FailFirstGateway(account)
+    ctx.gateway = gw
+    values = [f"RFP-{idx}" for idx in range(50)]
+
+    async def exercise():
+        res = await dispatch(
+            ctx,
+            SPECS["check_messages"],
+            {"values": values, "folder": "f:inbox", "fresh": True},
+        )
+        at_return = gw.calls
+        await asyncio.sleep(0.1)
+        return res, at_return, gw.calls
+
+    res, calls_at_return, calls_after_wait = asyncio.run(exercise())
+    assert res["ok"] is False
+    assert res["error"]["code"] == "throttled"
+    # Four searches run at once; the ones already started when the first
+    # fails may each have let one more begin before cancellation lands.
+    assert 1 <= calls_at_return <= 8
+    assert calls_after_wait == calls_at_return
+
+
+def test_check_messages_uses_slim_projection_without_touching_body_or_attachments(tmp_path):
+    class _StrictSlimItem:
+        def __init__(self, raw_id, subject, sender_email, sender_name, dt):
+            self.id = raw_id
+            self.changekey = "CK"
+            self.subject = subject
+            self.sender = SimpleNamespace(
+                name=sender_name, email_address=sender_email,
+            )
+            self.datetime_received = dt
+
+        @property
+        def text_body(self):
+            raise AssertionError("check_messages must not read text_body")
+
+        @property
+        def body(self):
+            raise AssertionError("check_messages must not read body")
+
+        @property
+        def attachments(self):
+            raise AssertionError("check_messages must not read attachments")
+
+    class _SliceRecordingFolder(_AqsSenderFolder):
+        def __init__(self, items=(), *, _root=None):
+            super().__init__(items, _root=_root)
+            if _root is None:
+                self.slices = []
+
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                self._root.slices.append((key.start, key.stop))
+            return super().__getitem__(key)
+
+    items = [
+        _StrictSlimItem(
+            f"SLIM-{idx}=",
+            f"RFP-{idx} update",
+            "desk@example.com",
+            "Support Ops",
+            datetime(2026, 6, 20, 12, 0, tzinfo=TZ),
+        )
+        for idx in range(55)
+    ]
+    inbox = _SliceRecordingFolder(items)
+    ctx = _ctx(tmp_path, _account(inbox=inbox))
+
+    by_subj = _run(ctx, "check_messages", values=["RFP-0"], field="subject", fresh=True)
+    assert by_subj["ok"] is True
+    assert inbox.only_calls == [("id", "subject", "sender", "datetime_received")]
+    assert inbox.slices == [(0, 50)]
+    hit = by_subj["found"]["RFP-0"][0]
+    assert set(hit.keys()) == {"id", "subject", "from", "date"}
+    assert hit["id"].startswith("m")
+
+    by_sender = _run(
+        ctx, "check_messages", values=["Support"], field="sender", fresh=True,
+    )
+    assert by_sender["ok"] is True
+    assert len(by_sender["found"]["Support"]) == 5
+    assert inbox.only_calls[-1] == ("id", "subject", "sender", "datetime_received")
+    assert inbox.slices[-1] == (0, 50)
+
+
+def test_get_attachment_caps_pkcs7_sniff_at_5_mib_for_info_and_auto(tmp_path):
+    account = _account()
+    ctx = _ctx(tmp_path, account)
+    gw = ctx.gateway
+    cap = 5 * 1024 * 1024
+
+    over_signed = _CountingAttachment(
+        "smime.p7m", _P7M_SIGNED_HEAD, "application/pkcs7-mime",
+        size=cap + 1, gateway=gw,
+    )
+    over_enveloped = _CountingAttachment(
+        "enc.p7m", _P7M_ENVELOPED_HEAD, "application/x-pkcs7-mime",
+        size=cap + 1, gateway=gw,
+    )
+    at_cap = _CountingAttachment(
+        "exact.p7m", _P7M_SIGNED_HEAD, "application/pkcs7-mime",
+        size=cap, gateway=gw,
+    )
+    item = _neutral_msg("RAW-CAP=", "Oversized PKCS7")
+    item.attachments = [over_signed, over_enveloped, at_cap]
+    account.fetch = MagicMock(return_value=[item])
+
+    info_over = _run(
+        ctx, "get_attachment", message_id="RAW-CAP=",
+        attachment="smime.p7m", mode="info",
+    )
+    assert info_over["ok"] is True and info_over["mode"] == "info"
+    assert "smime_type" not in info_over
+    assert "hint" in info_over
+    assert over_signed.reads == 0
+
+    auto_signed = _run(
+        ctx, "get_attachment", message_id="RAW-CAP=",
+        attachment="smime.p7m", mode="auto",
+    )
+    assert auto_signed["ok"] is True and auto_signed["mode"] == "info"
+    assert "smime_type" not in auto_signed
+    assert "hint" in auto_signed
+    assert over_signed.reads == 0
+
+    auto_env = _run(
+        ctx, "get_attachment", message_id="RAW-CAP=",
+        attachment="enc.p7m", mode="auto",
+    )
+    assert auto_env["ok"] is True and auto_env["mode"] == "info"
+    assert "smime_type" not in auto_env
+    assert "hint" in auto_env
+    assert over_enveloped.reads == 0
+
+    info_at_cap = _run(
+        ctx, "get_attachment", message_id="RAW-CAP=",
+        attachment="exact.p7m", mode="info",
+    )
+    assert info_at_cap["mode"] == "info"
+    assert info_at_cap["smime_type"] == "signed"
+    assert at_cap.reads == 1
+
+    # Explicit byte modes still read the payload when requested by the caller.
+    text_over = _run(
+        ctx, "get_attachment", message_id="RAW-CAP=",
+        attachment="smime.p7m", mode="text",
+    )
+    assert text_over["mode"] == "text"
+    assert over_signed.reads == 1
+
+    save_over = _run(
+        ctx, "get_attachment", message_id="RAW-CAP=",
+        attachment="enc.p7m", mode="save",
+    )
+    assert save_over["mode"] == "save"
+    assert over_enveloped.reads == 1
+
+
+def test_search_recursive_walks_subtrees_of_excluded_well_known_folders(tmp_path):
+    root_node = SimpleNamespace(id="FLD-ROOT=", name="root")
+    top_node = SimpleNamespace(id="FLD-TOP=", name="Top of Information Store")
+
+    class _FolderQuery(_Query):
+        def __init__(self, raw_id, name, items=(), *, parents=(), cls="IPF.Note"):
+            super().__init__(items)
+            self.id = raw_id
+            self.name = name
+            self.folder_class = cls
+            self.parts = [root_node, top_node, *parents, self]
+
+    inbox = _FolderQuery(
+        "FLD-IN=", "Inbox",
+        [_neutral_msg("IN-1=", "in-root", dt=datetime(2026, 6, 10, tzinfo=TZ))],
+    )
+    trash = _FolderQuery(
+        "FLD-TR=", "Deleted Items",
+        [_neutral_msg("TR-1=", "trash-root", dt=datetime(2026, 6, 3, tzinfo=TZ))],
+    )
+    trash_sub = _FolderQuery(
+        "FLD-TR-SUB=", "2025",
+        [_neutral_msg("TR-2=", "trash-sub", dt=datetime(2026, 6, 6, tzinfo=TZ))],
+        parents=[trash],
+    )
+    trash_deep = _FolderQuery(
+        "FLD-TR-DEEP=", "Q1",
+        [_neutral_msg("TR-3=", "trash-deep", dt=datetime(2026, 6, 8, tzinfo=TZ))],
+        parents=[trash, trash_sub],
+    )
+    trash_cal = _FolderQuery(
+        "FLD-TR-CAL=", "OldCal", [], parents=[trash], cls="IPF.Appointment",
+    )
+    drafts = _FolderQuery(
+        "FLD-DR=", "Drafts",
+        [_neutral_msg("DR-1=", "draft-root", dt=datetime(2026, 6, 2, tzinfo=TZ))],
+    )
+    drafts_sub = _FolderQuery(
+        "FLD-DR-SUB=", "Templates",
+        [_neutral_msg("DR-2=", "draft-sub", dt=datetime(2026, 6, 7, tzinfo=TZ))],
+        parents=[drafts],
+    )
+    junk = _FolderQuery(
+        "FLD-JK=", "Junk Email",
+        [_neutral_msg("JK-1=", "junk-root", dt=datetime(2026, 6, 1, tzinfo=TZ))],
+    )
+    junk_sub = _FolderQuery(
+        "FLD-JK-SUB=", "Quarantine",
+        [_neutral_msg("JK-2=", "junk-sub", dt=datetime(2026, 6, 5, tzinfo=TZ))],
+        parents=[junk],
+    )
+    outbox = _FolderQuery(
+        "FLD-OB=", "Outbox",
+        [_neutral_msg("OB-1=", "outbox-root", dt=datetime(2026, 6, 4, tzinfo=TZ))],
+    )
+    outbox_sub = _FolderQuery(
+        "FLD-OB-SUB=", "Queued",
+        [_neutral_msg("OB-2=", "outbox-sub", dt=datetime(2026, 6, 9, tzinfo=TZ))],
+        parents=[outbox],
+    )
+
+    account = _account(inbox=inbox)
+    account.trash = trash
+    account.drafts = drafts
+    account.junk = junk
+    account.outbox = outbox
+    account.msg_folder_root.walk.return_value = [
+        inbox,
+        trash, trash_sub, trash_deep, trash_cal,
+        drafts, drafts_sub,
+        junk, junk_sub,
+        outbox, outbox_sub,
+    ]
+
+    settings = make_settings(data_dir=str(tmp_path / "data"), ews_tz=FIXED_OFFSET_TZ)
+    gw = EWSGateway(settings)
+    gw._account = account
+    try:
+        ctx = Context(
+            settings=settings,
+            gateway=gw,
+            manager=None,
+            aliaser=get_aliaser(str(tmp_path / "alias")),
+            audit=AuditLog(str(tmp_path / "audit")),
+            cache=None,
+        )
+
+        # Whole-mailbox fan-out still excludes trash, drafts, junk, and outbox.
+        all_res = _run(ctx, "search_messages", folder="f:all")
+        assert all_res["ok"] is True
+        assert all_res["folders_searched"] == 1
+        assert [i["subject"] for i in all_res["items"]] == ["in-root"]
+
+        trash_res = _run(ctx, "search_messages", folder="f:trash", recursive=True)
+        assert trash_res["ok"] is True
+        assert trash_res["folders_searched"] == 3
+        assert [i["subject"] for i in trash_res["items"]] == [
+            "trash-deep", "trash-sub", "trash-root",
+        ]
+        assert [i["folder"] for i in trash_res["items"]] == [
+            "Deleted Items/2025/Q1", "Deleted Items/2025", "Deleted Items",
+        ]
+
+        drafts_res = _run(ctx, "search_messages", folder="f:drafts", recursive=True)
+        assert drafts_res["folders_searched"] == 2
+        assert [i["subject"] for i in drafts_res["items"]] == ["draft-sub", "draft-root"]
+
+        junk_res = _run(ctx, "search_messages", folder="f:junk", recursive=True)
+        assert junk_res["folders_searched"] == 2
+        assert [i["subject"] for i in junk_res["items"]] == ["junk-sub", "junk-root"]
+
+        outbox_res = _run(ctx, "search_messages", folder="f:outbox", recursive=True)
+        assert outbox_res["folders_searched"] == 2
+        assert [i["subject"] for i in outbox_res["items"]] == ["outbox-sub", "outbox-root"]
+    finally:
+        gw._pool.shutdown(wait=True)
