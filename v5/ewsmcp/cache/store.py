@@ -1,14 +1,13 @@
 """Per-mailbox SQLite mirror — the "fetch email very fast" core.
 
-Design rules (hard requirements, lessons from a real SQLite corruption in
-a sibling project):
+Design rules (invariants for concurrent SQLite access):
 
 - SINGLE WRITER. Only this store's writer connection (used by the sync
   engine and the write-through path, serialized by one lock) ever writes.
   Tool reads open short-lived ``mode=ro`` connections — under WAL they
   never block the writer and can't corrupt anything.
 - Cleaned bodies are stored ONCE at sync time (``bodyclean`` output), so
-  the measured 115 kB raw-HTML email costs its ~150 chars exactly once.
+  plain text is extracted once rather than on every read.
 - Arabic-correct FTS: ``messages_fts`` indexes a NORMALIZED shadow text
   (``normalize.normalize_ar`` over subject + sender + body), queries are
   normalized with the same function, and the tokenizer adds
@@ -251,8 +250,8 @@ class CacheStore:
 
         Also LEARNS per-sender signatures: the trailing block of each body
         is hashed per sender; once the same block recurs SIG_MIN_HITS times
-        the read paths strip it (closes the measured gap where a corporate
-        signature survived clean_body)."""
+        the read paths strip it (strips recurring footers that do not start
+        with a standard closer)."""
         if not rows:
             return 0
         with self._write() as conn:

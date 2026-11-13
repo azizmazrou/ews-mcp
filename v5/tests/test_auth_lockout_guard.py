@@ -126,7 +126,7 @@ def _real_account(policy: RejectingFaultTolerance) -> Account:
         config=config,
         autodiscover=False,
         access_type=DELEGATE,
-        default_timezone=EWSTimeZone("Asia/Riyadh"),
+        default_timezone=EWSTimeZone("UTC"),
     )
 
 

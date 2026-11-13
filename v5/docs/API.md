@@ -65,7 +65,7 @@ List mail folders as a depth-limited tree walk. Each row is {id, name, path, tot
 
 #### `search_messages` — read (min tier: read)
 
-Search mail. TWO ENGINES, mutually exclusive: pass `query` (an Exchange AQS string, e.g. 'from:ahmed subject:rfp hasattachment:yes') OR the structured filters (sender/subject/since/until/is_unread/has_attachments/categories/flag_complete) — combining `query` with any structured filter is a validation error. `sender` is matched client-side against the fetched page's sender email/name, so total_available is unknown when it is used. Results are compact cards, newest first; their `id` values are short aliases (m12) for get_message / get_thread / get_attachment. If an id later goes stale (items move), re-run this search for fresh ids.
+Search mail. TWO ENGINES, mutually exclusive: pass `query` (an Exchange AQS string, e.g. 'from:alice@example.com subject:rfp hasattachment:yes') OR the structured filters (sender/subject/since/until/is_unread/has_attachments/categories/flag_complete) — combining `query` with any structured filter is a validation error. `sender` is matched client-side against the fetched page's sender email/name, so total_available is unknown when it is used. Results are compact cards, newest first; their `id` values are short aliases (m12) for get_message / get_thread / get_attachment. If an id later goes stale (items move), re-run this search for fresh ids.
 
 | parameter | type | required | description |
 |---|---|---|---|
@@ -180,7 +180,7 @@ Find people by name or email fragment in the GAL (global address list) and/or th
 
 | parameter | type | required | description |
 |---|---|---|---|
-| `query` | string | yes | Name or email fragment, e.g. 'ahmed'. |
+| `query` | string | yes | Name or email fragment, e.g. 'alice@example.com'. |
 | `source` | string | no | Where to search; auto = GAL + contacts. (one of: `auto`, `gal`, `contacts`; default `auto`) |
 | `limit` | integer | no | Max people returned. (default `10`) |
 

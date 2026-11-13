@@ -28,11 +28,9 @@ exchangelib 5.0.3 pins honoured here (verified against the installed lib):
 - ``Item.move(folder)`` returns ``None`` and updates ``item.id`` in place.
 - ``CalendarItem.recurring_master()`` sends no query and returns an item
   holding a ``RecurringMasterItemId``; ``refresh()`` loads the master.
-- Follow-up flag completion IS available, via ExtendedProperty
-  registration (PidTagFlagStatus, tag 0x1090) - see ../flag_property.py
-  for the live-verified read/write/filter proof. update_messages'
-  ``flag_complete`` param uses it; this superseded an earlier assumption
-  here that it was unavailable.
+- Follow-up flag completion uses ExtendedProperty registration
+  (PidTagFlagStatus, tag 0x1090; see ../flag_property.py); update_messages
+  exposes it via ``flag_complete``.
 """
 
 import base64
@@ -676,9 +674,9 @@ async def _update_messages(ctx: Context, *, ids: List[str],
                     final_cats.append((raw_id, cats))
                 if flag_complete is not None:
                     # 1 = flagged and marked Complete; None = not flagged.
-                    # Deliberately doesn't produce state 2 (flagged, still
+                    # Deliberately does not write state 2 (flagged, still
                     # open) - this tool only marks/unmarks completion, it
-                    # doesn't raise a new follow-up flag.
+                    # does not raise a new follow-up flag.
                     item.flag_status = 1 if flag_complete else None
                     changed.append("flag_status")
                 item.save(update_fields=changed)

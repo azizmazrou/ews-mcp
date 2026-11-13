@@ -5,12 +5,12 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from conftest import make_settings
+from conftest import FIXED_OFFSET_TZ, make_settings
 
 from ewsmcp.cache.store import CacheStore
 from ewsmcp.cache.sync import SyncEngine, row_from_message
 
-TZ = ZoneInfo("Asia/Riyadh")
+TZ = ZoneInfo(FIXED_OFFSET_TZ)
 NOW = datetime(2026, 7, 10, 9, 0, tzinfo=TZ)
 
 
@@ -48,7 +48,7 @@ def _msg(raw_id, *, subject="Subj", body="Body text", dt=None, is_read=False,
          conv="CONV-1"):
     return SimpleNamespace(
         id=raw_id, changekey="CK", subject=subject,
-        sender=SimpleNamespace(name="Ahmed", email_address="ahmed@corp.example"),
+        sender=SimpleNamespace(name="Sender", email_address="sender@corp.example"),
         datetime_received=dt or NOW,
         is_read=is_read, has_attachments=False, importance="Normal",
         categories=None, conversation_id=SimpleNamespace(id=conv),
@@ -67,6 +67,7 @@ def _account():
 
 
 def _engine(tmp_path, account, **overrides):
+    overrides.setdefault("ews_tz", FIXED_OFFSET_TZ)
     settings = make_settings(**overrides)
     store = CacheStore(tmp_path / "mirror.db")
     return SyncEngine(settings, FakeGateway(account), store), store
@@ -134,7 +135,7 @@ def test_cycle_failure_degrades_not_dies(tmp_path):
 def test_row_from_message_cleans_body_once(tmp_path):
     quoted = ("Latest reply only.\n\nFrom: Someone <s@corp.example>\n"
               "Sent: Monday\nTo: Exec\nSubject: Re: X\n\nOLD QUOTED TEXT")
-    row = row_from_message(_msg("M1", body=quoted), "inbox", "Asia/Riyadh")
+    row = row_from_message(_msg("M1", body=quoted), "inbox", FIXED_OFFSET_TZ)
     assert "OLD QUOTED" not in row["body_clean"]
     assert row["body_clean"].startswith("Latest reply only.")
     assert row["norm_text"]  # normalized shadow present for FTS

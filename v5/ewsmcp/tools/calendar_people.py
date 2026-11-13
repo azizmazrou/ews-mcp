@@ -361,7 +361,7 @@ def _contact_person(contact: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
               for e in (getattr(contact, "email_addresses", None) or [])]
     email = next((e for e in emails if e), None)
     if not email:
-        return None  # address-less contacts are useless to the secretary
+        return None  # contacts without an email address cannot be addressed
     raw_key = str(getattr(contact, "id", None) or email)
     person: Dict[str, Any] = {
         "name": getattr(contact, "display_name", None) or email,
@@ -657,7 +657,7 @@ TOOLS: List[ToolSpec] = [
             "type": "object",
             "properties": {
                 "query": {"type": "string",
-                          "description": "Name or email fragment, e.g. 'ahmed'."},
+                          "description": "Name or email fragment, e.g. 'alice@example.com'."},
                 "source": {"type": "string", "enum": ["auto", "gal", "contacts"],
                            "default": "auto",
                            "description": "Where to search; auto = GAL + contacts."},

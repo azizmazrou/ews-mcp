@@ -2,7 +2,7 @@
 
 No network, no exchangelib objects: a MagicMock account behind a fake
 gateway, list-subclass query doubles, and SimpleNamespace messages with
-tz-aware datetimes (Asia/Riyadh).
+tz-aware datetimes (FIXED_OFFSET_TZ, UTC+3).
 """
 
 import asyncio
@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import jsonschema
 import pytest
-from conftest import make_settings
+from conftest import FIXED_OFFSET_TZ, make_settings
 
 from ewsmcp import dto
 from ewsmcp.audit import AuditLog
@@ -25,12 +25,12 @@ from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import mail_read
 from ewsmcp.tools.base import Context, dispatch
 
-TZ = ZoneInfo("Asia/Riyadh")
+TZ = ZoneInfo(FIXED_OFFSET_TZ)
 SPECS = {spec.name: spec for spec in mail_read.TOOLS}
 
 QUOTED_TAIL = (
     "\n\nFrom: Exec <exec@corp.example>\nSent: Monday, June 8, 2026\n"
-    "To: Ahmed\nSubject: Re: RFP\n\nOLD QUOTED LINE ONE\nOLD QUOTED LINE TWO"
+    "To: Alice\nSubject: Re: RFP\n\nOLD QUOTED LINE ONE\nOLD QUOTED LINE TWO"
 )
 
 
@@ -130,7 +130,7 @@ class _FakeGateway:
         return self.account.mail_folders
 
 
-def _msg(raw_id, subject="Subj", sender="ahmed@corp.example", *, sender_name=None,
+def _msg(raw_id, subject="Subj", sender="alice@corp.example", *, sender_name=None,
          dt=None, is_read=True, has_attachments=False, text_body="",
          conv="CONV-RAW-1=", message_id=None, attachments=None, to=None,
          categories=None, flag_status=None):
@@ -163,6 +163,7 @@ def _account(inbox=None, sent=None):
 
 def _ctx(tmp_path, account, cache=None, **overrides):
     overrides.setdefault("data_dir", str(tmp_path / "data"))
+    overrides.setdefault("ews_tz", FIXED_OFFSET_TZ)
     return Context(
         settings=make_settings(**overrides),
         gateway=_FakeGateway(account),
@@ -206,12 +207,12 @@ def test_search_whole_mailbox_merges_folders_newest_first(tmp_path):
     archive = _Query([_msg("B=", subject="newest", dt=datetime(2026, 6, 9, tzinfo=TZ)),
                       _msg("C=", subject="oldest", dt=datetime(2026, 5, 1, tzinfo=TZ))])
     ctx = _whole_mailbox(tmp_path, {"Inbox": inbox, "Inbox/Archive": archive})
-    res = _run(ctx, "search_messages", folder="f:all", query="from:ahmed")
+    res = _run(ctx, "search_messages", folder="f:all", query="from:alice@example.com")
     assert [i["subject"] for i in res["items"]] == ["newest", "older", "oldest"]
     assert [i["folder"] for i in res["items"]] == ["Inbox/Archive", "Inbox", "Inbox/Archive"]
     assert res["total_available"] == 3 and res["next_offset"] is None
     assert res["folders_searched"] == 2 and "folders_failed" not in res
-    assert inbox.filter_calls == [(("from:ahmed",), {})]
+    assert inbox.filter_calls == [(("from:alice@example.com",), {})]
 
 
 def test_search_whole_mailbox_pages_over_the_merged_list(tmp_path):
@@ -263,7 +264,7 @@ def test_search_envelope_alias_ids_and_clean_snippet(tmp_path):
 
 def test_search_engine_conflict_is_validation_error(tmp_path):
     ctx = _ctx(tmp_path, _account())
-    res = _run(ctx, "search_messages", query="from:ahmed", subject="rfp")
+    res = _run(ctx, "search_messages", query="from:alice@example.com", subject="rfp")
     assert res["ok"] is False
     assert res["error"]["code"] == "validation"
     assert "hint" in res["error"]
@@ -295,14 +296,14 @@ def test_search_structured_filters_become_lookups(tmp_path):
 
 def test_search_from_is_a_client_side_postfilter(tmp_path):
     inbox = _Query([
-        _msg("RAW-1=", sender="ahmed@corp.example"),
-        _msg("RAW-2=", sender="sara@corp.example"),
+        _msg("RAW-1=", sender="alice@corp.example"),
+        _msg("RAW-2=", sender="bob@corp.example"),
     ])
     ctx = _ctx(tmp_path, _account(inbox=inbox))
-    res = _run(ctx, "search_messages", from_="ahmed")
+    res = _run(ctx, "search_messages", from_="alice")
     assert res["ok"] is True
     assert res["count"] == 1
-    assert res["items"][0]["from"] == "ahmed@corp.example"
+    assert res["items"][0]["from"] == "alice@corp.example"
     assert res["total_available"] is None  # post-filter voids the upstream count
 
 
@@ -340,13 +341,13 @@ def test_search_filtered_has_lookahead_next_offset_but_no_total(tmp_path):
 
 def test_search_sender_param_and_deprecated_alias(tmp_path):
     inbox = _Query([
-        _msg("RAW-1=", sender="ahmed@corp.example"),
-        _msg("RAW-2=", sender="sara@corp.example"),
+        _msg("RAW-1=", sender="alice@corp.example"),
+        _msg("RAW-2=", sender="bob@corp.example"),
     ])
     ctx = _ctx(tmp_path, _account(inbox=inbox))
-    res = _run(ctx, "search_messages", sender="ahmed")
+    res = _run(ctx, "search_messages", sender="alice")
     assert res["count"] == 1
-    both = _run(ctx, "search_messages", sender="ahmed", from_="ahmed")
+    both = _run(ctx, "search_messages", sender="alice", from_="alice")
     assert both["error"]["code"] == "validation"
 
 
@@ -628,13 +629,13 @@ def test_get_message_stale_id_maps_to_not_found(tmp_path):
 
 
 def test_get_thread_merges_inbox_and_sent_chronologically(tmp_path):
-    msg_a = _msg("RAW-A=", subject="RFP", sender="ahmed@corp.example",
+    msg_a = _msg("RAW-A=", subject="RFP", sender="alice@corp.example",
                  dt=datetime(2026, 6, 10, 9, 0, tzinfo=TZ),
                  text_body="Opening question?")
     msg_b = _msg("RAW-B=", subject="Re: RFP", sender="exec@corp.example",
                  dt=datetime(2026, 6, 10, 10, 0, tzinfo=TZ),
                  text_body="Agreed, Sunday 10am." + QUOTED_TAIL)
-    msg_c = _msg("RAW-C=", subject="Re: RFP", sender="ahmed@corp.example",
+    msg_c = _msg("RAW-C=", subject="Re: RFP", sender="alice@corp.example",
                  dt=datetime(2026, 6, 10, 11, 0, tzinfo=TZ),
                  text_body="Confirmed, thanks.", has_attachments=True)
     account = _account(inbox=_Query([msg_c, msg_a]), sent=_Query([msg_b]))
@@ -651,7 +652,7 @@ def test_get_thread_merges_inbox_and_sent_chronologically(tmp_path):
     assert "OLD QUOTED" not in res["items"][1]["body"]
     assert res["items"][2].get("attach") is True
     assert sum(p["msgs"] for p in res["participants"]) == 3
-    assert res["participants"][0]["name_or_email"] == "ahmed@corp.example"
+    assert res["participants"][0]["name_or_email"] == "alice@corp.example"
     # conversation_id must be passed as the ConversationId OBJECT — 5.0.3
     # raises TypeError on a plain string (verified against the installed
     # library; the old pin here asserted the broken behavior).
@@ -958,7 +959,7 @@ def test_get_message_never_downloads_ordinary_or_oversized_attachments(tmp_path)
     item.attachments = [pdf, txt, small_p7m, huge_p7m]
 
     # dto.msg_full itself never touches .content even on .p7m items.
-    direct = dto.msg_full(item, ctx.aliaser, "Asia/Riyadh", 4000)
+    direct = dto.msg_full(item, ctx.aliaser, FIXED_OFFSET_TZ, 4000)
     assert [a.reads for a in (pdf, txt, small_p7m, huge_p7m)] == [0, 0, 0, 0]
     assert all("smime_type" not in entry for entry in direct["attachments"])
 
@@ -1070,18 +1071,18 @@ def test_check_messages_sender_live_uses_aqs_and_whole_word_display_name(tmp_pat
         )
         for n in range(60)
     ]
-    # Prefix trap: "Daniel" matches AQS from:"Dan" but NOT whole-word "Dan".
+    # Prefix trap: "SupportDesk" matches AQS from:"Support" but NOT whole-word "Support".
     items.append(_msg(
-        "OLD-PREFIX=", subject="From Daniel",
-        sender="daniel@example.com", sender_name="Daniel Ops",
+        "OLD-PREFIX=", subject="From SupportDesk",
+        sender="sdesk@example.com", sender_name="SupportDesk Ops",
         dt=datetime(2026, 6, 2, 9, 0, tzinfo=TZ),
         message_id="<OLD-PREFIX@example.com>",
     ))
     items.append(_msg(
-        "OLD-DAN=", subject="From Dan",
-        sender="dops@example.com", sender_name="Dan Ops",
+        "OLD-EXACT=", subject="From Support",
+        sender="desk@example.com", sender_name="Support Ops",
         dt=datetime(2026, 6, 1, 9, 0, tzinfo=TZ),
-        message_id="<OLD-DAN@example.com>",
+        message_id="<OLD-EXACT@example.com>",
     ))
     items.append(_msg(
         "OLD-QUOTE=", subject="Quoted display",
@@ -1094,7 +1095,7 @@ def test_check_messages_sender_live_uses_aqs_and_whole_word_display_name(tmp_pat
 
     res = _run(
         ctx, "check_messages",
-        values=["Dan", 'Ops "West"\\Team', "missing@example.com"],
+        values=["Support", 'Ops "West"\\Team', "missing@example.com"],
         field="sender",
     )
     assert res["ok"] is True
@@ -1102,12 +1103,12 @@ def test_check_messages_sender_live_uses_aqs_and_whole_word_display_name(tmp_pat
     assert res["values_checked"] == 3
     assert res["found_count"] == 2
     assert res["missing"] == ["missing@example.com"]
-    assert [c["subject"] for c in res["found"]["Dan"]] == ["From Dan"]
+    assert [c["subject"] for c in res["found"]["Support"]] == ["From Support"]
     assert [c["subject"] for c in res["found"]['Ops "West"\\Team']] == ["Quoted display"]
 
     # Verify escaped AQS queries hit Exchange directly rather than a bare page scan.
     aqs_queries = [call_args[0] for call_args, _kw in inbox.filter_calls if call_args]
-    assert 'from:"Dan"' in aqs_queries
+    assert 'from:"Support"' in aqs_queries
     assert 'from:"Ops \\"West\\"\\\\Team"' in aqs_queries
     assert 'from:"missing@example.com"' in aqs_queries
 
@@ -1116,8 +1117,8 @@ def test_check_messages_mirror_provenance_fresh_and_values_schema(tmp_path):
     # Public JSON schema accepts both a string and an array of strings for `values`.
     schema = SPECS["check_messages"].public_schema()["inputSchema"]
     validator = jsonschema.Draft202012Validator(schema)
-    validator.validate({"values": "Dan, Ops"})
-    validator.validate({"values": ["Dan", "Ops"], "fresh": True})
+    validator.validate({"values": "Support, Ops"})
+    validator.validate({"values": ["Support", "Ops"], "fresh": True})
     with pytest.raises(jsonschema.ValidationError):
         validator.validate({"values": [123]})
     with pytest.raises(jsonschema.ValidationError):
@@ -1126,33 +1127,33 @@ def test_check_messages_mirror_provenance_fresh_and_values_schema(tmp_path):
     store = CacheStore(tmp_path / "mirror.db")
     try:
         now = int(time.time())
-        row_daniel = _cache_row("M-DANIEL", subject="Daniel mail", date_ts=now)
-        row_daniel["sender_name"] = "Daniel Ops"
-        row_daniel["sender_email"] = "daniel@example.com"
-        row_dan = _cache_row("M-DAN", subject="Dan mail", date_ts=now - 10)
-        row_dan["sender_name"] = "Dan Ops"
-        row_dan["sender_email"] = "dops@example.com"
-        store.upsert_messages([row_daniel, row_dan])
+        row_prefix = _cache_row("M-PREFIX", subject="SupportDesk mail", date_ts=now)
+        row_prefix["sender_name"] = "SupportDesk Ops"
+        row_prefix["sender_email"] = "sdesk@example.com"
+        row_exact = _cache_row("M-EXACT", subject="Support mail", date_ts=now - 10)
+        row_exact["sender_name"] = "Support Ops"
+        row_exact["sender_email"] = "desk@example.com"
+        store.upsert_messages([row_prefix, row_exact])
         store.set_sync_state("item:inbox", "TOK", now)
 
         live_inbox = _AqsSenderFolder([
-            _msg("L-DAN=", subject="Live Dan", sender="dops@example.com",
-                 sender_name="Dan Ops", message_id="<L-DAN@example.com>"),
+            _msg("L-EXACT=", subject="Live Support", sender="desk@example.com",
+                 sender_name="Support Ops", message_id="<L-EXACT@example.com>"),
         ])
         ctx = _ctx(tmp_path, _account(inbox=live_inbox), cache=store)
 
-        cached = _run(ctx, "check_messages", values=["Dan", "Nobody"], field="sender")
+        cached = _run(ctx, "check_messages", values=["Support", "Nobody"], field="sender")
         assert cached["ok"] is True
         assert cached["source"] == "cache" and cached["as_of"]
-        assert [c["subject"] for c in cached["found"]["Dan"]] == ["Dan mail"]
+        assert [c["subject"] for c in cached["found"]["Support"]] == ["Support mail"]
         assert cached["missing"] == ["Nobody"]
         assert live_inbox.filter_calls == []
 
-        live = _run(ctx, "check_messages", values=["Dan"], field="sender", fresh=True)
+        live = _run(ctx, "check_messages", values=["Support"], field="sender", fresh=True)
         assert live["ok"] is True
         assert live["source"] == "live" and "as_of" not in live
-        assert [c["subject"] for c in live["found"]["Dan"]] == ["Live Dan"]
-        assert live_inbox.filter_calls == [(('from:"Dan"',), {})]
+        assert [c["subject"] for c in live["found"]["Support"]] == ["Live Support"]
+        assert live_inbox.filter_calls == [(('from:"Support"',), {})]
     finally:
         store.close()
 

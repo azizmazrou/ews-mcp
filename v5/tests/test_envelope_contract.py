@@ -14,14 +14,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from conftest import make_settings
+from conftest import FIXED_OFFSET_TZ, make_settings
 
 from ewsmcp.audit import AuditLog
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import build_registry
 from ewsmcp.tools.base import Context, dispatch
 
-TZ = ZoneInfo("Asia/Riyadh")
+TZ = ZoneInfo(FIXED_OFFSET_TZ)
 ENVELOPE_KEYS = {"ok", "items", "count", "total_available", "next_offset"}
 LIST_TOOLS = ["search_messages", "list_folders", "list_events", "find_people"]
 
@@ -78,7 +78,7 @@ def _account():
                             start=datetime(2026, 6, 13, 9, 0, tzinfo=TZ),
                             end=datetime(2026, 6, 13, 9, 30, tzinfo=TZ))
     account.calendar.view.return_value = [event]
-    mailbox = SimpleNamespace(name="Ahmed", email_address="ahmed@corp.example")
+    mailbox = SimpleNamespace(name="Contact", email_address="contact@corp.example")
     account.protocol.resolve_names.return_value = [(mailbox, None)]
     account.contacts.all.return_value = []
     return account
@@ -100,7 +100,7 @@ _ARGS = {
     "search_messages": {},
     "list_folders": {},
     "list_events": {},
-    "find_people": {"query": "ahmed"},
+    "find_people": {"query": "contact"},
 }
 
 

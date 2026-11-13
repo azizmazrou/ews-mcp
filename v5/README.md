@@ -1,7 +1,7 @@
 # ews-mcp 4.5 — Exchange (EWS) as a safe, fast MCP tool surface
 
 An MCP server that turns an on-prem Exchange mailbox into a lean,
-safety-gated tool surface for an LLM assistant: **29 tools**, alias-only
+safety-gated tool surface for an LLM assistant: **30 tools**, alias-only
 ids, token-lean DTOs, a local cache mirror with Arabic-correct full-text
 search, and a two-phase confirm flow that makes autonomous sending
 tamper-evident.
@@ -17,7 +17,7 @@ your MCP client (Claude Code, Claude Desktop, or any other) starts
 `ewsmcp` as a child process and talks to it over stdin/stdout. There is
 no port, no API key, and nothing listening on the network — and because
 it runs as a normal process on your machine, it reaches Exchange through
-whatever network your machine has, **including a corporate VPN**. If
+whatever network your machine has, **including a workstation VPN**. If
 your Exchange endpoint is only reachable from your workstation, this is
 the mode you want; a container or a remote host would not have that
 route.
@@ -73,7 +73,7 @@ credentials in `env`. Prefer a file? Copy [`.env.example`](.env.example)
 to `.env` in the directory you launch `ewsmcp` from — it auto-loads.
 
 That is the whole setup. The defaults are safe: capability tier `draft`
-(23 read + draft tools; nothing can send), `SEND_ENABLED=false` until
+(25 read + draft tools; nothing can send), `SEND_ENABLED=false` until
 you flip it, and mail-at-rest (aliases, audit chain, cache) goes to
 `~/.ewsmcp`. The server **refuses cloud-synced folders** for that data —
 if your home directory lives in OneDrive/Dropbox/iCloud, set `DATA_DIR`
@@ -107,33 +107,30 @@ MCP_TRANSPORT=http MCP_PORT=8000 MCP_API_KEY=<long-random-string> ewsmcp
   header; OpenAPI at `/openapi.json`.
 - Health: `GET /livez`, `/readyz`, `/health`.
 - OAuth discovery paths (`/.well-known/oauth-*`, `/register`) always
-  404 — this server implements no OAuth. That fixes the "no metadata,
-  dead-end UI" case, but **don't set `MCP_API_KEY` on a connection a
-  client drives without an explicit OAuth config** (LibreChat's plain
-  `headers:`/`customUserVars` MCP connections, no `oauth:` block): such
-  clients treat *any* 401 from the very first `/mcp` touch — which
-  happens before your configured headers are attached — as "this needs
-  OAuth" and don't reliably fall back afterward, even once discovery
-  correctly reports "not supported" (confirmed live against LibreChat).
-  `x-api-key` on the REST shim (`/api/tools/<name>`) is unaffected —
-  that's a plain script/curl client, not doing OAuth auto-detection.
-  For an MCP connection, rely on the network boundary instead (no
-  `ports:` published — see multi-user mode below and Docker).
+  return 404 — this server implements no OAuth, so clients fall back to
+  configured headers instead of treating a 401 as missing OAuth metadata.
+  MCP clients that probe `/mcp` unauthenticated before attaching
+  configured headers may still interpret an initial 401 as an OAuth
+  challenge; for those clients, omit `MCP_API_KEY` and restrict network
+  access instead (loopback binding or an internal container network).
+  `x-api-key` on `/api/tools/<name>` is unaffected.
 
 Docker (containerized HTTP mode — note a container only sees the
-network of its host, not your workstation's VPN):
+network of its host, not your workstation's VPN; see
+[`docker-compose.example.yml`](docker-compose.example.yml) for a
+loopback-bound, read-tier Compose setup):
 
 ```bash
 docker build -t ews-mcp:dev .
-docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
+docker run --rm -p 127.0.0.1:8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 ```
 
 ## Why it looks like this
 
-- **Token economy.** One legacy detail call shipped 115 kB of duplicated
-  raw HTML for a 150-char message. Here a search result is a ~60-token
-  card, bodies are cleaned once at sync time (bilingual quoted-history +
-  signature stripping), and raw HTML requires an explicit flag.
+- **Token economy.** Raw HTML bodies often exceed 100 kB for a short
+  message. Here a search result is a ~60-token card, bodies are cleaned
+  once at sync time (bilingual quoted-history + signature stripping), and
+  raw HTML requires an explicit flag.
 - **Ids the model can actually copy.** Raw EWS ids are ~150 chars of
   case-sensitive base64 that change when items move. Tools emit short
   aliases (`m12`, `e3`) that survive moves and restarts.
@@ -178,7 +175,7 @@ docker run --rm -p 8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 | `EWS_CACHE_PURGE_ON_BOOT` | `false` | Admin path: wipe the mirror and resync |
 | `EWS_SEMANTIC_INDEX` | `none` | `pgvector` enables the optional vector tier (+`find_similar`) |
 | `EWS_SEMANTIC_PG_DSN` / `EWS_SEMANTIC_OLLAMA_URL` / `EWS_SEMANTIC_MODEL` | — | Vector tier wiring (requires `psycopg`, not a core dependency) |
-| `EWS_TZ` | `Asia/Riyadh` | Server timezone for date grammar + display |
+| `EWS_TZ` | `UTC` | Server timezone for date grammar + display |
 
 ## The send flow (two-phase, content-bound)
 

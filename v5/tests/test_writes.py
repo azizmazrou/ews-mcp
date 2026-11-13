@@ -1,6 +1,6 @@
 """Writes tool pack tests — driven through dispatch() so every dispatcher
 gate (kill-switch, tier, two-phase confirm, alias resolution) is exercised
-exactly as production would.
+through the full gate chain.
 
 exchangelib classes that handlers *construct* (Message, CalendarItem) are
 monkeypatched with capture stubs because the real classes refuse non-Account
@@ -34,7 +34,7 @@ from exchangelib.recurrence import (
 from exchangelib.util import xml_to_str
 from exchangelib.version import EXCHANGE_2016, Version
 
-from conftest import make_settings
+from conftest import FIXED_OFFSET_TZ, make_settings
 from ewsmcp.audit import AuditLog
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import writes
@@ -42,7 +42,7 @@ from ewsmcp.tools.base import Context, dispatch
 
 SPEC = {s.name: s for s in writes.TOOLS}
 DRAFTS_ID = "FOLDER-DRAFTS"
-RIYADH = ZoneInfo("Asia/Riyadh")
+LOCAL_TZ = ZoneInfo(FIXED_OFFSET_TZ)
 
 
 @pytest.fixture(autouse=True)
@@ -80,6 +80,7 @@ def make_account():
 
 
 def make_ctx(tmp_path, account, **overrides) -> Context:
+    overrides.setdefault("ews_tz", FIXED_OFFSET_TZ)
     return Context(
         settings=make_settings(**overrides),
         gateway=FakeGateway(account),
@@ -650,8 +651,8 @@ def test_create_event_default_saves_without_invites_no_confirm(tmp_path, monkeyp
     assert ev.kwargs["folder"] is account.calendar
     assert ev.save_calls == [{"send_meeting_invitations": SEND_TO_NONE}]
     # date-only → midnight EWS_TZ; naive → EWS_TZ attached (tz-aware both ways)
-    assert ev.kwargs["start"] == datetime(2026, 7, 1, tzinfo=RIYADH)
-    assert ev.kwargs["end"] == datetime(2026, 7, 1, 1, 0, tzinfo=RIYADH)
+    assert ev.kwargs["start"] == datetime(2026, 7, 1, tzinfo=LOCAL_TZ)
+    assert ev.kwargs["end"] == datetime(2026, 7, 1, 1, 0, tzinfo=LOCAL_TZ)
     assert ctx.aliaser.resolve(res["event_id"]) == "RAW-NEW-EVENT"
 
 
@@ -785,13 +786,13 @@ def test_create_event_series_uses_the_named_zone_not_a_fixed_offset(tmp_path, mo
     _series(tmp_path, monkeypatch, {"frequency": "weekly"},
             start="2026-11-12T10:00+00:00", end="2026-11-12T11:00+00:00")
     ev = FakeCalendarItem.last
-    assert ev.kwargs["start"].tzinfo == RIYADH
-    assert ev.kwargs["start"] == datetime(2026, 11, 12, 13, 0, tzinfo=RIYADH)
-    assert ev.kwargs["end"].tzinfo == RIYADH
+    assert ev.kwargs["start"].tzinfo == LOCAL_TZ
+    assert ev.kwargs["start"] == datetime(2026, 11, 12, 13, 0, tzinfo=LOCAL_TZ)
+    assert ev.kwargs["end"].tzinfo == LOCAL_TZ
 
 
 def test_create_event_series_first_date_comes_from_the_named_zone(tmp_path, monkeypatch):
-    # 22:00 UTC is already the next day in Riyadh.
+    # 22:00 UTC is already the next day in UTC+3.
     _series(tmp_path, monkeypatch, {"frequency": "weekly"},
             start="2026-11-11T22:00+00:00", end="2026-11-11T23:00+00:00")
     rule = FakeCalendarItem.last.recurrence
@@ -833,7 +834,7 @@ def test_create_event_with_attendees_reports_pending_invitations(tmp_path, monke
 def _event(account, kind, start=None):
     ev = MagicMock()
     ev.type = kind
-    ev.start = start or datetime(2026, 11, 12, 13, 45, tzinfo=RIYADH)
+    ev.start = start or datetime(2026, 11, 12, 13, 45, tzinfo=LOCAL_TZ)
     account._by_id["RAW-E3"] = ev
     return ev
 
@@ -854,14 +855,14 @@ def test_update_event_scope_series_changes_the_master(tmp_path):
     account = make_account()
     ev = _event(account, "Occurrence")
     master = ev.recurring_master.return_value
-    master.start = datetime(2026, 11, 12, 13, 45, tzinfo=RIYADH)
+    master.start = datetime(2026, 11, 12, 13, 45, tzinfo=LOCAL_TZ)
     ctx = make_ctx(tmp_path, account)
     res = call(ctx, "update_event", {"event_id": "RAW-E3", "subject": "New", "scope": "series",
                                      "start": "2026-11-12T14:00", "end": "2026-11-12T14:45"})
     assert res["ok"] is True
     master.refresh.assert_called_once_with()
     assert master.subject == "New"
-    assert master.start == datetime(2026, 11, 12, 14, 0, tzinfo=RIYADH)
+    assert master.start == datetime(2026, 11, 12, 14, 0, tzinfo=LOCAL_TZ)
     ev.save.assert_not_called()
     master.save.assert_called_once_with(update_fields=["subject", "start", "end"],
                                         send_meeting_invitations=SEND_TO_NONE)

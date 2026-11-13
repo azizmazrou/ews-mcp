@@ -1,8 +1,8 @@
 """Signature + behavior pins for every exchangelib API v5 calls.
 
 The v3 tree learned this the hard way: MagicMock accepts any kwarg, so a
-renamed/removed parameter sails through unit tests and detonates in
-production (`disposal_type`, `OofReply`, …). Every kwarg-bearing call site
+renamed/removed parameter sails through unit tests and fails at
+runtime (`disposal_type`, `OofReply`, …). Every kwarg-bearing call site
 in v5/ewsmcp pins the REAL `inspect.signature` here, and the lies that
 drove the Phase B criticals are pinned as behavior contracts:
 
@@ -104,8 +104,8 @@ def test_signature_pin(func):
 
 
 def test_item_delete_has_no_disposal_kwargs():
-    """The 4.x -> 5.x trap that produced two production outages: delete()
-    IS HardDelete; disposal_type/delete_type kwargs are gone."""
+    """In exchangelib 5.x (unlike 4.x), delete() IS HardDelete;
+    disposal_type/delete_type kwargs are gone."""
     params = _params(Item.delete)
     assert "disposal_type" not in params
     assert "delete_type" not in params

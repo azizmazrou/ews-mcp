@@ -124,7 +124,7 @@ def test_english_control_still_works(ctx):
 def test_every_fold_pair_explicitly():
     """Unit-level pin for each documented fold (the normalize_ar contract)."""
     pairs = [
-        ("أحمد", "احمد"),        # alef hamza above
+        ("أعمال", "اعمال"),      # alef hamza above
         ("إدارة", "ادارة"),      # alef hamza below
         ("آفاق", "افاق"),        # alef madda
         ("ٱقرأ", "اقرا"),        # alef wasla (+ hamza-above fold)

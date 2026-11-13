@@ -2,7 +2,7 @@
 
 Same harness as test_dispatcher: make_settings + Context with a fake
 gateway whose ``call`` runs the work function against a MagicMock
-account synchronously. All datetimes are tz-aware Asia/Riyadh.
+account synchronously. All datetimes use FIXED_OFFSET_TZ (UTC+3 without DST).
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from exchangelib.recurrence import (
     WeeklyPattern,
 )
 
-from conftest import make_settings
+from conftest import FIXED_OFFSET_TZ, make_settings
 from ewsmcp import __version__
 from ewsmcp.audit import AuditLog
 from ewsmcp.ids import get_aliaser
@@ -29,7 +29,7 @@ from ewsmcp.tools import calendar_people
 from ewsmcp.tools.base import Context, dispatch
 from ewsmcp.tools.calendar_people import merge_busy_and_find_slots
 
-TZ = ZoneInfo("Asia/Riyadh")
+TZ = ZoneInfo(FIXED_OFFSET_TZ)
 SPEC = {s.name: s for s in calendar_people.TOOLS}
 
 
@@ -42,6 +42,7 @@ class _FakeGateway:
 
 
 def _ctx(tmp_path, account, **settings_overrides) -> Context:
+    settings_overrides.setdefault("ews_tz", FIXED_OFFSET_TZ)
     return Context(
         settings=make_settings(**settings_overrides),
         gateway=_FakeGateway(account),
@@ -152,7 +153,7 @@ def test_list_events_relative_dates_today_plus_7d(tmp_path):
     start = kwargs["start"]
     assert (start.hour, start.minute, start.second) == (0, 0, 0)
     assert start.date() in {before.date(), after.date()}
-    assert str(start.tzinfo) == "Asia/Riyadh"
+    assert str(start.tzinfo) == FIXED_OFFSET_TZ
     assert kwargs["end"] - start == timedelta(days=7)
 
 
@@ -171,10 +172,10 @@ def test_get_event_attendees_body_and_flags(tmp_path):
     raw = "RAW-EVENT-FULL"
     ev = _event(raw, subject="Budget review")
     ev.required_attendees = [SimpleNamespace(
-        mailbox=SimpleNamespace(name="Ahmed", email_address="ahmed@corp.example"),
+        mailbox=SimpleNamespace(name="Alice", email_address="alice@corp.example"),
         response_type="Accept")]
     ev.optional_attendees = [SimpleNamespace(
-        mailbox=SimpleNamespace(name=None, email_address="sara@corp.example"),
+        mailbox=SimpleNamespace(name=None, email_address="bob@corp.example"),
         response_type="Decline")]
     ev.organizer = SimpleNamespace(name="Boss", email_address="boss@corp.example")
     ev.text_body = "Agenda attached."
@@ -191,8 +192,8 @@ def test_get_event_attendees_body_and_flags(tmp_path):
     assert event["id"] == alias
     assert event["organizer"] == "Boss <boss@corp.example>"
     assert event["attendees"] == [
-        {"email": "ahmed@corp.example", "response": "Accept", "name": "Ahmed"},
-        {"email": "sara@corp.example", "response": "Decline"},
+        {"email": "alice@corp.example", "response": "Accept", "name": "Alice"},
+        {"email": "bob@corp.example", "response": "Decline"},
     ]
     assert event["body"] == "Agenda attached."
     assert event["recurring"] is True
@@ -427,32 +428,32 @@ def _contact(raw_id, name, email, title=None, company=None, phone=None):
 
 def test_find_people_auto_merges_and_gal_wins_duplicates(tmp_path):
     gal_entry = (
-        SimpleNamespace(name="Ahmed Al-X", email_address="ahmed@corp.example"),
-        SimpleNamespace(display_name="Ahmed Al-X", job_title="Director",
+        SimpleNamespace(name="Alice Example", email_address="alice@corp.example"),
+        SimpleNamespace(display_name="Alice Example", job_title="Director",
                         company_name="Acme",
-                        phone_numbers=[SimpleNamespace(phone_number="+966500000001")]),
+                        phone_numbers=[SimpleNamespace(phone_number="+15550100")]),
     )
     account = MagicMock()
     account.protocol.resolve_names.return_value = [gal_entry]
     account.contacts.all.return_value = [
-        _contact("C-RAW-1", "Ahmed (personal)", "AHMED@corp.example"),  # dup of GAL
-        _contact("C-RAW-2", "Ahmed Junior", "junior@else.example",
-                 title="Analyst", company="Elsewhere", phone="+966500000002"),
-        _contact("C-RAW-3", "Sara", "sara@x.example"),  # no query match
+        _contact("C-RAW-1", "Alice (personal)", "ALICE@corp.example"),  # dup of GAL
+        _contact("C-RAW-2", "Alice Ops", "ops@else.example",
+                 title="Analyst", company="Elsewhere", phone="+15550101"),
+        _contact("C-RAW-3", "Bob", "bob@x.example"),  # no query match
     ]
     ctx = _ctx(tmp_path, account)
-    res = _run(ctx, "find_people", {"query": "ahmed"})
+    res = _run(ctx, "find_people", {"query": "alice"})
     assert res["ok"] is True
     account.protocol.resolve_names.assert_called_once_with(
-        ["ahmed"], return_full_contact_data=True)
-    assert [p["email"] for p in res["items"]] == ["ahmed@corp.example",
-                                                  "junior@else.example"]
+        ["alice"], return_full_contact_data=True)
+    assert [p["email"] for p in res["items"]] == ["alice@corp.example",
+                                                  "ops@else.example"]
     gal_person = res["items"][0]
     assert gal_person["source"] == "gal"
-    assert gal_person["name"] == "Ahmed Al-X"  # GAL won the duplicate
+    assert gal_person["name"] == "Alice Example"  # GAL won the duplicate
     assert gal_person["title"] == "Director"
     assert gal_person["company"] == "Acme"
-    assert gal_person["phone"] == "+966500000001"
+    assert gal_person["phone"] == "+15550100"
     assert gal_person["id"] == "p1"
     contact_person = res["items"][1]
     assert contact_person["source"] == "contacts"
@@ -468,9 +469,9 @@ def test_find_people_gal_no_results_exception_is_skipped(tmp_path):
     account.protocol.resolve_names.return_value = [
         ErrorNameResolutionNoResults("no results")]
     account.contacts.all.return_value = [
-        _contact("C-RAW-9", "Ahmed Junior", "junior@else.example")]
+        _contact("C-RAW-9", "Alice Ops", "ops@else.example")]
     ctx = _ctx(tmp_path, account)
-    res = _run(ctx, "find_people", {"query": "junior"})
+    res = _run(ctx, "find_people", {"query": "ops"})
     assert res["ok"] is True
     assert [p["source"] for p in res["items"]] == ["contacts"]
 
@@ -478,10 +479,10 @@ def test_find_people_gal_no_results_exception_is_skipped(tmp_path):
 def test_find_people_source_contacts_never_hits_gal(tmp_path):
     account = MagicMock()
     account.contacts.all.return_value = [
-        _contact("C-RAW-5", "Ahmed Junior", "junior@else.example")]
+        _contact("C-RAW-5", "Alice Ops", "ops@else.example")]
     ctx = _ctx(tmp_path, account)
-    res = _run(ctx, "find_people", {"query": "ahmed", "source": "contacts"})
-    assert [p["email"] for p in res["items"]] == ["junior@else.example"]
+    res = _run(ctx, "find_people", {"query": "alice", "source": "contacts"})
+    assert [p["email"] for p in res["items"]] == ["ops@else.example"]
     account.protocol.resolve_names.assert_not_called()
 
 
@@ -596,11 +597,11 @@ def test_check_availability_passes_ewstimezone_for_named_zone_and_fixed_offset(t
     account_fixed.protocol.get_free_busy_info.return_value = iter([
         SimpleNamespace(calendar_events=[]),
     ])
-    ctx_fixed = _ctx(tmp_path / "fixed", account_fixed, ews_tz="Asia/Tokyo")
+    ctx_fixed = _ctx(tmp_path / "fixed", account_fixed, ews_tz=FIXED_OFFSET_TZ)
     res_fixed = _run(ctx_fixed, "check_availability", {
         "attendees": ["ops@example.com"],
-        "start": "2026-06-15T01:00+01:00",
-        "end": "2026-06-15T03:00+01:00",
+        "start": "2026-06-15T07:00+01:00",
+        "end": "2026-06-15T09:00+01:00",
     })
     assert res_fixed["ok"] is True
     kw_fixed = account_fixed.protocol.get_free_busy_info.call_args.kwargs
@@ -611,14 +612,14 @@ def test_check_availability_passes_ewstimezone_for_named_zone_and_fixed_offset(t
 
 
 @pytest.mark.parametrize("tz_name, expected_offset", [
-    ("Asia/Tokyo", "+09:00"),
-    ("America/New_York", "-04:00"),
+    (FIXED_OFFSET_TZ, "+03:00"),
+    ("UTC", "+00:00"),
 ])
 def test_check_availability_treats_naive_busy_events_as_requested_zone(
     tmp_path, tz_name, expected_offset,
 ):
     # Free/busy CalendarEvent boundaries arrive naive from exchangelib; testing
-    # two distant zones guarantees at least one differs from any host timezone.
+    # two distinct zones guarantees at least one differs from any host timezone.
     naive_busy = SimpleNamespace(
         start=datetime(2026, 6, 15, 9, 0),
         end=datetime(2026, 6, 15, 10, 0),

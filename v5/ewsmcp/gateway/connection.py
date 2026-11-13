@@ -1,10 +1,10 @@
 """Connection lifecycle manager — lazy, self-healing, bounded on 401.
 
-The corporate Exchange answers exchangelib's unauthenticated auth-type
-probe unreliably for *fresh* connections ("Failed to get auth type from
-service") while warm, long-lived processes keep working: exchangelib
-probes once per process and caches the negotiated auth type. Startup
-therefore must never gate on a successful connection. Tools register and
+Some Exchange deployments fail or time out on exchangelib's unauthenticated
+auth-type probe for *fresh* connections ("Failed to get auth type from
+service") while warm, long-lived sessions keep working because exchangelib
+probes once per process and caches the negotiated auth scheme. Startup
+therefore never gates on a successful connection. Tools register and
 transports bind immediately; this manager keeps trying in the background
 with exponential backoff + full jitter for transient network faults, while
 deferring to the gateway's authentication circuit breaker on HTTP 401

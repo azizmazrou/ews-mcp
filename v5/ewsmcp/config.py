@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # appropriate when the scheme is known.
     ews_auth_type_force: Optional[Literal["basic", "ntlm", "digest"]] = None
     ews_insecure_skip_verify: bool = False
-    ews_tz: str = "Asia/Riyadh"
+    ews_tz: str = "UTC"
     request_timeout: int = 30
 
     # --- Reliability --------------------------------------------------------

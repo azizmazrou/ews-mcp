@@ -24,6 +24,11 @@ def test_default_data_dir_is_home_scoped_absolute(monkeypatch, tmp_path):
     assert s.data_dir.endswith(".ewsmcp")
 
 
+def test_default_ews_tz_is_utc(monkeypatch):
+    monkeypatch.delenv("EWS_TZ", raising=False)
+    assert make_settings().ews_tz == "UTC"
+
+
 @pytest.mark.parametrize("marker", ["OneDrive", "Dropbox", "Google Drive"])
 def test_synced_paths_are_refused(tmp_path, marker):
     with pytest.raises(Exception, match="synced"):

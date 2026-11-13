@@ -14,7 +14,7 @@ from ewsmcp.cache.store import CacheStore
 
 
 def make_row(ews_id, *, folder="inbox", subject="Budget review",
-             sender_email="a@corp.example", sender_name="Ahmed",
+             sender_email="a@corp.example", sender_name="Sender",
              body="please review the numbers", date_ts=None, is_read=1,
              has_attachments=0, conv="CONV-1", imid=None, to=None):
     return {

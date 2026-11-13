@@ -19,7 +19,7 @@ from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import mail_read, writes
 from ewsmcp.tools.base import Context, dispatch
 
-TZ = ZoneInfo("Asia/Riyadh")
+TZ = ZoneInfo("Etc/GMT-3")
 READ_SPECS = {spec.name: spec for spec in mail_read.TOOLS}
 WRITE_SPECS = {spec.name: spec for spec in writes.TOOLS}
 

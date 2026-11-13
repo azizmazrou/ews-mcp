@@ -166,9 +166,8 @@ def test_disconnect_mid_body_does_not_hang_or_crash(tmp_path):
 def test_oauth_discovery_paths_404_even_behind_api_key(tmp_path):
     """We implement no OAuth at all — these MUST be 404, never 401.
 
-    A 401 here reads to a spec-compliant MCP client (LibreChat included)
-    as "OAuth required, no metadata available", which surfaced as a
-    dead-end OAuth prompt even though this server only wants headers.
+    A 401 here reads to a spec-compliant MCP client as "OAuth required,
+    no metadata available" instead of falling back to configured headers.
     """
     app = build_app(_ctx(tmp_path), make_settings(mcp_api_key="secret"))
     for path in (

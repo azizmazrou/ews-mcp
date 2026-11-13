@@ -9,7 +9,7 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
    safety gates. Judgment — summaries, briefings, prioritization,
    commitments, voice — belongs to the CALLING assistant. The server never
    makes an LLM call and never ships a "judgment tool". Tool count stays
-   lean (≤ 29) and is generated into the docs, never hand-counted.
+   lean (≤ 30) and is generated into the docs, never hand-counted.
 2. **Indexing = SQLite + FTS5 in core.** The optional semantic tier hides
    behind an adapter (`EWS_SEMANTIC_INDEX=none|pgvector`, default `none`);
    the public server runs with zero dependencies beyond Exchange
@@ -20,9 +20,10 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 4. **Safety gates live ONLY in the dispatcher** (`tools/base.py`).
    Handlers declare `side_effect_class` and `confirm`; they contain no
    policy.
-5. **Never pin `auth_type`, never retry rejected credentials.** Only
-   exchangelib auto-negotiation works against the target Exchange
-   (verified live), and blank `EWS_AUTH_TYPE_FORCE` values load as unset.
+5. **Default to auto-negotiated `auth_type`, never retry rejected credentials.**
+   exchangelib auto-negotiation is the default because it adapts to the
+   authentication schemes the server offers, and blank `EWS_AUTH_TYPE_FORCE`
+   values load as unset.
    `RejectingFaultTolerance` raises `UnauthorizedError` on the first HTTP
    401 (unless the body carries `currently locked out`), and `EWSGateway`'s
    authentication circuit breaker enforces a cooldown
@@ -45,10 +46,11 @@ Four packs (see the generated table in `docs/API.md`):
   `check_availability`, `find_people`, `get_contact`, `get_oof_settings`,
   `get_server_status`.
 - **tasks / waiting-on** (3): `list_tasks`, `update_task`, `waiting_on`.
-- **writes** (12): draft lifecycle (`create_draft`, `update_draft`,
-  `delete_draft`, `send_draft`), bulk ops (`update_messages`,
-  `move_messages`, `delete_messages`), calendar writes (`create_event`,
-  `update_event`, `respond_to_event`, `cancel_event`), `set_oof`.
+- **writes** (13): draft lifecycle (`create_draft`, `update_draft`,
+  `add_draft_attachment`, `delete_draft`, `send_draft`), bulk ops
+  (`update_messages`, `move_messages`, `delete_messages`), calendar writes
+  (`create_event`, `update_event`, `respond_to_event`, `cancel_event`),
+  `set_oof`.
 - **semantic** (+1, only when enabled): `find_similar`.
 
 Every list-shaped result ships exactly the canonical envelope
@@ -95,8 +97,8 @@ transaction and run off the event loop.
 `MsgCard` (~60 tokens): id, from, subject, date, 200-char snippet, flags.
 `MsgFull`: card + recipients + CLEANED body (bilingual quoted-history +
 signature stripping) + attachment inventory. Raw HTML only on explicit
-`include_html=true`. The measured pathology this kills: one v3 detail
-call shipped 115,457 chars for a ~150-char message.
+`include_html=true`. Full HTML bodies routinely exceed 100 kB for a short
+message.
 
 ## §Cache — the mirror (see `cache/`)
 

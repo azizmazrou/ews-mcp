@@ -198,13 +198,11 @@ def build_app(ctx, settings, streamable: Optional[Any] = None):
                 "connection": conn, "tools": len(ctx.registry),
             })
 
-        # OAuth discovery/registration — we implement neither. A 401 here
-        # (which the api_key gate below would otherwise produce for every
-        # path) reads to a spec-compliant MCP client as "OAuth required,
-        # but no metadata available", which surfaced as a dead-end OAuth
-        # prompt in LibreChat even though this server only ever wanted
-        # header-based auth. 404 is the correct "not supported" signal —
-        # the client is expected to fall back to its configured headers.
+        # OAuth discovery/registration — we implement neither. Returning 401
+        # here (as the api_key gate below would do) tells a spec-compliant
+        # MCP client "OAuth required, but no metadata available". 404 is the
+        # standard "not supported" signal so clients fall back to their
+        # configured headers.
         if "/.well-known/" in path or path == "/register":
             return await _send_json(send, 404, {"ok": False, "error": {
                 "code": "validation", "message": "not found"}})

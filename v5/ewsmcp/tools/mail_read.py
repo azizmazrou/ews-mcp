@@ -593,7 +593,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
             "flag_complete) — "
             "Exchange runs them on different engines.",
             hint="Either fold everything into the AQS string "
-                 "(e.g. 'from:ahmed subject:rfp received>=2026-06-01') or drop "
+                 "(e.g. 'from:alice@example.com subject:rfp received>=2026-06-01') or drop "
                  "`query` and use only structured filters.",
         )
     tz = ctx.settings.ews_tz
@@ -1364,7 +1364,7 @@ TOOLS: List[ToolSpec] = [
         name="search_messages",
         description=(
             "Search mail. TWO ENGINES, mutually exclusive: pass `query` (an "
-            "Exchange AQS string, e.g. 'from:ahmed subject:rfp hasattachment:yes') "
+            "Exchange AQS string, e.g. 'from:alice@example.com subject:rfp hasattachment:yes') "
             "OR the structured filters (sender/subject/since/until/is_unread/"
             "has_attachments/categories/flag_complete) — combining `query` with any "
             "structured filter is "
