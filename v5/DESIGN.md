@@ -145,6 +145,14 @@ message.
   refreshes the folder tree (honest unread/total counts), the expanded
   14-day calendar window and the tasks folder. Failures degrade — reads
   fall back to live EWS, the server never gates on the mirror.
+- `lease.py`: non-blocking OS file lock on `cache/sync.lock`
+  (`msvcrt.locking` on Windows, `fcntl.flock` on POSIX) held for the life
+  of the process so at most one `SyncEngine` runs per `DATA_DIR`.
+  Followers serve every tool from the shared mirror, skip
+  `EWS_CACHE_PURGE_ON_BOOT`, report `cache.sync.role: "follower"`, and
+  retry acquisition every 30 s to take over when the leader exits. If the
+  lock file cannot be opened or locked, `ewsmcp` logs once and runs sync
+  as before (never-exit rule).
 - Provenance contract: every read is stamped `source: cache|live`
   (+ `as_of` for cache); `fresh:true` forces live. `EWS_CACHE_ENABLED=
   false` = pure EWS reads, fully functional.

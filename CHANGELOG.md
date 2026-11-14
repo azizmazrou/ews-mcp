@@ -11,6 +11,8 @@
 ### Changed
 - Upgraded `v5/` dependency pin from `exchangelib==5.0.3` to `exchangelib==5.6.0` (updating the `FolderCollection.view` signature pin and adding inbox-rule service/model pins). Legacy `src/` keeps its existing pin.
 - Default `v5/` tool surface grows from 30 to **33** tools (**17** at `read`, **28** at `draft`, **33** at `full`; design cap raised from 30 to 35).
+### Fixed
+- Only one `ewsmcp` process per `DATA_DIR` runs the background `SyncEngine`: the leader holds a non-blocking OS file lock on `cache/sync.lock` for the life of the process while other processes on the same `DATA_DIR` read the shared SQLite mirror as followers (`get_server_status.cache.sync.role`: `"leader"` | `"follower"`), skip `EWS_CACHE_PURGE_ON_BOOT` with a warning, and retry the lock every 30 seconds to take over when the leader exits instead of multiplying Exchange delta syncs and triggering server throttling (degrading to running sync with a single logged error if `sync.lock` cannot be opened).
 
 ## [4.5.0a2] - 2026-11-13
 

@@ -64,18 +64,19 @@ without merge** — it usually means the bug was real and got fixed in
 a separate commit by the maintainer; the issue stays linked so you can
 verify the fix.
 
-If you'd rather your code merged verbatim, the bar is higher:
-- The PR must apply cleanly on top of `main`
+A pull request is therefore read as a proposal: it shows the problem and
+one way to solve it, and the change itself is then written by the
+maintainer. A proposal is quickest to assess when:
+- It applies cleanly on top of `main`
 - For `v5/`, all four checks from the root README's Development section
-  must pass (`python -m pytest v5/tests -q`, `python -m ruff check v5`,
+  pass (`python -m pytest v5/tests -q`, `python -m ruff check v5`,
   `python v5/scripts/boot_smoke.py full`, and
-  `python v5/scripts/dump_tool_table.py --check`), new behaviour must
-  come with a test under `v5/tests`, and any user-visible change must
-  add a line to `CHANGELOG.md` under `[Unreleased]` (for legacy `src/`
-  changes, `docker-build-test.yml` must pass)
-- The change must not introduce a new external service dependency
+  `python v5/scripts/dump_tool_table.py --check`) and new behaviour
+  comes with a test under `v5/tests` (for legacy `src/` changes,
+  `docker-build-test.yml` passes)
+- It does not introduce a new external service dependency
   (e.g. a vector database) without prior discussion in an issue
-- The change must not re-add LLM-reasoning tools removed in v4.0
+- It does not re-add LLM-reasoning tools removed in v4.0
   (see CHANGELOG for the rationale)
 
 ## Local development
