@@ -318,16 +318,30 @@ the directory sees several failed logins at once. A single HTTP server on
 loopback (`MCP_TRANSPORT=http`, `MCP_HOST=127.0.0.1`) that every client
 connects to avoids that, and shares one warm EWS session.
 
+## Upgrading from 4.5.0a2
+
+- `exchangelib==5.6.0` is now required (was `5.0.3`); reinstall with
+  `pip install -U ./v5`.
+- Three tools were added for Exchange Inbox rules — `list_rules`,
+  `save_rule`, and `delete_rule` — bringing the default surface from 30
+  to **33** tools (**17** at `read`, **28** at `draft`, **33** at `full`).
+  Changing a rule through Exchange discards Outlook-only rule data; the
+  two write tools warn about it before they act (see
+  [`docs/API.md`](docs/API.md), "Inbox rules").
+- Several processes on one `DATA_DIR` no longer each run a background
+  sync: one does, the others read the shared mirror (see "Several
+  clients on one machine").
+
 ## Upgrading from 4.5.0a1
 
 - `EWS_TZ` now defaults to `UTC`; set `EWS_TZ` to an IANA zone name if
   you relied on the previous default.
 - The host-specific Compose file is replaced by
   [`docker-compose.example.yml`](docker-compose.example.yml).
-- `mcp>=1.30` and `exchangelib==5.6.0` are now required (`pip install -U ./v5`).
-- Five tools were added since 4.5.0a1 — `check_messages`,
-  `add_draft_attachment`, `list_rules`, `save_rule`, and `delete_rule` —
-  bringing the default surface from 28 to **33** tools.
+- `mcp>=1.30` is now required (`pip install -U ./v5`).
+- Two tools were added in 4.5.0a2 — `check_messages` and
+  `add_draft_attachment` — bringing the default surface from 28 to 30
+  tools.
 - Multi-folder `search_messages` (`folder="f:all"`, `recursive=true`) is
   bounded to at most `200` folders per call (extras reported in
   `folders_skipped`) and `offset + limit` at most `500`.

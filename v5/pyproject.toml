@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ews-mcp"
-version = "4.5.0a2"
+version = "4.5.0a3"
 description = "EWS MCP server — a lean, safety-gated, cache-first tool surface for a mailbox assistant (see DESIGN.md)"
 requires-python = ">=3.11"
 dependencies = [
