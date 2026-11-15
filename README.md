@@ -65,7 +65,7 @@ When the server runs on a host that can reach Exchange directly:
 ```bash
 # 4.5 (pin an exact tag; the 4.5 line never publishes :latest)
 docker run -d --name ews-mcp-v5 -p 8000:8000 --env-file .env \
-  -v ewsmcp-data:/data ghcr.io/azizmazrou/ews-mcp:v4.5.0a2
+  -v ewsmcp-data:/data ghcr.io/azizmazrou/ews-mcp:v4.5.0a3
 
 # legacy 4.0
 docker run -d --name ews-mcp --env-file .env --network host \
