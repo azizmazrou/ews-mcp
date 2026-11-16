@@ -113,14 +113,25 @@ them exactly as returned; raw Exchange ids never appear.
   `draft`): task inspection, sent threads awaiting a reply, and task
   updates or completion.
 - **Writes** (8 tools added at `draft`, 5 more at `full`): at `draft`,
-  `create_draft` (with `attachments`), `update_draft`,
-  `add_draft_attachment` (bytes via `content_base64` or a relative
-  `path` inside `EWS_ATTACHMENT_DIR`), `delete_draft`,
-  `update_messages`, `move_messages`, and `create_event` /
-  `update_event` (including `recurrence` and `reminder_minutes`;
-  notifying attendees also requires `SEND_ENABLED=true`); at `full`,
-  `send_draft`, `respond_to_event`, `cancel_event`, `delete_messages`,
-  and `set_oof`.
+  `create_draft` (with `attachments` and `body_format="text"|"html"`
+  rebuilt through an allow-list sanitiser), `update_draft` (with
+  `body_format` and `remove_attachments` by attachment name or `a`-alias
+  id — all-or-nothing selector matching before any deletion, detaching
+  before saving other fields, and reporting `removed` plus remaining
+  `attachments` on a mid-batch failure), `add_draft_attachment` (bytes via
+  `content_base64`, a relative `path` inside `EWS_ATTACHMENT_DIR`, or an
+  existing mail `message_id` attached as a `message/rfc822` `.eml` file
+  with `Bcc`/`Resent-Bcc` stripped and declared size checked before
+  downloading MIME), `delete_draft`, `update_messages`,
+  `move_messages`, and `create_event` / `update_event` (including
+  `recurrence` and `reminder_minutes`; notifying attendees also requires
+  `SEND_ENABLED=true`); at `full`, `send_draft`, `respond_to_event`,
+  `cancel_event` (explicit fail-closed decision: cancels meetings you
+  organize with attendees checked by the recipient guard, moves plain
+  non-meeting appointments without attendees to Deleted Items, flags
+  whole-series cancellations, binds `start`/`end`/`type` into the token,
+  and refuses non-calendar items and foreign or unverified organizers),
+  `delete_messages`, and `set_oof`.
 - **Inbox rules** (`list_rules` at `read`; `save_rule` and `delete_rule`
   at `draft`, always two-phase confirmed): server-side filing, category,
   read-state, and importance rules (`r`-alias ids, strict mailbox-internal
@@ -212,8 +223,8 @@ docker run --rm -p 127.0.0.1:8000:8000 --env-file .env -v ewsmcp-data:/data ews-
 | `SEND_ENABLED` | `false` | Global send kill-switch (blocks `send`-class tools and attendee-notifying calendar writes) |
 | `SEND_CONFIRM_SECRET` | `None` | HMAC secret for confirm tokens; random per-process when unset (set to survive restarts) |
 | `CONFIRM_TTL_SECONDS` | `600` | Confirm token lifetime in seconds |
-| `EWS_RECIPIENT_ALLOWLIST` | `""` | Comma-separated address globs permitted on drafts, events, and `send_draft` (empty allows all) |
-| `EWS_RECIPIENT_DENYLIST` | `""` | Comma-separated address globs blocked before the allowlist on drafts, events, and `send_draft` |
+| `EWS_RECIPIENT_ALLOWLIST` | `""` | Comma-separated address globs permitted on drafts, events, `send_draft`, and `cancel_event` (empty allows all) |
+| `EWS_RECIPIENT_DENYLIST` | `""` | Comma-separated address globs blocked before the allowlist on drafts, events, `send_draft`, and `cancel_event` |
 | `EWS_MAX_SENDS_PER_HOUR` | `10` | Rolling 1-hour send rate cap (`<= 0` disables) |
 | `EWS_ATTACHMENT_DIR` | `""` | Single directory from which `create_draft` / `add_draft_attachment` may read relative `path` files (`""` = off) |
 | `EWS_MAX_ATTACHMENT_MB` | `25` | Per-call attachment ceiling in MiB (`1`–`50`); HTTP request body limit derives from this at startup |
@@ -240,19 +251,45 @@ docker run --rm -p 127.0.0.1:8000:8000 --env-file .env -v ewsmcp-data:/data ews-
 ## The send flow (two-phase, content-bound)
 
 ```text
-create_draft(mode="reply", reply_to="m12", body="…", attachments=[…])
-  → {draft_id: "d1", preview, note: "saved as draft — NOT sent"}
+create_draft(mode="reply", reply_to="m12", body="…", body_format="text"|"html", attachments=[…])
+  → {draft_id: "d1", body_format, sanitised?, preview, note: "saved as draft — NOT sent"}
 send_draft(draft_id="d1")
   → phase 1: fetches the draft, returns its resolved to/cc/bcc, subject,
-    body_snippet, attachment_count, and attachments, plus a single-use
-    confirm_token bound to subject, recipients, body, and attachments
-    (ids, names, sizes) — nothing sent
+    body_snippet, attachment_count, attachments, link_hosts (mismatching
+    link hosts first, then other link hosts, embedded non-anchor hosts,
+    and unparsed hosts from the union over six character-reference and
+    whitespace readings of the raw text, up to 50 with link_hosts_total),
+    links (mismatching links first, up to 20 distinct {text, href} pairs,
+    links_total when more), and ordered warnings (unverified/size notices,
+    then singular hosts-omitted and outside-normal-markup notices, then up
+    to 100 mismatch warnings plus a count line and links_unverified: true
+    beyond 100), plus a single-use confirm_token bound to
+    subject, recipients, text and HTML body, and attachments (ids, names,
+    and sizes — not a hash of attachment content) — nothing sent
 send_draft(draft_id="d1", confirm_token="…")
   → phase 2: verifies and consumes the token, then under the per-draft
     lock fetches the draft once, re-checks its content hash against the
     verified hash, and sends that same object (any change after the
     preview fails with confirm_invalid)
 ```
+
+`send_draft` makes **four promises, and only these**: (1) a body rebuilt by
+`sanitise_html` (`body_format="html"`) has exact links, link text, and
+mismatch warnings; (2) for any stored body, every host that appears in URL
+form anywhere in its raw text is listed in `link_hosts` (`unparsed: true`
+when outside parsed links), or `links_unverified` is `true`; (3) critical
+notices (mismatch warnings, "hosts omitted", "outside normal markup",
+"unverified") are never cut (non-critical kinds fold after three, and the
+warning cap grows up to 200 to keep all mismatch and omission notices); and
+(4) cost is bounded (`sanitise_html` < 2 s up to 200,000 chars;
+`inspect_draft_links` < 5 s up to 2,000,000 chars, above which hosts are
+listed by the raw-text scan only with `links_unverified: true`; no single
+library call holds the GIL for more than ~0.2 s). **Not promised**: pairing
+link text with link target inside quoted or otherwise foreign HTML this
+server did not write, or catching look-alike characters in link text beyond
+removing whitespace around dots and warning when a whitespace-free token
+mixes ASCII letters with any non-ASCII character (pure non-Latin text such
+as Arabic gets none).
 
 ## Health & operations
 

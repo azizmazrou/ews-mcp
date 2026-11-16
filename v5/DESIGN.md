@@ -77,12 +77,64 @@ without two model decisions):
 - **Tiers** `EWS_CAPABILITY_TIER=read|draft|full` (default `draft`)
   remove above-tier tools from the registry AND refuse them at dispatch.
 - **Recipient guard** (allow/denylist globs) fires on every tool whose
-  arguments carry recipients (drafts, events) and on the draft's RESOLVED
-  recipients inside `send_draft`'s confirm gate.
+  arguments carry recipients (drafts, events) and on the RESOLVED
+  recipients inside `send_draft`'s and `cancel_event`'s confirm gates
+  (cancellation `attendees` are checked and trigger external-recipient
+  warnings just like mail recipients).
 - **Two-phase confirm**: phase 1 returns a preview + HMAC token; phase 2
   must echo it. For `send_draft` the token binds the draft's CONTENT
-  (subject + sorted recipients + full body + attachments with ids,
-  names, and sizes); phase 2 fetches the draft once, re-verifies the
+  (subject + sorted recipients + full text and HTML body + attachments
+  bound by `id`, `name`, and `size` — not by a hash of attachment byte
+  content), and the phase-1 preview inspects stored
+  HTML off the event loop. For `cancel_event`, each phase makes one
+  projected fetch (`_EVENT_CANCEL_FIELDS`), fails closed on non-calendar
+  items and foreign or unverified meeting organizers, marks recurring
+  series masters (`type="RecurringMaster"`) in the preview, and binds
+  `event_id`, `action` (`"cancel"` vs `"delete"`), `subject`, `start`,
+  `end`, `type`, `series`, `is_meeting`, sorted `attendees`, and
+  `message` into the token. Rather than chasing every client HTML parser
+  quirk on foreign markup, draft HTML sanitisation and preview make **four
+  promises, and only these**:
+  1. **A body that went through `sanitise_html` is exact**: its links,
+     their text, and mismatch warnings are right because we wrote that
+     markup.
+  2. **For any stored body, every host that appears in URL form anywhere
+     in its text is listed** in `link_hosts` (marked `unparsed: true` when
+     not reported by the tokenizer walk), or `links_unverified` is `true`.
+     The host list includes the **union over six readings of the raw text**
+     (with no quote, tag, attribute, or comment state, so adding a reading
+     can only add hosts): three character-reference readings (**none**
+     decoded; **as a browser decodes** — numeric always with or without `;`,
+     named with `;`, and the legacy HTML5 names without `;` only; and
+     **everything decoded to a fixed point of three passes**) crossed with
+     two whitespace readings (tab, CR, and LF **deleted**, and tab, CR, and
+     LF **replaced by a space**).
+  3. **Critical notices are never cut**: warnings are ordered as:
+     unverified and size notices; then the singular hosts-omitted notice and
+     outside-normal-markup notice (each exists at most once); then mismatch
+     warnings (including `mailto:` links with multiple recipients or query
+     parameters), shown up to 100 and followed beyond 100 by one count line
+     saying how many more mismatching links exist and setting
+     `links_unverified: true`; then everything else (more than three
+     warnings of one kind folded into a single count line). `links` lists
+     mismatching links first; `link_hosts` lists hosts of mismatching links
+     first, then other link hosts, then `embedded`, then `unparsed`, and
+     sets `links_unverified: true` when hosts exceed 50.
+  4. **Cost is bounded at a stated size**: `sanitise_html` finishes in
+     under 2 s for any input up to 200,000 characters; `inspect_draft_links`
+     finishes in under 5 s for any stored body up to 2,000,000 characters,
+     above which it lists hosts from the raw-text scan only and sets
+     `links_unverified: true`. Runs of more than 30 combining marks are
+     cut to 30 before normalisation, hosts longer than 253 characters are
+     cut to 80 characters with a warning and never passed to IDNA, and
+     neither function holds the Python GIL for more than ~0.2 s in one
+     library call.
+  **Not promised**: pairing link text with link target inside quoted or
+  otherwise foreign HTML that this server did not write; and catching
+  look-alike characters in link text beyond removing whitespace around dots
+  and warning when a whitespace-free link-text token mixes ASCII letters
+  with any non-ASCII character (pure non-Latin text such as Arabic link
+  text gets no warning). Phase 2 fetches the draft once, re-verifies the
   hash on that object, and sends that same object, so any edit between
   preview and confirm fails with `confirm_invalid`. Draft tools
   (`update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft`)
@@ -90,6 +142,36 @@ without two model decisions):
   idempotent replays (same `idempotency_key` + draft) return the cached
   receipt without a fresh token — that is what makes retry-after-timeout
   safe (Stripe semantics).
+- **Draft HTML sanitisation** (`htmlsafe.py`): `create_draft` and
+  `update_draft` default to `body_format="text"` (plain text escaped and
+  wrapped) and also accept `body_format="html"` (calendar event bodies
+  stay plain text; `update_draft` omits `body_format` when `body` is not
+  supplied). HTML inputs are tokenised in one linear-time non-raising pass
+  (stdlib-only custom tokenizer, never `html.parser`, executed off the
+  event loop; trailing `/` is ignored on non-void HTML elements; numeric
+  character references in attributes decode with or without `;`, while
+  named character references in attributes decode only when terminated
+  with `;` so `&region=sa` stays verbatim; runs of more than 30 combining
+  marks are cut to 30; and `drop_stack` closes in O(1) amortised time) and
+  rebuilt from scratch as `<html><body…>…</body></html>` (`dir`, `lang`,
+  `align`, and `style` on input `<html>`/`<body>` carried to `<body>`,
+  `body` winning) with browser-matching implied end tags and every text
+  node and attribute value escaped, then re-sanitised until the output is a
+  fixed point (reporting first-pass removal counts). Anchors with no
+  visible text anywhere in their descendants (table cells included) are
+  removed and counted under `removed_links`. Only allow-listed
+  structural/typography/table/list/link elements, element attributes,
+  `http`/`https` and address-only `mailto` links (`?query`, `#fragment`,
+  and extra or percent-smuggled recipients stripped and counted), and safe
+  typography/layout CSS declarations (`unicode-bidi` restricted to
+  `normal|embed|isolate|plaintext`, `font-size` of `0` or `< 6px/pt`
+  dropped) pass; bidi override controls (`U+202D`/`U+202E`), scripts,
+  styles, forms, embeds, `noembed`, `noframes`, SVG/MathML,
+  comments/CDATA/PI/doctype, and all `img` elements are dropped. Inputs
+  over 200,000 characters (applied to the input; escaped output may be
+  longer) or with no visible non-blank text after sanitising fail with
+  `validation` before touching Exchange; any stripped elements,
+  attributes, or link parts are reported in `sanitised`.
 - **Send rate cap** `EWS_MAX_SENDS_PER_HOUR`.
 - **Inbox rules safety**: `save_rule` builds `Actions` strictly from an
   allow-list of mailbox-internal actions (`move_to_folder`,
@@ -114,7 +196,8 @@ without two model decisions):
 ## §Ids — aliases only
 
 The model never sees a raw EWS id: outputs carry short aliases (`m12`,
-`e3`, `d1`, `t4`, `p2`, `k1`, `f7`, `r1`), inputs accept aliases or raw ids.
+`e3`, `d1`, `a1`, `t4`, `p2`, `k1`, `f7`, `r1`), inputs accept aliases or
+raw ids.
 The SQLite-backed aliaser survives restarts, rebinds on moves, and keeps
 `internet_message_id` as a secondary key. Stale alias → clean re-search
 hint, never an upstream error. Page-sized mints batch into one

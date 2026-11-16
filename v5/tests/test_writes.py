@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import date, datetime
+import threading
+import time
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock
@@ -27,15 +29,25 @@ from exchangelib import (
     Account,
     CalendarItem,
     Configuration,
+    Contact,
     Credentials,
     EWSDate,
     EWSDateTime,
     EWSTimeZone,
     FileAttachment,
+    HTMLBody,
+    Message,
     OofSettings,
+    Task,
 )
 from exchangelib.attachments import AttachmentId
-from exchangelib.items import SEND_TO_ALL_AND_SAVE_COPY, SEND_TO_NONE
+from exchangelib.errors import ErrorItemNotFound, ErrorServerBusy
+from exchangelib.items import (
+    SEND_TO_ALL_AND_SAVE_COPY,
+    SEND_TO_NONE,
+    MeetingCancellation,
+    MeetingRequest,
+)
 from exchangelib.protocol import CachingProtocol
 from exchangelib.recurrence import (
     AbsoluteMonthlyPattern,
@@ -52,9 +64,10 @@ from conftest import FIXED_OFFSET_TZ, make_settings
 from ewsmcp.audit import AuditLog
 from ewsmcp.confirm import reset_consumed_tokens
 from ewsmcp.dates import parse_when
+from ewsmcp.htmlsafe import MAX_INSPECT_HTML_CHARS
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import writes
-from ewsmcp.tools.base import Context, dispatch
+from ewsmcp.tools.base import Context, dispatch, reset_send_rate_window
 
 SPEC = {s.name: s for s in writes.TOOLS}
 DRAFTS_ID = "FOLDER-DRAFTS"
@@ -188,6 +201,7 @@ def test_pack_surface_classes_and_confirm_declarations():
     # is skipped only for an idempotent replay of an already-sent draft.
     assert SPEC["send_draft"].confirm({"draft_id": "d1"}) is True
     assert SPEC["send_draft"].preview is not None
+    assert SPEC["cancel_event"].preview is not None
     assert SPEC["create_event"].confirm({"send_invitations": True}) is True
     assert SPEC["create_event"].confirm({}) is False
     assert SPEC["update_event"].confirm({"notify_attendees": True}) is True
@@ -963,15 +977,71 @@ def test_respond_to_event_accept_two_phase(tmp_path):
 def test_cancel_event_two_phase(tmp_path):
     account = make_account()
     ctx = full_ctx(tmp_path, account)
-    ev = MagicMock()
+    ev = SimpleNamespace(
+        id="RAW-E3",
+        changekey="CK-E3",
+        item_class="IPM.Appointment",
+        subject="Design review",
+        start=datetime(2026, 11, 20, 9, 0, tzinfo=LOCAL_TZ),
+        end=datetime(2026, 11, 20, 10, 0, tzinfo=LOCAL_TZ),
+        type="Single",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="exec@corp.example"),
+        required_attendees=[
+            SimpleNamespace(mailbox=SimpleNamespace(email_address="peer@corp.example"))
+        ],
+        optional_attendees=None,
+        resources=None,
+        cancel=MagicMock(name="cancel"),
+        move_to_trash=MagicMock(name="move_to_trash"),
+    )
     account._by_id["RAW-E3"] = ev
     kwargs = {"event_id": "RAW-E3", "message": "postponed"}
     p1 = call(ctx, "cancel_event", kwargs)
     assert p1["requires_confirmation"] is True
+    assert p1["preview"]["action"] == "cancel"
+    assert p1["preview"]["attendee_count"] == 1
+    assert p1["preview"]["attendees"] == ["peer@corp.example"]
+    assert p1["preview"]["type"] == "Single"
+    assert account.fetch_projections == [writes._EVENT_CANCEL_FIELDS]
     ev.cancel.assert_not_called()
     p2 = call(ctx, "cancel_event", {**kwargs, "confirm_token": p1["confirm_token"]})
     assert p2["cancelled"] is True
+    assert account.fetch_projections == [
+        writes._EVENT_CANCEL_FIELDS,
+        writes._EVENT_CANCEL_FIELDS,
+    ]
     ev.cancel.assert_called_once_with(new_body="postponed")
+
+    # Someone else's meeting on the same path must be refused before minting a token.
+    foreign = SimpleNamespace(
+        id="RAW-E3-FOREIGN",
+        changekey="CK-E3F",
+        item_class="IPM.Appointment",
+        subject="External sync",
+        start=datetime(2026, 11, 20, 11, 0, tzinfo=LOCAL_TZ),
+        end=datetime(2026, 11, 20, 12, 0, tzinfo=LOCAL_TZ),
+        type="Single",
+        is_meeting=True,
+        my_response_type="Unknown",
+        organizer=SimpleNamespace(email_address="chair@example.com"),
+        required_attendees=[
+            SimpleNamespace(mailbox=SimpleNamespace(email_address="exec@corp.example"))
+        ],
+        optional_attendees=None,
+        resources=None,
+        cancel=MagicMock(name="cancel"),
+        move_to_trash=MagicMock(name="move_to_trash"),
+    )
+    account._by_id["RAW-E3-FOREIGN"] = foreign
+    refused = call(ctx, "cancel_event", {"event_id": "RAW-E3-FOREIGN"})
+    assert refused["ok"] is False
+    assert refused["error"]["code"] == "validation"
+    assert "respond_to_event" in refused["error"]["message"]
+    assert "confirm_token" not in refused
+    foreign.cancel.assert_not_called()
+    foreign.move_to_trash.assert_not_called()
 
 
 # --- delete_messages / set_oof ----------------------------------------------------
@@ -1892,3 +1962,1939 @@ def test_draft_fetches_use_explicit_projections_excluding_mime_content(tmp_path)
     for projection in account.fetch_projections:
         assert isinstance(projection, list) and projection
         assert "mime_content" not in projection
+
+
+# --- HTML draft bodies & send_draft link preview --------------------------------
+
+
+def test_create_draft_html_clean_stores_rebuilt_body_without_sanitised(tmp_path, monkeypatch):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    FakeDraftMessage.last = None
+
+    markup = '<div dir="rtl" style="text-align: right"><p>مرحباً <b>بكم</b></p></div>'
+    res = call(ctx, "create_draft", {
+        "to": ["team@example.com"],
+        "subject": "Notice",
+        "body": markup,
+        "body_format": "html",
+    })
+    assert res["ok"] is True
+    assert res["body_format"] == "html"
+    assert "sanitised" not in res
+    assert res["preview"]["body_snippet"] == "مرحباً بكم"
+    saved_body = FakeDraftMessage.last.kwargs["body"]
+    assert isinstance(saved_body, HTMLBody)
+    assert str(saved_body) == f"<html><body>{markup}</body></html>"
+
+
+def test_create_draft_html_dirty_reports_sanitised_and_plain_text_unchanged(
+    tmp_path, monkeypatch
+):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+
+    dirty = (
+        "<script>alert(1)</script>"
+        '<img src="https://example.com/pixel.gif">'
+        '<p onclick="steal()">Review '
+        '<a href="javascript:alert(1)">bad</a> and '
+        '<a href="https://example.com/doc">good</a></p>'
+    )
+    res = call(ctx, "create_draft", {
+        "to": ["team@example.com"],
+        "subject": "Review",
+        "body": dirty,
+        "body_format": "html",
+    })
+    assert res["ok"] is True
+    assert res["body_format"] == "html"
+    assert res["sanitised"] == {
+        "removed_elements": ["img", "script"],
+        "removed_attributes": 1,
+        "removed_links": 1,
+    }
+    stored = str(FakeDraftMessage.last.kwargs["body"])
+    assert stored == (
+        "<html><body><p>Review <a>bad</a> and "
+        '<a href="https://example.com/doc">good</a></p></body></html>'
+    )
+    assert "<script" not in res["preview"]["body_snippet"]
+
+    # Plain text default still escapes tags literally and omits sanitised.
+    plain_res = call(ctx, "create_draft", {
+        "to": ["team@example.com"],
+        "subject": "Plain",
+        "body": "<b>literal</b> & plain",
+    })
+    assert plain_res["ok"] is True
+    assert plain_res["body_format"] == "text"
+    assert "sanitised" not in plain_res
+    assert "&lt;b&gt;literal&lt;/b&gt; &amp; plain" in str(
+        FakeDraftMessage.last.kwargs["body"]
+    )
+
+
+@pytest.mark.parametrize("bad_kwargs", [
+    {"to": ["team@example.com"], "body": "<p>" + ("x" * 200_000) + "</p>", "body_format": "html"},
+    {"to": ["team@example.com"], "body": "<script>alert(1)</script>", "body_format": "html"},
+    {"to": ["team@example.com"], "body": '<img src="https://example.com/a.png">', "body_format": "html"},
+    {"to": ["team@example.com"], "body": "<p>&nbsp;&#8203;</p>", "body_format": "html"},
+    {"to": ["team@example.com"], "body": "hello", "body_format": "markdown"},
+])
+def test_create_draft_html_refusals_save_nothing(tmp_path, monkeypatch, bad_kwargs):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    FakeDraftMessage.last = None
+
+    res = call(ctx, "create_draft", bad_kwargs)
+    assert res["ok"] is False
+    assert res["error"]["code"] == "validation"
+    assert FakeDraftMessage.last is None
+
+
+def test_create_draft_reply_reply_all_and_forward_support_html(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+
+    original = MagicMock()
+    original.subject = "Schedule"
+    reply_item = MagicMock()
+    reply_item.to_recipients = [SimpleNamespace(email_address="peer@corp.example")]
+    reply_item.cc_recipients = None
+    reply_item.bcc_recipients = None
+    reply_item.save.return_value = SimpleNamespace(id="RAW-HTML-REP", changekey="CK-H1")
+    original.create_reply.return_value = reply_item
+    original.create_reply_all.return_value = reply_item
+    original.create_forward.return_value = reply_item
+    account._by_id["RAW-ORIG-HTML"] = original
+    orig_alias = ctx.aliaser.alias_for("RAW-ORIG-HTML", "m")
+
+    html_in = '<div dir="rtl"><p>تمت المراجعة</p><script>x()</script></div>'
+    expected_body = '<html><body><div dir="rtl"><p>تمت المراجعة</p></div></body></html>'
+
+    r_rep = call(ctx, "create_draft", {
+        "mode": "reply",
+        "reply_to": orig_alias,
+        "body": html_in,
+        "body_format": "html",
+    })
+    assert r_rep["ok"] is True and r_rep["body_format"] == "html"
+    assert r_rep["sanitised"]["removed_elements"] == ["script"]
+    assert str(original.create_reply.call_args.args[1]) == expected_body
+
+    r_all = call(ctx, "create_draft", {
+        "mode": "reply_all",
+        "reply_to": orig_alias,
+        "body": "<p>Approved</p>",
+        "body_format": "html",
+    })
+    assert r_all["ok"] is True and r_all["body_format"] == "html"
+    assert "sanitised" not in r_all
+    assert str(original.create_reply_all.call_args.args[1]) == (
+        "<html><body><p>Approved</p></body></html>"
+    )
+
+    r_fwd = call(ctx, "create_draft", {
+        "mode": "forward",
+        "reply_to": orig_alias,
+        "to": ["delegate@corp.example"],
+        "body": "<ul><li>Point one</li></ul>",
+        "body_format": "html",
+    })
+    assert r_fwd["ok"] is True and r_fwd["body_format"] == "html"
+    assert "sanitised" not in r_fwd
+    assert str(original.create_forward.call_args.args[1]) == (
+        "<html><body><ul><li>Point one</li></ul></body></html>"
+    )
+
+
+def test_update_draft_html_clean_dirty_and_refusals(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    draft = MagicMock()
+    draft.parent_folder_id = SimpleNamespace(id=DRAFTS_ID)
+    draft.to_recipients = [SimpleNamespace(email_address="peer@corp.example")]
+    draft.cc_recipients = None
+    draft.subject = "Draft subject"
+    account._by_id["RAW-UPD-HTML"] = draft
+
+    clean_res = call(ctx, "update_draft", {
+        "draft_id": "RAW-UPD-HTML",
+        "body": "<p>Updated <strong>body</strong></p>",
+        "body_format": "html",
+    })
+    assert clean_res["ok"] is True
+    assert clean_res["body_format"] == "html"
+    assert "sanitised" not in clean_res
+    assert isinstance(draft.body, HTMLBody)
+    assert str(draft.body) == "<html><body><p>Updated <strong>body</strong></p></body></html>"
+    assert clean_res["preview"]["body_snippet"] == "Updated body"
+
+    dirty_res = call(ctx, "update_draft", {
+        "draft_id": "RAW-UPD-HTML",
+        "body": '<p onload="bad()">Text <a href="file:///etc/hosts">link</a></p>',
+        "body_format": "html",
+    })
+    assert dirty_res["ok"] is True
+    assert dirty_res["sanitised"] == {
+        "removed_elements": [],
+        "removed_attributes": 1,
+        "removed_links": 1,
+    }
+    assert str(draft.body) == "<html><body><p>Text <a>link</a></p></body></html>"
+
+    # Refusals happen before touching Exchange or saving.
+    save_calls_before = draft.save.call_count
+    fetch_count_before = len(account.fetch_projections)
+    for bad in (
+        {"draft_id": "RAW-UPD-HTML", "body": "x" * 200_001, "body_format": "html"},
+        {"draft_id": "RAW-UPD-HTML", "body": "<style>p{}</style>", "body_format": "html"},
+        {"draft_id": "RAW-UPD-HTML", "subject": "No body", "body_format": "html"},
+        {"draft_id": "RAW-UPD-HTML", "body": "hi", "body_format": "rtf"},
+    ):
+        refused = call(ctx, "update_draft", bad)
+        assert refused["ok"] is False
+        assert refused["error"]["code"] == "validation"
+    assert draft.save.call_count == save_calls_before
+    assert len(account.fetch_projections) == fetch_count_before
+
+
+def test_send_draft_preview_lists_links_caps_them_and_warns_on_mismatch(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+
+    benign = make_content_draft(subject="Links", to=("peer@corp.example",), body="Portal")
+    benign.body = HTMLBody(
+        '<html><body><p><a href="https://portal.example.com/home">Portal</a></p></body></html>'
+    )
+    account._by_id["RAW-LINKS-OK"] = benign
+    p1_ok = call(ctx, "send_draft", {"draft_id": "RAW-LINKS-OK"})
+    assert p1_ok["requires_confirmation"] is True
+    assert p1_ok["preview"]["links"] == [
+        {"text": "Portal", "href": "https://portal.example.com/home"}
+    ]
+    assert "links_total" not in p1_ok["preview"]
+    assert "warnings" not in p1_ok["preview"]
+
+    many_anchors = "".join(
+        f'<a href="https://example.com/p/{i}">Page {i}</a> ' for i in range(22)
+    )
+    deceptive = (
+        '<a href="https://example.com/p/0">Page 0</a> '
+        '<a href="https://other.example.com/signin">https://portal.example.com/signin</a>'
+    )
+    crowded = make_content_draft(subject="Many", to=("peer@corp.example",), body="Pages")
+    crowded.body = HTMLBody(f"<html><body><p>{many_anchors}{deceptive}</p></body></html>")
+    account._by_id["RAW-LINKS-CAP"] = crowded
+
+    p1_cap = call(ctx, "send_draft", {"draft_id": "RAW-LINKS-CAP"})
+    assert p1_cap["requires_confirmation"] is True
+    assert len(p1_cap["preview"]["links"]) == 20
+    assert p1_cap["preview"]["links_total"] == 23
+    assert any(
+        "portal.example.com" in w and "other.example.com" in w
+        for w in p1_cap["preview"]["warnings"]
+    )
+
+
+def test_send_draft_refuses_when_only_html_target_changes_after_preview(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    draft = make_content_draft(
+        subject="Invoice link",
+        to=("peer@corp.example",),
+        body="Open portal",
+    )
+    draft.body = HTMLBody(
+        '<html><body><p><a href="https://portal.example.com/pay">Open portal</a></p></body></html>'
+    )
+    account._by_id["RAW-HTML-TOCTOU"] = draft
+
+    p1 = call(ctx, "send_draft", {"draft_id": "RAW-HTML-TOCTOU"})
+    assert p1["requires_confirmation"] is True
+
+    # Visible text_body, recipients, subject, and attachments stay identical;
+    # only the href inside the stored HTML body changes.
+    draft.body = HTMLBody(
+        '<html><body><p><a href="https://other.example.com/pay">Open portal</a></p></body></html>'
+    )
+    p2 = call(ctx, "send_draft", {
+        "draft_id": "RAW-HTML-TOCTOU",
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is False
+    assert p2["error"]["code"] == "confirm_invalid"
+    draft.send.assert_not_called()
+
+
+def test_send_draft_preview_always_exposes_21st_link_host_and_warns_on_deceptive_text(
+    tmp_path, monkeypatch
+):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    filler = "".join(
+        f'<li><a href="https://intranet.example.com/doc/{i}">Document {i}</a></li>'
+        for i in range(20)
+    )
+    cases = [
+        (
+            "plain_deceptive",
+            '<a href="https://evil.example/login">portal.example.com</a>',
+            True,
+        ),
+        (
+            "two_word_deceptive",
+            '<a href="https://evil.example/login">Go to portal.example.com</a>',
+            True,
+        ),
+        (
+            "quoted_deceptive",
+            '<a href="https://evil.example/login">\u201cportal.example.com\u201d</a>',
+            True,
+        ),
+        (
+            "neutral_text",
+            '<a href="https://evil.example/login">Sign in to the staff portal</a>',
+            False,
+        ),
+    ]
+    for label, tail_link, should_warn in cases:
+        FakeDraftMessage.last = None
+        body = f"<p>Please review:</p><ul>{filler}</ul><p>{tail_link}</p>"
+        created = call(ctx, "create_draft", {
+            "to": ["peer@corp.example"],
+            "subject": "Docs",
+            "body": body,
+            "body_format": "html",
+        })
+        assert created["ok"] is True, label
+        stored = str(FakeDraftMessage.last.kwargs["body"])
+        rid = f"RAW-21ST-{label}"
+        draft = make_content_draft(subject="Docs", to=("peer@corp.example",), body="Docs")
+        draft.body = HTMLBody(stored)
+        account._by_id[rid] = draft
+
+        p1 = call(ctx, "send_draft", {"draft_id": rid})
+        assert p1["ok"] is True and p1["requires_confirmation"] is True
+        prev = p1["preview"]
+        assert len(prev["links"]) == 20
+        assert prev["links_total"] == 21
+        assert prev["link_hosts"] == [
+            {"host": "evil.example", "count": 1},
+            {"host": "intranet.example.com", "count": 20},
+        ]
+        assert "evil.example" in json.dumps(p1, ensure_ascii=False)
+        assert bool(prev.get("warnings")) is should_warn, (label, prev)
+
+
+@pytest.mark.parametrize(
+    ("label", "doc", "expect_embedded"),
+    [
+        (
+            "control",
+            "<html><body><p>new text</p><div>"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a>'
+            "</div></body></html>",
+            False,
+        ),
+        (
+            "with_bogus_marked_section",
+            "<html><body><p>new text</p><div>"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a><![x]>'
+            "</div></body></html>",
+            False,
+        ),
+        (
+            "with_endif_marked_section",
+            "<html><body><![ endif]><p>new text</p><div>"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a>'
+            "</div></body></html>",
+            False,
+        ),
+        (
+            "link_inside_stray_head",
+            "<html><body><p>new text</p><head>"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a>'
+            "</head></body></html>",
+            False,
+        ),
+        (
+            "link_inside_noscript",
+            "<html><body><p>new text</p><noscript>"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a>'
+            "</noscript></body></html>",
+            False,
+        ),
+        (
+            "link_after_abrupt_comment",
+            "<html><body><p>new text</p><!-->"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a><!-- -->'
+            "</body></html>",
+            False,
+        ),
+        (
+            "link_after_title_comment",
+            "<html><body><p>new text</p><title><!--</title>-->"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a>'
+            "</body></html>",
+            False,
+        ),
+        (
+            "link_after_script_end_attr",
+            "<html><body><p>new text</p><script></script x>"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a>'
+            "</body></html>",
+            False,
+        ),
+        (
+            "link_in_cdata_gt",
+            "<html><body><p>new text</p><![CDATA[>"
+            '<a href="https://evil.example/login">https://portal.example.com/login</a>]]>'
+            "</body></html>",
+            False,
+        ),
+        (
+            "area_href",
+            '<html><body><p>new text</p><map name="m">'
+            '<area shape="rect" coords="0,0,900,900" href="https://evil.example/login">'
+            "</map></body></html>",
+            True,
+        ),
+    ],
+)
+def test_send_draft_preview_fails_closed_on_unsanitised_quoted_html(
+    tmp_path, label, doc, expect_embedded
+):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    rid = f"RAW-QUOTED-{label}"
+    draft = make_content_draft(subject="Fwd", to=("peer@corp.example",), body="new text")
+    draft.body = HTMLBody(doc)
+    account._by_id[rid] = draft
+
+    p1 = call(ctx, "send_draft", {"draft_id": rid})
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    assert ctx._circuit_failures == 0
+    prev = p1["preview"]
+    assert prev.get("warnings"), (label, prev)
+    if not expect_embedded:
+        assert any("link mismatch" in w for w in prev["warnings"]), (label, prev)
+    expected_host = {"host": "evil.example", "count": 1}
+    if expect_embedded:
+        expected_host["embedded"] = True
+    expected_hosts = [expected_host]
+    if "https://portal.example.com" in doc:
+        expected_hosts.append({"host": "portal.example.com", "count": 1, "unparsed": True})
+    assert prev["link_hosts"] == expected_hosts
+
+
+def test_send_draft_preview_handles_fullwidth_slash_unparseable_url_and_oversize_html(
+    tmp_path, monkeypatch
+):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    FakeDraftMessage.last = None
+
+    # Fullwidth slash in visible link text never crashes preview.
+    res = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "subject": "Slash",
+        "body": '<p>See <a href="https://example.com/a">https://example.com\uff0fa</a></p>',
+        "body_format": "html",
+    })
+    assert res["ok"] is True
+    d_fw = make_content_draft(subject="Slash", to=("peer@corp.example",), body="See")
+    d_fw.body = HTMLBody(str(FakeDraftMessage.last.kwargs["body"]))
+    account._by_id["RAW-FW"] = d_fw
+    p1_fw = call(ctx, "send_draft", {"draft_id": "RAW-FW"})
+    assert p1_fw["ok"] is True and p1_fw["requires_confirmation"] is True
+    assert ctx._circuit_failures == 0
+
+    # Unparseable stored URL is listed as written with a warning, never raising.
+    d_bad = make_content_draft(subject="Bad URL", to=("peer@corp.example",), body="Broken")
+    d_bad.body = HTMLBody('<html><body><p><a href="https://[">Broken</a></p></body></html>')
+    account._by_id["RAW-BAD-URL"] = d_bad
+    p1_bad = call(ctx, "send_draft", {"draft_id": "RAW-BAD-URL"})
+    assert p1_bad["ok"] is True
+    assert p1_bad["preview"]["links"] == [{"text": "Broken", "href": "https://["}]
+    assert p1_bad["preview"]["warnings"]
+
+    # Oversize stored HTML sets links_unverified=True and warns.
+    d_huge = make_content_draft(subject="Huge", to=("peer@corp.example",), body="Huge")
+    d_huge.body = HTMLBody("<html><body>" + ("x" * (MAX_INSPECT_HTML_CHARS + 5)) + "</body></html>")
+    account._by_id["RAW-HUGE-HTML"] = d_huge
+    p1_huge = call(ctx, "send_draft", {"draft_id": "RAW-HUGE-HTML"})
+    assert p1_huge["ok"] is True
+    assert p1_huge["preview"]["links_unverified"] is True
+    assert p1_huge["preview"]["warnings"]
+
+
+def test_malformed_html_and_bad_links_never_trip_circuit_breaker(tmp_path, monkeypatch):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+
+    # Marked sections and refused link targets keep visible text and save cleanly.
+    for body, expect_removed_links in (
+        ("<p>hello</p><![x]>", 0),
+        ("<p>hello</p><![CDAT[x]]>", 0),
+        ('<p><a href="https://[">x</a> hello</p>', 1),
+        ('<p><a href="https://example.com\uff0fx">x</a> hello</p>', 1),
+        ('<p><a href="https://[example.com]/">x</a> hello</p>', 1),
+    ):
+        FakeDraftMessage.last = None
+        res = call(ctx, "create_draft", {
+            "to": ["peer@corp.example"],
+            "subject": "x",
+            "body": body,
+            "body_format": "html",
+        })
+        assert res["ok"] is True, (body, res)
+        assert ctx._circuit_failures == 0
+        if expect_removed_links:
+            assert res["sanitised"]["removed_links"] == expect_removed_links
+
+    # Repeated validation failures (and even a forced internal sanitiser error)
+    # return validation errors and never increment _circuit_failures.
+    for _ in range(6):
+        bad = call(ctx, "create_draft", {
+            "to": ["peer@corp.example"],
+            "subject": "x",
+            "body": "<![x]><script>alert(1)</script>",
+            "body_format": "html",
+        })
+        assert bad["ok"] is False
+        assert bad["error"]["code"] == "validation"
+        assert ctx._circuit_failures == 0
+
+    def boom_sanitise(_raw: str):
+        raise AssertionError("synthetic parser crash")
+
+    monkeypatch.setattr(writes, "sanitise_html", boom_sanitise)
+    for _ in range(5):
+        crashed = call(ctx, "create_draft", {
+            "to": ["peer@corp.example"],
+            "subject": "x",
+            "body": "<p>hello</p>",
+            "body_format": "html",
+        })
+        assert crashed["ok"] is False
+        assert crashed["error"]["code"] == "validation"
+        assert ctx._circuit_failures == 0
+
+    assert ctx.counters.get("err.upstream_error", 0) == 0
+    after = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "subject": "x",
+        "body": "ordinary plain text",
+    })
+    assert after["ok"] is True
+
+
+def test_update_draft_without_body_omits_body_format_and_non_html_args_rejected(
+    tmp_path, monkeypatch
+):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    draft = MagicMock()
+    draft.parent_folder_id = SimpleNamespace(id=DRAFTS_ID)
+    draft.to_recipients = [SimpleNamespace(email_address="peer@corp.example")]
+    draft.cc_recipients = None
+    draft.subject = "Initial"
+    account._by_id["RAW-NO-BODY"] = draft
+
+    res_subj = call(ctx, "update_draft", {
+        "draft_id": "RAW-NO-BODY",
+        "subject": "Only subject changed",
+    })
+    assert res_subj["ok"] is True
+    assert "body_format" not in res_subj
+    assert "sanitised" not in res_subj
+
+    res_with_body = call(ctx, "update_draft", {
+        "draft_id": "RAW-NO-BODY",
+        "body": "<b>plain</b>",
+    })
+    assert res_with_body["ok"] is True
+    assert res_with_body["body_format"] == "text"
+    assert "&lt;b&gt;plain&lt;/b&gt;" in str(draft.body)
+
+    for bad_fmt in ("HTML", " html", "html ", "text/html", None, True, 1, "", "htm"):
+        FakeDraftMessage.last = None
+        r_bad = call(ctx, "create_draft", {
+            "to": ["peer@corp.example"],
+            "subject": "x",
+            "body": "<p><b>b</b></p>",
+            "body_format": bad_fmt,
+        })
+        assert r_bad["ok"] is False
+        assert r_bad["error"]["code"] == "validation"
+        assert FakeDraftMessage.last is None
+
+
+def test_confirm_token_rejects_every_single_detail_stored_html_mutation(tmp_path):
+    base = (
+        '<html><body><div dir="rtl"><p style="text-align: right">Open the '
+        '<a href="https://portal.example.com/pay" title="Portal">portal</a> &amp; reply.</p>'
+        '<table border="1"><tr><td colspan="2">x</td></tr></table></div></body></html>'
+    )
+    mutations = {
+        "href host": base.replace("portal.example.com", "portal.example.org"),
+        "href one char": base.replace("/pay", "/paz"),
+        "href scheme": base.replace("https://", "http://"),
+        "href case": base.replace("portal.example.com", "Portal.example.com"),
+        "href trailing slash": base.replace('/pay"', '/pay/"'),
+        "href fragment": base.replace('/pay"', '/pay#x"'),
+        "title value": base.replace('title="Portal"', 'title="Porta1"'),
+        "title removed": base.replace(' title="Portal"', ""),
+        "dir value": base.replace('dir="rtl"', 'dir="ltr"'),
+        "style value": base.replace("text-align: right", "text-align: left"),
+        "style spacing": base.replace("text-align: right", "text-align:right"),
+        "border value": base.replace('border="1"', 'border="0"'),
+        "colspan value": base.replace('colspan="2"', 'colspan="3"'),
+        "attribute added": base.replace("<td ", '<td width="1" '),
+        "attribute order": base.replace(
+            'href="https://portal.example.com/pay" title="Portal"',
+            'title="Portal" href="https://portal.example.com/pay"',
+        ),
+        "quote style": base.replace('dir="rtl"', "dir='rtl'"),
+        "tag case": base.replace("<div", "<DIV"),
+        "space in tag": base.replace("<p style", "<p  style"),
+        "entity form": base.replace("&amp;", "&#38;"),
+        "zero width char": base.replace("portal</a>", "portal\u200b</a>"),
+        "trailing space": base + " ",
+        "comment added": base.replace("<div", "<!--x--><div"),
+        "second link added": base.replace("</p>", '<a href="https://evil.example/">.</a></p>'),
+        "handler added": base.replace("<p ", '<p onclick="x()" '),
+        "nfc_nfd": base.replace("reply", "re\u0301ply"),
+    }
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+
+    for idx, (name, mutated) in enumerate(mutations.items()):
+        assert mutated != base, name
+        reset_consumed_tokens()
+        reset_send_rate_window()
+        rid = f"RAW-MUT-{idx}"
+        draft = make_content_draft(
+            subject="S",
+            to=("peer@corp.example",),
+            body="Open the portal & reply. x",
+        )
+        draft.body = HTMLBody(base)
+        account._by_id[rid] = draft
+
+        p1 = call(ctx, "send_draft", {"draft_id": rid})
+        draft.body = HTMLBody(mutated)
+        p2 = call(ctx, "send_draft", {
+            "draft_id": rid,
+            "confirm_token": p1["confirm_token"],
+        })
+        assert p2["ok"] is False, name
+        assert p2["error"]["code"] == "confirm_invalid", name
+        draft.send.assert_not_called()
+
+
+def test_sanitise_html_and_inspect_draft_links_run_off_event_loop(tmp_path, monkeypatch):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+    seen_threads: dict[str, threading.Thread] = {}
+    real_sanitise = writes.sanitise_html
+    real_inspect = writes.inspect_draft_links
+
+    def spy_sanitise(raw: str):
+        seen_threads.setdefault("sanitise", threading.current_thread())
+        return real_sanitise(raw)
+
+    def spy_inspect(raw: str):
+        seen_threads["inspect"] = threading.current_thread()
+        return real_inspect(raw)
+
+    monkeypatch.setattr(writes, "sanitise_html", spy_sanitise)
+    monkeypatch.setattr(writes, "inspect_draft_links", spy_inspect)
+
+    async def exercise() -> threading.Thread:
+        loop_thread = threading.current_thread()
+        r_create = await dispatch(ctx, SPEC["create_draft"], {
+            "to": ["peer@corp.example"],
+            "subject": "Thread check",
+            "body": '<p><a href="https://example.com">Link</a></p>',
+            "body_format": "html",
+        })
+        assert r_create["ok"] is True
+        draft = make_content_draft(subject="Thread check", to=("peer@corp.example",), body="Link")
+        draft.body = HTMLBody(str(FakeDraftMessage.last.kwargs["body"]))
+        account._by_id["RAW-THR"] = draft
+        p1 = await dispatch(ctx, SPEC["send_draft"], {"draft_id": "RAW-THR"})
+        assert p1["ok"] is True
+        return loop_thread
+
+    loop_thread = asyncio.run(exercise())
+    assert "sanitise" in seen_threads and seen_threads["sanitise"] is not loop_thread
+    assert "inspect" in seen_threads and seen_threads["inspect"] is not loop_thread
+
+
+def test_event_loop_ticker_never_stalls_during_200k_combining_mark_preview(
+    tmp_path, monkeypatch
+):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+
+    # Exact 200,000-character combining-mark HTML body (tested both raw on stored
+    # draft and through create_draft -> send_draft).
+    prefix = '<p><a href="https://x.example/">a'
+    suffix = "</a></p>"
+    room = 200_000 - len(prefix) - len(suffix)
+    half = room // 2
+    combining_200k = prefix + ("\u0301" * half) + ("\u0316" * (room - half)) + suffix
+    assert len(combining_200k) == 200_000
+
+    draft_raw = make_content_draft(
+        subject="Combining", to=("peer@corp.example",), body="a"
+    )
+    draft_raw.body = HTMLBody(combining_200k)
+    account._by_id["RAW-COMB-200K"] = draft_raw
+
+    async def measure_preview_stall(draft_id: str) -> tuple[dict, list[float]]:
+        gaps: list[float] = []
+        done = asyncio.Event()
+
+        async def ticker() -> None:
+            last = time.perf_counter()
+            while not done.is_set():
+                await asyncio.sleep(0.02)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        task = asyncio.create_task(ticker())
+        await asyncio.sleep(0.05)  # ensure ticker is actively polling before work starts
+        res = await dispatch(ctx, SPEC["send_draft"], {"draft_id": draft_id})
+        done.set()
+        await task
+        return res, gaps
+
+    res_raw, gaps_raw = asyncio.run(measure_preview_stall("RAW-COMB-200K"))
+    assert res_raw["ok"] is True and res_raw["requires_confirmation"] is True
+    assert gaps_raw and max(gaps_raw) < 0.5, f"event loop stalled {max(gaps_raw):.2f}s"
+
+    FakeDraftMessage.last = None
+    created = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "subject": "Combining authored",
+        "body": combining_200k,
+        "body_format": "html",
+    })
+    assert created["ok"] is True
+    draft_san = make_content_draft(
+        subject="Combining authored", to=("peer@corp.example",), body="a"
+    )
+    draft_san.body = HTMLBody(str(FakeDraftMessage.last.kwargs["body"]))
+    account._by_id["RAW-COMB-SAN"] = draft_san
+
+    res_san, gaps_san = asyncio.run(measure_preview_stall("RAW-COMB-SAN"))
+    assert res_san["ok"] is True and res_san["requires_confirmation"] is True
+    assert gaps_san and max(gaps_san) < 0.5, f"event loop stalled {max(gaps_san):.2f}s"
+
+
+def test_send_draft_preview_surfaces_backtick_nosemi_and_defeats_empty_anchor_flood(
+    tmp_path, monkeypatch
+):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    monkeypatch.setattr(writes, "Message", FakeDraftMessage)
+
+    # 1. Quoted reply hiding a URL behind backtick + foreign CDATA or &#64 without ';'.
+    for idx, quoted_html in enumerate((
+        "<html><body><p>See below.</p><svg><p><![CDATA[><a data=`1 "
+        'href="https://evil.example/login">https://good.example/login</a>]]></p></body></html>',
+        '<html><body><p><a href="https://portal.example.com&#64evil.example/login">'
+        "Sign in</a></p></body></html>",
+    )):
+        rid = f"RAW-R5-Q{idx}"
+        d_q = make_content_draft(subject="Re: access", to=("peer@corp.example",), body="See below")
+        d_q.body = HTMLBody(quoted_html)
+        account._by_id[rid] = d_q
+        p1_q = call(ctx, "send_draft", {"draft_id": rid})
+        assert p1_q["ok"] is True
+        hosts_q = {h["host"] for h in p1_q["preview"]["link_hosts"]}
+        assert "evil.example" in hosts_q
+
+    # 2. Model-authored flood: 55 empty anchors + 1 deceptive link at the tail.
+    empties = "".join(f'<a href="https://a{i:03d}.flood.example/"></a>' for i in range(55))
+    flood_body = (
+        "<p>Hello</p>"
+        + empties
+        + '<p><a href="https://zzz-evil.example/login">https://good.example/login</a></p>'
+    )
+    FakeDraftMessage.last = None
+    r_flood = call(ctx, "create_draft", {
+        "to": ["peer@corp.example"],
+        "subject": "Flood check",
+        "body": flood_body,
+        "body_format": "html",
+    })
+    assert r_flood["ok"] is True
+    assert r_flood["sanitised"]["removed_links"] == 55
+
+    d_f = make_content_draft(subject="Flood check", to=("peer@corp.example",), body="Hello")
+    d_f.body = HTMLBody(str(FakeDraftMessage.last.kwargs["body"]))
+    account._by_id["RAW-R5-FLOOD"] = d_f
+    p1_f = call(ctx, "send_draft", {"draft_id": "RAW-R5-FLOOD"})
+    prev_f = p1_f["preview"]
+    assert prev_f["links"] == [
+        {"text": "https://good.example/login", "href": "https://zzz-evil.example/login"}
+    ]
+    assert prev_f["link_hosts"][0] == {"host": "zzz-evil.example", "count": 1}
+    assert any(
+        "link mismatch" in w and "zzz-evil.example" in w for w in prev_f["warnings"]
+    )
+
+
+# --- draft attachment removal, .eml message attachment, appointment deletion ---
+
+
+class _StatefulDraft:
+    """Draft stand-in with real FileAttachment attach/detach state transitions."""
+
+    def __init__(
+        self,
+        raw_id: str = "RAW-ST-DRAFT",
+        *,
+        folder_id: str = DRAFTS_ID,
+        subject: str = "Initial subject",
+        to: tuple[str, ...] = ("peer@example.com",),
+        body_text: str = "Please see attached.",
+    ) -> None:
+        self.id = raw_id
+        self.changekey = "CK-INIT"
+        self.parent_folder_id = SimpleNamespace(id=folder_id)
+        self.subject = subject
+        self.to_recipients = [SimpleNamespace(email_address=a) for a in to]
+        self.cc_recipients: list[Any] = []
+        self.bcc_recipients: list[Any] = []
+        self.text_body = body_text
+        self.body = HTMLBody(f"<html><body><p>{body_text}</p></body></html>")
+        self.message_id = f"<{raw_id}@example.com>"
+        self.attachments: list[Any] = []
+        self.attach_calls: list[Any] = []
+        self.detach_calls: list[list[Any]] = []
+        self.save_calls: list[list[str]] = []
+        self.send_calls: list[bool] = []
+        self._seq = 0
+
+    def attach(self, att: Any) -> None:
+        self._seq += 1
+        att.attachment_id = AttachmentId(id=f"RAW-ATT-{self.id}-{self._seq}")
+        att.size = len(att.content)
+        self.attach_calls.append(att)
+        self.attachments.append(att)
+        self.changekey = f"CK-ATT-{self._seq}"
+
+    def detach(self, atts: Any) -> None:
+        items = list(atts)
+        self.detach_calls.append(items)
+        for att in items:
+            self.attachments.remove(att)
+        self._seq += 1
+        self.changekey = f"CK-DET-{self._seq}"
+
+    def save(self, update_fields: Any = None) -> None:
+        self.save_calls.append(list(update_fields or []))
+        self._seq += 1
+        self.changekey = f"CK-SAVE-{self._seq}"
+
+    def send(self, save_copy: bool = True) -> None:
+        self.send_calls.append(save_copy)
+
+
+def test_update_draft_remove_attachments_by_name_by_id_and_combined_with_subject(
+    tmp_path,
+):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    draft = _StatefulDraft("RAW-REM-1")
+    account._by_id["RAW-REM-1"] = draft
+    d_alias = ctx.aliaser.alias_for("RAW-REM-1", "d")
+
+    r1 = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "notes.txt",
+        "content_base64": _b64(b"alpha"),
+    })
+    r2 = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "budget.pdf",
+        "content_base64": _b64(b"%PDF-1.4"),
+    })
+    r3 = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "summary.csv",
+        "content_base64": _b64(b"a,b\n1,2\n"),
+    })
+    assert r1["ok"] and r2["ok"] and r3["ok"]
+    id_notes = r1["added"]["id"]
+    id_budget = r2["added"]["id"]
+    id_summary = r3["added"]["id"]
+    assert id_notes.startswith("a") and id_budget.startswith("a") and id_summary.startswith("a")
+    assert "RAW-ATT-" not in json.dumps(r3)
+    assert r3["attachments"] == [
+        {"name": "budget.pdf", "size": 8, "id": id_budget},
+        {"name": "notes.txt", "size": 5, "id": id_notes},
+        {"name": "summary.csv", "size": 8, "id": id_summary},
+    ]
+
+    # 1. Remove by attachment name only (no save() call when no draft fields change).
+    rem_by_name = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "remove_attachments": ["notes.txt"],
+    })
+    assert rem_by_name["ok"] is True
+    assert draft.save_calls == []
+    assert len(draft.detach_calls) == 1
+    assert [a.name for a in draft.detach_calls[0]] == ["notes.txt"]
+    assert rem_by_name["attachments"] == [
+        {"name": "budget.pdf", "size": 8, "id": id_budget},
+        {"name": "summary.csv", "size": 8, "id": id_summary},
+    ]
+
+    # 2. Remove by attachment id (a-alias) combined with a subject change.
+    rem_combo = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "subject": "Updated Q3 packet",
+        "remove_attachments": [id_budget],
+    })
+    assert rem_combo["ok"] is True
+    assert rem_combo["preview"]["subject"] == "Updated Q3 packet"
+    assert draft.subject == "Updated Q3 packet"
+    assert draft.save_calls == [["subject"]]
+    assert len(draft.detach_calls) == 2
+    assert [a.name for a in draft.detach_calls[1]] == ["budget.pdf"]
+    assert rem_combo["attachments"] == [
+        {"name": "summary.csv", "size": 8, "id": id_summary},
+    ]
+    assert account.fetch_projections[-1] == writes._DRAFT_UPDATE_ATTACH_FIELDS
+
+    # 3. Remove the final attachment by raw EWS attachment id -> empty list remains.
+    raw_summary_id = ctx.aliaser.resolve(id_summary)
+    rem_last = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "remove_attachments": [raw_summary_id],
+    })
+    assert rem_last["ok"] is True
+    assert rem_last["attachments"] == []
+    assert draft.attachments == []
+
+
+def test_update_draft_remove_attachments_unknown_ambiguous_atomic_and_non_draft(
+    tmp_path,
+):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    draft = _StatefulDraft("RAW-REM-2", subject="Original")
+    account._by_id["RAW-REM-2"] = draft
+    d_alias = ctx.aliaser.alias_for("RAW-REM-2", "d")
+
+    r_keep = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "keep.txt",
+        "content_base64": _b64(b"keep"),
+    })
+    r_dup1 = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "report.pdf",
+        "content_base64": _b64(b"v1"),
+    })
+    r_dup2 = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "report.pdf",
+        "content_base64": _b64(b"version-2"),
+    })
+    id_keep = r_keep["added"]["id"]
+    id_dup1 = r_dup1["added"]["id"]
+    id_dup2 = r_dup2["added"]["id"]
+
+    # Unknown name and unknown alias both fail with validation naming the entry.
+    for bad_sel in ("missing.pdf", "a999"):
+        res_unknown = call(ctx, "update_draft", {
+            "draft_id": d_alias,
+            "remove_attachments": [bad_sel],
+        })
+        assert res_unknown["ok"] is False
+        assert res_unknown["error"]["code"] == "validation"
+        assert bad_sel in res_unknown["error"]["message"]
+        assert draft.detach_calls == []
+        assert len(draft.attachments) == 3
+
+    # All-or-nothing: one valid + one unknown removes NOTHING and saves NOTHING.
+    res_atomic = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "subject": "Must not persist",
+        "remove_attachments": ["keep.txt", "no-such-file.txt"],
+    })
+    assert res_atomic["ok"] is False
+    assert res_atomic["error"]["code"] == "validation"
+    assert "no-such-file.txt" in res_atomic["error"]["message"]
+    assert draft.detach_calls == []
+    assert draft.save_calls == []
+    assert draft.subject == "Original"
+    assert len(draft.attachments) == 3
+
+    # Ambiguous name refuses and surfaces the attachment ids to choose from.
+    res_ambig = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "remove_attachments": ["report.pdf"],
+    })
+    assert res_ambig["ok"] is False
+    assert res_ambig["error"]["code"] == "validation"
+    assert "report.pdf" in res_ambig["error"]["message"]
+    assert id_dup1 in res_ambig["error"]["message"]
+    assert id_dup2 in res_ambig["error"]["message"]
+    assert "RAW-ATT-" not in json.dumps(res_ambig)
+    assert draft.detach_calls == []
+
+    # Choosing one of the reported ids removes only that copy.
+    res_disambig = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "remove_attachments": [id_dup1],
+    })
+    assert res_disambig["ok"] is True
+    assert res_disambig["attachments"] == [
+        {"name": "keep.txt", "size": 4, "id": id_keep},
+        {"name": "report.pdf", "size": 9, "id": id_dup2},
+    ]
+
+    # Item outside Drafts is refused before any detach.
+    inbox_item = _StatefulDraft("RAW-INBOX-MSG", folder_id="FOLDER-INBOX")
+    inbox_item.attach(FileAttachment(name="keep.txt", content=b"x", content_type="text/plain"))
+    account._by_id["RAW-INBOX-MSG"] = inbox_item
+    m_alias = ctx.aliaser.alias_for("RAW-INBOX-MSG", "m")
+    res_outside = call(ctx, "update_draft", {
+        "draft_id": m_alias,
+        "remove_attachments": ["keep.txt"],
+    })
+    assert res_outside["ok"] is False
+    assert res_outside["error"]["code"] == "validation"
+    assert "not a draft" in res_outside["error"]["message"]
+    assert inbox_item.detach_calls == []
+
+    # Empty list or blank selector fails validation before touching Exchange.
+    fetches_before = len(account.fetch_projections)
+    for invalid_list in ([], ["   "], [123]):
+        bad = call(ctx, "update_draft", {
+            "draft_id": d_alias,
+            "remove_attachments": invalid_list,
+        })
+        assert bad["ok"] is False
+        assert bad["error"]["code"] == "validation"
+    assert len(account.fetch_projections) == fetches_before
+
+    # Huge unknown selector echoed in error is cut to 80 characters.
+    huge_sel = "x" * 200_000
+    res_huge = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "remove_attachments": [huge_sel],
+    })
+    assert res_huge["ok"] is False
+    assert res_huge["error"]["code"] == "validation"
+    err_msg = res_huge["error"]["message"]
+    assert ("x" * 80) in err_msg
+    assert ("x" * 81) not in err_msg
+    assert len(err_msg) < 200
+
+
+def test_update_draft_remove_attachments_partial_failure_preserves_fields_and_reports_state(
+    tmp_path,
+):
+    class PerCallDetachDraft(_StatefulDraft):
+        """Mirrors exchangelib saved-item detach: one server call per attachment."""
+
+        fail_at = 1
+
+        def detach(self, atts: Any) -> None:
+            items = list(atts)
+            self.detach_calls.append(items)
+            for idx, att in enumerate(items):
+                if idx == self.fail_at:
+                    raise ErrorServerBusy("server busy")
+                self.attachments.remove(att)
+                att.attachment_id = None
+                att.parent_item = None
+
+    account = make_account()
+    ctx = make_ctx(tmp_path, account)
+    draft = PerCallDetachDraft("RAW-REM-PARTIAL", subject="Original subject")
+    account._by_id["RAW-REM-PARTIAL"] = draft
+    d_alias = ctx.aliaser.alias_for("RAW-REM-PARTIAL", "d")
+
+    added_ids: dict[str, str] = {}
+    for name in ("one.txt", "two.txt", "three.txt"):
+        added = call(ctx, "add_draft_attachment", {
+            "draft_id": d_alias,
+            "filename": name,
+            "content_base64": _b64(name.encode("utf-8")),
+        })
+        assert added["ok"] is True
+        added_ids[name] = added["added"]["id"]
+
+    # 1. First deletion fails (fail_at=0): nothing removed, nothing saved.
+    draft.fail_at = 0
+    res_zero = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "subject": "NEW SUBJECT",
+        "remove_attachments": ["one.txt", "two.txt", "three.txt"],
+    })
+    assert res_zero["ok"] is False
+    assert res_zero["error"]["code"] == "throttled"
+    assert "removed" not in res_zero
+    assert draft.subject == "Original subject"
+    assert draft.save_calls == []
+    assert [a.name for a in draft.attachments] == ["one.txt", "two.txt", "three.txt"]
+
+    # 2. Second deletion fails (fail_at=1): one.txt was removed on server,
+    #    two.txt and three.txt remain, and subject was NOT modified or saved.
+    draft.fail_at = 1
+    res_partial = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "subject": "NEW SUBJECT",
+        "remove_attachments": ["one.txt", "two.txt", "three.txt"],
+    })
+    assert res_partial["ok"] is False
+    assert res_partial["error"]["code"] == "throttled"
+    assert draft.subject == "Original subject"
+    assert draft.save_calls == []
+    assert [a.name for a in draft.attachments] == ["two.txt", "three.txt"]
+    expected_removed = [{"name": "one.txt", "size": 7, "id": added_ids["one.txt"]}]
+    expected_remaining = [
+        {"name": "three.txt", "size": 9, "id": added_ids["three.txt"]},
+        {"name": "two.txt", "size": 7, "id": added_ids["two.txt"]},
+    ]
+    assert res_partial["removed"] == expected_removed
+    assert res_partial["error"]["removed"] == expected_removed
+    assert res_partial["attachments"] == expected_remaining
+    assert res_partial["error"]["attachments"] == expected_remaining
+    assert "RAW-ATT-" not in json.dumps(res_partial)
+
+    # 3. Caller continues cleanly from the reported remaining attachments.
+    draft.fail_at = 99
+    res_retry = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "subject": "NEW SUBJECT",
+        "remove_attachments": [a["id"] for a in res_partial["attachments"]],
+    })
+    assert res_retry["ok"] is True
+    assert res_retry["attachments"] == []
+    assert draft.attachments == []
+    assert draft.subject == "NEW SUBJECT"
+    assert draft.save_calls == [["subject"]]
+
+
+def test_add_draft_attachment_message_id_eml_name_type_size_unknown_and_exclusivity(
+    tmp_path,
+):
+    att_dir = tmp_path / "staging"
+    att_dir.mkdir()
+    (att_dir / "doc.txt").write_bytes(b"doc")
+
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_attachment_dir=str(att_dir),
+        ews_max_attachment_mb=1,
+    )
+    draft = _StatefulDraft("RAW-EML-DRAFT")
+    mime_payload = (
+        b"From: sender@example.com\r\n"
+        b"To: exec@corp.example\r\n"
+        b"Subject: Re: Q3/Q4: Plan?\r\n"
+        b"MIME-Version: 1.0\r\n\r\n"
+        b"Approved for release.\r\n"
+    )
+    # Source lives in Inbox (not Drafts) and carries unsafe filename chars + bidi.
+    source_msg = SimpleNamespace(
+        id="RAW-SRC-MSG",
+        item_class="IPM.Note",
+        size=len(mime_payload),
+        parent_folder_id=SimpleNamespace(id="FOLDER-INBOX"),
+        subject="Re: Q3/Q4: Plan? \u202e",
+        mime_content=mime_payload,
+    )
+    blank_subject_msg = SimpleNamespace(
+        id="RAW-SRC-BLANK",
+        item_class="IPM.Note",
+        parent_folder_id=SimpleNamespace(id="FOLDER-SENT"),
+        subject="  ???  ",
+        mime_content=b"Subject: \r\n\r\nMinimal\r\n",
+    )
+
+    class _CountingOversizeMsg:
+        id = "RAW-SRC-DECLARED-BIG"
+        item_class = "IPM.Note"
+        subject = "Declared oversize"
+        size = 1024 * 1024 + 1
+        mime_reads = 0
+
+        @property
+        def mime_content(self) -> bytes:
+            self.mime_reads += 1
+            return b"x" * (1024 * 1024 + 1)
+
+    declared_big = _CountingOversizeMsg()
+    understated_big = SimpleNamespace(
+        id="RAW-SRC-BIG",
+        item_class="IPM.Note",
+        size=128,
+        parent_folder_id=SimpleNamespace(id="FOLDER-INBOX"),
+        subject="Huge thread",
+        mime_content=b"x" * (1024 * 1024 + 1),
+    )
+    bcc_mime = (
+        b"From: exec@corp.example\r\n"
+        b"To: client@example.com\r\n"
+        b"Bcc: secret1@corp.example,\r\n"
+        b" secret2@corp.example,\r\n"
+        b"\tsecret3@corp.example\r\n"
+        b"Cc: peer@corp.example\r\n"
+        b"Resent-Bcc: audit@corp.example,\r\n"
+        b" compliance@corp.example\r\n"
+        b"Subject: Sent with hidden recipients\r\n"
+        b"MIME-Version: 1.0\r\n\r\n"
+        b"Hello,\r\n"
+        b"Bcc: body-line-must-remain@example.com\r\n"
+    )
+    bcc_msg = SimpleNamespace(
+        id="RAW-SRC-BCC",
+        item_class="IPM.Note",
+        size=len(bcc_mime),
+        parent_folder_id=SimpleNamespace(id="FOLDER-SENT"),
+        subject="Sent with hidden recipients",
+        mime_content=bcc_mime,
+    )
+    account._by_id.update({
+        "RAW-EML-DRAFT": draft,
+        "RAW-SRC-MSG": source_msg,
+        "RAW-SRC-BLANK": blank_subject_msg,
+        "RAW-SRC-DECLARED-BIG": declared_big,
+        "RAW-SRC-BIG": understated_big,
+        "RAW-SRC-BCC": bcc_msg,
+        "RAW-SRC-GONE": ErrorItemNotFound("message deleted"),
+    })
+    d_alias = ctx.aliaser.alias_for("RAW-EML-DRAFT", "d")
+    m_alias = ctx.aliaser.alias_for("RAW-SRC-MSG", "m")
+    m_blank = ctx.aliaser.alias_for("RAW-SRC-BLANK", "m")
+    m_declared_big = ctx.aliaser.alias_for("RAW-SRC-DECLARED-BIG", "m")
+    m_big = ctx.aliaser.alias_for("RAW-SRC-BIG", "m")
+    m_bcc = ctx.aliaser.alias_for("RAW-SRC-BCC", "m")
+    m_gone = ctx.aliaser.alias_for("RAW-SRC-GONE", "m")
+
+    # 1. Attach message as .eml: sanitised subject name, message/rfc822, exact MIME bytes.
+    res = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": f" {m_alias} ",
+    })
+    assert res["ok"] is True
+    assert res["added"]["name"] == "Re_ Q3_Q4_ Plan.eml"
+    assert res["added"]["size"] == len(mime_payload)
+    assert res["added"]["id"].startswith("a")
+    assert len(draft.attach_calls) == 1
+    attached_fa = draft.attach_calls[0]
+    assert isinstance(attached_fa, FileAttachment)
+    assert attached_fa.name == "Re_ Q3_Q4_ Plan.eml"
+    assert attached_fa.content == mime_payload
+    assert attached_fa.content_type == "message/rfc822"
+    assert account.fetch_projections[-3:] == [
+        writes._DRAFT_ATTACH_FIELDS,
+        writes._ATTACH_MESSAGE_META_FIELDS,
+        writes._ATTACH_MESSAGE_MIME_FIELDS,
+    ]
+
+    # 2. Bcc and Resent-Bcc headers (including folded lines) are stripped from
+    #    the attached .eml copy while body lines stay intact.
+    res_bcc = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": m_bcc,
+    })
+    assert res_bcc["ok"] is True
+    attached_bcc = draft.attach_calls[-1].content
+    assert b"secret1@corp.example" not in attached_bcc
+    assert b"secret2@corp.example" not in attached_bcc
+    assert b"secret3@corp.example" not in attached_bcc
+    assert b"audit@corp.example" not in attached_bcc
+    assert b"compliance@corp.example" not in attached_bcc
+    assert b"Resent-Bcc" not in attached_bcc
+    assert attached_bcc == (
+        b"From: exec@corp.example\r\n"
+        b"To: client@example.com\r\n"
+        b"Cc: peer@corp.example\r\n"
+        b"Subject: Sent with hidden recipients\r\n"
+        b"MIME-Version: 1.0\r\n\r\n"
+        b"Hello,\r\n"
+        b"Bcc: body-line-must-remain@example.com\r\n"
+    )
+    assert res_bcc["added"]["size"] == len(attached_bcc)
+
+    # Blank/punctuation-only subject falls back to message.eml.
+    res_blank = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": m_blank,
+    })
+    assert res_blank["ok"] is True
+    assert res_blank["added"]["name"] == "message.eml"
+    assert draft.attach_calls[-1].content_type == "message/rfc822"
+
+    # 3. Declared size ceiling checked BEFORE downloading MIME content; real
+    #    MIME byte length also checked after download if declared size was small.
+    attach_count_before = len(draft.attach_calls)
+    proj_before_declared = len(account.fetch_projections)
+    res_decl_big = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": m_declared_big,
+    })
+    assert res_decl_big["ok"] is False
+    assert res_decl_big["error"]["code"] == "validation"
+    assert "exceed" in res_decl_big["error"]["message"]
+    assert declared_big.mime_reads == 0
+    assert account.fetch_projections[proj_before_declared:] == [
+        writes._DRAFT_ATTACH_FIELDS,
+        writes._ATTACH_MESSAGE_META_FIELDS,
+    ]
+    assert len(draft.attach_calls) == attach_count_before
+
+    res_big = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": m_big,
+    })
+    assert res_big["ok"] is False
+    assert res_big["error"]["code"] == "validation"
+    assert "exceed" in res_big["error"]["message"]
+    assert len(draft.attach_calls) == attach_count_before
+
+    # 4. Self-attach and non-mail source items refused with validation.
+    res_self = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": d_alias,
+    })
+    assert res_self["ok"] is False
+    assert res_self["error"]["code"] == "validation"
+    assert len(draft.attach_calls) == attach_count_before
+
+    CachingProtocol.clear_cache()
+    try:
+        real_acc = Account(
+            primary_smtp_address="exec@corp.example",
+            config=Configuration(
+                service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+                credentials=Credentials("svc", "secret"),
+                auth_type=BASIC,
+                version=Version(build=EXCHANGE_2016),
+            ),
+            autodiscover=False,
+            access_type=DELEGATE,
+            default_timezone=EWSTimeZone("UTC"),
+        )
+        non_mail_sources = [
+            CalendarItem(account=real_acc, id="RAW-NM-CAL", subject="Sync"),
+            MeetingRequest(account=real_acc, id="RAW-NM-REQ", subject="Invite"),
+            MeetingCancellation(account=real_acc, id="RAW-NM-CAN", subject="Cancelled"),
+            Contact(account=real_acc, id="RAW-NM-CON"),
+            Task(account=real_acc, id="RAW-NM-TSK", subject="Todo"),
+            SimpleNamespace(
+                id="RAW-NM-ICS",
+                subject="Board meeting",
+                mime_content=b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+            ),
+            SimpleNamespace(
+                id="RAW-NM-CLASS",
+                item_class="IPM.Appointment",
+                subject="Calendar class",
+                mime_content=b"Subject: x\r\n\r\nx\r\n",
+            ),
+        ]
+        for idx, nm_item in enumerate(non_mail_sources):
+            rid = f"RAW-NON-MAIL-{idx}"
+            account._by_id[rid] = nm_item
+            nm_alias = ctx.aliaser.alias_for(rid, "e")
+            r_nm = call(ctx, "add_draft_attachment", {
+                "draft_id": d_alias,
+                "message_id": nm_alias,
+            })
+            assert r_nm["ok"] is False, idx
+            assert r_nm["error"]["code"] == "validation", idx
+        assert len(draft.attach_calls) == attach_count_before
+    finally:
+        CachingProtocol.clear_cache()
+
+    # 5. Sanitised .eml filename: format/control chars, reserved device names,
+    #    and 120-char / 200-byte caps before .eml.
+    assert writes._eml_filename("invoice\u202efdp.exe") == "invoicefdp.exe.eml"
+    assert writes._eml_filename("pay\u200f\u061c\u200b\ufeffnow") == "paynow.eml"
+    assert writes._eml_filename("abc\u009b\x07def") == "abcdef.eml"
+    assert writes._eml_filename("a\u0085b\u2028c\u2029d") == "a b c d.eml"
+    assert writes._eml_filename("line1\r\nline2\tend") == "line1 line2 end.eml"
+    for reserved in (
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9",
+        "CON.txt", "con .x", "LPT1.report", "COM\u00b9", "CON.eml",
+    ):
+        fname = writes._eml_filename(reserved)
+        assert fname.startswith("_"), (reserved, fname)
+        assert fname.endswith(".eml"), (reserved, fname)
+    for long_subj in ("x" * 300, "\u0645" * 200, "\U0001f600" * 200):
+        fname = writes._eml_filename(long_subj)
+        assert fname.endswith(".eml")
+        stem = fname[:-4]
+        assert 1 <= len(stem) <= 120
+        assert len(stem.encode("utf-8")) <= 200
+    assert writes._eml_filename("x" * 300) == ("x" * 120) + ".eml"
+    assert writes._eml_filename("\u0645" * 200) == ("\u0645" * 100) + ".eml"
+    assert writes._eml_filename("\U0001f600" * 200) == ("\U0001f600" * 50) + ".eml"
+
+    # 6. Unknown message id: stale alias -> validation; missing upstream item -> not_found.
+    res_stale_alias = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": "m999",
+    })
+    assert res_stale_alias["ok"] is False
+    assert res_stale_alias["error"]["code"] == "validation"
+    assert len(draft.attach_calls) == attach_count_before
+
+    res_missing_item = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": m_gone,
+    })
+    assert res_missing_item["ok"] is False
+    assert res_missing_item["error"]["code"] == "not_found"
+    assert len(draft.attach_calls) == attach_count_before
+
+    # 7. The three forms (content_base64, path, message_id) are mutually exclusive.
+    fetches_before = len(account.fetch_projections)
+    for bad_combo in (
+        {"draft_id": d_alias},
+        {"draft_id": d_alias, "filename": "a.txt", "content_base64": _b64(b"a"),
+         "path": "doc.txt"},
+        {"draft_id": d_alias, "filename": "a.txt", "content_base64": _b64(b"a"),
+         "message_id": m_alias},
+        {"draft_id": d_alias, "path": "doc.txt", "message_id": m_alias},
+        {"draft_id": d_alias, "filename": "a.txt", "content_base64": _b64(b"a"),
+         "path": "doc.txt", "message_id": m_alias},
+    ):
+        refused = call(ctx, "add_draft_attachment", bad_combo)
+        assert refused["ok"] is False, bad_combo
+        assert refused["error"]["code"] == "validation", bad_combo
+    assert len(account.fetch_projections) == fetches_before
+    assert len(draft.attach_calls) == attach_count_before
+
+
+def test_send_draft_refuses_token_issued_before_removal_or_attached_message(
+    tmp_path,
+):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    draft = _StatefulDraft("RAW-SEND-BIND")
+    source_msg = SimpleNamespace(
+        id="RAW-PRIOR-MSG",
+        item_class="IPM.Note",
+        parent_folder_id=SimpleNamespace(id="FOLDER-INBOX"),
+        subject="Prior approval",
+        mime_content=b"From: a@example.com\r\nSubject: Prior approval\r\n\r\nYes.\r\n",
+    )
+    account._by_id.update({
+        "RAW-SEND-BIND": draft,
+        "RAW-PRIOR-MSG": source_msg,
+    })
+    d_alias = ctx.aliaser.alias_for("RAW-SEND-BIND", "d")
+    m_alias = ctx.aliaser.alias_for("RAW-PRIOR-MSG", "m")
+
+    call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "one.txt",
+        "content_base64": _b64(b"first"),
+    })
+    call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "filename": "two.txt",
+        "content_base64": _b64(b"second"),
+    })
+
+    # 1. Mint send token, remove an attachment, then try to confirm -> refused.
+    p1_before_remove = call(ctx, "send_draft", {"draft_id": d_alias})
+    assert p1_before_remove["requires_confirmation"] is True
+    assert p1_before_remove["preview"]["attachment_count"] == 2
+
+    rem = call(ctx, "update_draft", {
+        "draft_id": d_alias,
+        "remove_attachments": ["two.txt"],
+    })
+    assert rem["ok"] is True
+
+    stale_after_remove = call(ctx, "send_draft", {
+        "draft_id": d_alias,
+        "confirm_token": p1_before_remove["confirm_token"],
+    })
+    assert stale_after_remove["ok"] is False
+    assert stale_after_remove["error"]["code"] == "confirm_invalid"
+    assert draft.send_calls == []
+
+    # 2. Mint fresh send token, attach a message (.eml), then confirm -> refused.
+    p1_before_eml = call(ctx, "send_draft", {"draft_id": d_alias})
+    assert p1_before_eml["requires_confirmation"] is True
+    assert p1_before_eml["preview"]["attachment_count"] == 1
+    assert p1_before_eml["preview"]["attachments"] == [{"name": "one.txt", "size": 5}]
+
+    added_eml = call(ctx, "add_draft_attachment", {
+        "draft_id": d_alias,
+        "message_id": m_alias,
+    })
+    assert added_eml["ok"] is True
+
+    stale_after_eml = call(ctx, "send_draft", {
+        "draft_id": d_alias,
+        "confirm_token": p1_before_eml["confirm_token"],
+    })
+    assert stale_after_eml["ok"] is False
+    assert stale_after_eml["error"]["code"] == "confirm_invalid"
+    assert draft.send_calls == []
+
+    # 3. Re-previewing after the .eml attachment binds the updated list and sends cleanly.
+    p1_fresh = call(ctx, "send_draft", {"draft_id": d_alias})
+    assert p1_fresh["preview"]["attachment_count"] == 2
+    assert p1_fresh["preview"]["attachments"] == [
+        {"name": "Prior approval.eml", "size": len(source_msg.mime_content)},
+        {"name": "one.txt", "size": 5},
+    ]
+    sent = call(ctx, "send_draft", {
+        "draft_id": d_alias,
+        "confirm_token": p1_fresh["confirm_token"],
+    })
+    assert sent["ok"] is True and sent["sent"] is True
+    assert draft.send_calls == [True]
+
+
+def _cal_standin(**overrides: Any) -> SimpleNamespace:
+    base: dict[str, Any] = {
+        "id": "RAW-CAL-ITEM",
+        "changekey": "CK-CAL",
+        "item_class": "IPM.Appointment",
+        "subject": "Calendar entry",
+        "start": datetime(2026, 11, 20, 9, 0, tzinfo=LOCAL_TZ),
+        "end": datetime(2026, 11, 20, 10, 0, tzinfo=LOCAL_TZ),
+        "type": "Single",
+        "is_meeting": False,
+        "my_response_type": "Organizer",
+        "organizer": SimpleNamespace(email_address="exec@corp.example"),
+        "required_attendees": None,
+        "optional_attendees": None,
+        "resources": None,
+    }
+    base.update(overrides)
+    ns = SimpleNamespace(**base)
+    ns.cancel = MagicMock(name="cancel")
+    ns.move_to_trash = MagicMock(name="move_to_trash")
+    return ns
+
+
+def test_cancel_event_plain_appointment_meeting_and_foreign_organizer(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+
+    def _att(email: str) -> SimpleNamespace:
+        return SimpleNamespace(mailbox=SimpleNamespace(email_address=email))
+
+    # --- Row 1: Not a CalendarItem -> validation, nothing happens ---
+    mail_fake = SimpleNamespace(
+        id="RAW-NC-MAIL",
+        subject="Invoice 4471",
+        parent_folder_id=SimpleNamespace(id="FOLDER-INBOX"),
+        cancel=MagicMock(),
+        move_to_trash=MagicMock(),
+    )
+    draft_fake = SimpleNamespace(
+        id="RAW-NC-DRAFT",
+        subject="Unsent draft",
+        parent_folder_id=SimpleNamespace(id=DRAFTS_ID),
+        cancel=MagicMock(),
+        move_to_trash=MagicMock(),
+    )
+    for idx, (nc_item, kind) in enumerate(((mail_fake, "m"), (draft_fake, "d"))):
+        rid = f"RAW-NC-FAKE-{idx}"
+        account._by_id[rid] = nc_item
+        alias = ctx.aliaser.alias_for(rid, kind)
+        res_nc = call(ctx, "cancel_event", {"event_id": alias})
+        assert res_nc["ok"] is False
+        assert res_nc["error"]["code"] == "validation"
+        assert "confirm_token" not in res_nc
+        nc_item.cancel.assert_not_called()
+        nc_item.move_to_trash.assert_not_called()
+
+    CachingProtocol.clear_cache()
+    try:
+        real_acc = Account(
+            primary_smtp_address="exec@corp.example",
+            config=Configuration(
+                service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+                credentials=Credentials("svc", "secret"),
+                auth_type=BASIC,
+                version=Version(build=EXCHANGE_2016),
+            ),
+            autodiscover=False,
+            access_type=DELEGATE,
+            default_timezone=EWSTimeZone("UTC"),
+        )
+        for idx, cls in enumerate(
+            (Message, MeetingRequest, MeetingCancellation, Contact, Task)
+        ):
+            rid = f"RAW-NC-REAL-{idx}"
+            account._by_id[rid] = cls(account=real_acc, id=rid, changekey="CK")
+            alias = ctx.aliaser.alias_for(rid, "e")
+            res_real_nc = call(ctx, "cancel_event", {"event_id": alias})
+            assert res_real_nc["ok"] is False, cls.__name__
+            assert res_real_nc["error"]["code"] == "validation", cls.__name__
+
+        # Default-constructed real CalendarItem (my_response_type=None, is_meeting=None)
+        # fails closed at Row 4 because is_meeting is missing.
+        bare_cal = CalendarItem(account=real_acc, id="RAW-BARE-CAL", changekey="CK")
+        account._by_id["RAW-BARE-CAL"] = bare_cal
+        e_bare = ctx.aliaser.alias_for("RAW-BARE-CAL", "e")
+        res_bare = call(ctx, "cancel_event", {"event_id": e_bare})
+        assert res_bare["ok"] is False
+        assert res_bare["error"]["code"] == "validation"
+    finally:
+        CachingProtocol.clear_cache()
+
+    # --- Row 2: my_response_type == 'Organizer' ---
+    # 2a. is_meeting=True with attendee lists None AND organizer as an alias of
+    #     our mailbox -> ours, action='cancel' (1 projected fetch per phase).
+    mtg_alias_org = _cal_standin(
+        id="RAW-ROW2A",
+        subject="Alias-organized meeting",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="abdul.alias@other-domain.example"),
+        required_attendees=None,
+        optional_attendees=None,
+        resources=None,
+    )
+    account._by_id["RAW-ROW2A"] = mtg_alias_org
+    e_2a = ctx.aliaser.alias_for("RAW-ROW2A", "e")
+    proj_0 = len(account.fetch_projections)
+    p1_2a = call(ctx, "cancel_event", {"event_id": e_2a, "message": "Moving"})
+    assert p1_2a["ok"] is True and p1_2a["requires_confirmation"] is True
+    assert p1_2a["preview"]["action"] == "cancel"
+    assert p1_2a["preview"]["attendee_count"] == 0
+    assert account.fetch_projections[proj_0:] == [writes._EVENT_CANCEL_FIELDS]
+    p2_2a = call(ctx, "cancel_event", {
+        "event_id": e_2a,
+        "message": "Moving",
+        "confirm_token": p1_2a["confirm_token"],
+    })
+    assert p2_2a["ok"] is True and p2_2a["cancelled"] is True
+    assert account.fetch_projections[proj_0:] == [
+        writes._EVENT_CANCEL_FIELDS,
+        writes._EVENT_CANCEL_FIELDS,
+    ]
+    mtg_alias_org.cancel.assert_called_once_with(new_body="Moving")
+    mtg_alias_org.move_to_trash.assert_not_called()
+
+    # 2b. Organizer + is_meeting=False + non-empty attendee list -> cancel.
+    mtg_2b = _cal_standin(
+        id="RAW-ROW2B",
+        is_meeting=False,
+        my_response_type="Organizer",
+        required_attendees=[_att("a@corp.example"), _att("b@corp.example")],
+        optional_attendees=[_att("c@corp.example")],
+    )
+    account._by_id["RAW-ROW2B"] = mtg_2b
+    e_2b = ctx.aliaser.alias_for("RAW-ROW2B", "e")
+    p1_2b = call(ctx, "cancel_event", {"event_id": e_2b})
+    assert p1_2b["preview"]["action"] == "cancel"
+    assert p1_2b["preview"]["attendee_count"] == 3
+    p2_2b = call(ctx, "cancel_event", {
+        "event_id": e_2b,
+        "confirm_token": p1_2b["confirm_token"],
+    })
+    assert p2_2b["ok"] is True and p2_2b["cancelled"] is True
+    mtg_2b.cancel.assert_called_once_with()
+    mtg_2b.move_to_trash.assert_not_called()
+
+    # 2c. Organizer + is_meeting=False + empty attendee lists -> delete (trash, no notice).
+    appt = _cal_standin(
+        id="RAW-APPT",
+        subject="Focus block",
+        is_meeting=False,
+        my_response_type="Organizer",
+    )
+    account._by_id["RAW-APPT"] = appt
+    e_appt = ctx.aliaser.alias_for("RAW-APPT", "e")
+    p1_appt = call(ctx, "cancel_event", {"event_id": e_appt})
+    assert p1_appt["ok"] is True and p1_appt["requires_confirmation"] is True
+    assert p1_appt["preview"]["event_id"] == e_appt
+    assert p1_appt["preview"]["subject"] == "Focus block"
+    assert p1_appt["preview"]["action"] == "delete"
+    assert p1_appt["preview"]["attendee_count"] == 0
+    appt.move_to_trash.assert_not_called()
+    p2_appt = call(ctx, "cancel_event", {
+        "event_id": e_appt,
+        "confirm_token": p1_appt["confirm_token"],
+    })
+    assert p2_appt["ok"] is True and p2_appt["deleted"] is True
+    assert "cancelled" not in p2_appt
+    appt.move_to_trash.assert_called_once_with(
+        send_meeting_cancellations=SEND_TO_NONE
+    )
+    appt.cancel.assert_not_called()
+
+    # 2d. Organizer + is_meeting=None + empty attendees -> validation.
+    row_2d = _cal_standin(
+        id="RAW-ROW2D",
+        is_meeting=None,
+        my_response_type="Organizer",
+    )
+    account._by_id["RAW-ROW2D"] = row_2d
+    e_2d = ctx.aliaser.alias_for("RAW-ROW2D", "e")
+    res_2d = call(ctx, "cancel_event", {"event_id": e_2d})
+    assert res_2d["ok"] is False and res_2d["error"]["code"] == "validation"
+
+    # --- Row 3: Accept / Decline / Tentative / NoResponseReceived -> validation ---
+    # Organizer is set to our OWN address so ONLY Row 3 can trip the refusal.
+    for idx, resp_type in enumerate(
+        ("Accept", "Decline", "Tentative", "NoResponseReceived")
+    ):
+        row3 = _cal_standin(
+            id=f"RAW-ROW3-{idx}",
+            is_meeting=True,
+            my_response_type=resp_type,
+            organizer=SimpleNamespace(email_address="exec@corp.example"),
+            required_attendees=[_att("exec@corp.example")],
+        )
+        account._by_id[row3.id] = row3
+        e_r3 = ctx.aliaser.alias_for(row3.id, "e")
+        refused = call(ctx, "cancel_event", {"event_id": e_r3})
+        assert refused["ok"] is False, resp_type
+        assert refused["error"]["code"] == "validation", resp_type
+        assert "respond_to_event" in refused["error"]["message"], resp_type
+        assert "confirm_token" not in refused
+        row3.cancel.assert_not_called()
+        row3.move_to_trash.assert_not_called()
+
+    # --- Row 4: my_response_type is 'Unknown' or None ---
+    # 4a. Explicitly is_meeting=False and all attendee lists empty -> delete.
+    for idx, unk_resp in enumerate(("Unknown", None)):
+        row4a = _cal_standin(
+            id=f"RAW-ROW4A-{idx}",
+            is_meeting=False,
+            my_response_type=unk_resp,
+            organizer=None,
+        )
+        account._by_id[row4a.id] = row4a
+        e_4a = ctx.aliaser.alias_for(row4a.id, "e")
+        p1_4a = call(ctx, "cancel_event", {"event_id": e_4a})
+        assert p1_4a["preview"]["action"] == "delete"
+        p2_4a = call(ctx, "cancel_event", {
+            "event_id": e_4a,
+            "confirm_token": p1_4a["confirm_token"],
+        })
+        assert p2_4a["ok"] is True and p2_4a["deleted"] is True
+        row4a.move_to_trash.assert_called_once_with(
+            send_meeting_cancellations=SEND_TO_NONE
+        )
+
+    # 4b. Unknown + is_meeting=False + non-empty attendees -> validation (not delete).
+    row4b_bad = _cal_standin(
+        id="RAW-ROW4B-BAD",
+        is_meeting=False,
+        my_response_type="Unknown",
+        required_attendees=[_att("a@corp.example")],
+    )
+    account._by_id[row4b_bad.id] = row4b_bad
+    res_4b_bad = call(
+        ctx, "cancel_event", {"event_id": ctx.aliaser.alias_for(row4b_bad.id, "e")}
+    )
+    assert res_4b_bad["ok"] is False and res_4b_bad["error"]["code"] == "validation"
+
+    # 4c. Unknown + is_meeting=True + own SMTP address (upper-case / padded) -> cancel.
+    row4c = _cal_standin(
+        id="RAW-ROW4C",
+        is_meeting=True,
+        my_response_type="Unknown",
+        organizer=SimpleNamespace(email_address="  EXEC@Corp.Example "),
+        required_attendees=[_att("peer@corp.example")],
+    )
+    account._by_id[row4c.id] = row4c
+    e_4c = ctx.aliaser.alias_for(row4c.id, "e")
+    p1_4c = call(ctx, "cancel_event", {"event_id": e_4c})
+    assert p1_4c["preview"]["action"] == "cancel"
+    p2_4c = call(ctx, "cancel_event", {
+        "event_id": e_4c,
+        "confirm_token": p1_4c["confirm_token"],
+    })
+    assert p2_4c["ok"] is True and p2_4c["cancelled"] is True
+    row4c.cancel.assert_called_once_with()
+
+    # 4d. Unknown + is_meeting=True + foreign SMTP organizer -> validation (respond_to_event).
+    row4d = _cal_standin(
+        id="RAW-ROW4D",
+        is_meeting=True,
+        my_response_type="Unknown",
+        organizer=SimpleNamespace(email_address="chair@example.com"),
+        required_attendees=[_att("exec@corp.example")],
+    )
+    account._by_id[row4d.id] = row4d
+    res_4d = call(
+        ctx, "cancel_event", {"event_id": ctx.aliaser.alias_for(row4d.id, "e")}
+    )
+    assert res_4d["ok"] is False and res_4d["error"]["code"] == "validation"
+    assert "respond_to_event" in res_4d["error"]["message"]
+
+    # 4e. Unknown / None + is_meeting=True + missing or legacy EX DN organizer
+    #     (both with and without attendees) -> validation, never deleted.
+    legacy_dn = SimpleNamespace(
+        email_address="/O=CORP/OU=EXCHANGE ADMINISTRATIVE GROUP/CN=RECIPIENTS/CN=CHAIR",
+        routing_type="EX",
+    )
+    for idx, (unk_resp, org_val, req_list) in enumerate((
+        ("Unknown", legacy_dn, [_att("exec@corp.example")]),
+        ("Unknown", legacy_dn, None),
+        (None, None, [_att("x@corp.example")]),
+        (None, None, None),
+    )):
+        row4e = _cal_standin(
+            id=f"RAW-ROW4E-{idx}",
+            is_meeting=True,
+            my_response_type=unk_resp,
+            organizer=org_val,
+            required_attendees=req_list,
+        )
+        account._by_id[row4e.id] = row4e
+        res_4e = call(
+            ctx, "cancel_event", {"event_id": ctx.aliaser.alias_for(row4e.id, "e")}
+        )
+        assert res_4e["ok"] is False, idx
+        assert res_4e["error"]["code"] == "validation", idx
+        row4e.cancel.assert_not_called()
+        row4e.move_to_trash.assert_not_called()
+
+    # 4f. Unknown / None + is_meeting=None -> validation.
+    row4f = _cal_standin(
+        id="RAW-ROW4F",
+        is_meeting=None,
+        my_response_type="Unknown",
+    )
+    account._by_id[row4f.id] = row4f
+    res_4f = call(
+        ctx, "cancel_event", {"event_id": ctx.aliaser.alias_for(row4f.id, "e")}
+    )
+    assert res_4f["ok"] is False and res_4f["error"]["code"] == "validation"
+
+    # --- Token binding: time shift, appointment->meeting, series, recipient guard ---
+    # 5. Moving start/end by 30 days between phases invalidates BOTH meeting and
+    #    plain-appointment tokens.
+    for idx, is_mtg in enumerate((True, False)):
+        ev_shift = _cal_standin(
+            id=f"RAW-SHIFT-{idx}",
+            is_meeting=is_mtg,
+            required_attendees=[_att("peer@corp.example")] if is_mtg else None,
+        )
+        account._by_id[ev_shift.id] = ev_shift
+        e_shift = ctx.aliaser.alias_for(ev_shift.id, "e")
+        p1_s = call(ctx, "cancel_event", {"event_id": e_shift})
+        ev_shift.start = ev_shift.start + timedelta(days=30)
+        ev_shift.end = ev_shift.end + timedelta(days=30)
+        p2_s = call(ctx, "cancel_event", {
+            "event_id": e_shift,
+            "confirm_token": p1_s["confirm_token"],
+        })
+        assert p2_s["ok"] is False, is_mtg
+        assert p2_s["error"]["code"] == "confirm_invalid", is_mtg
+        ev_shift.cancel.assert_not_called()
+        ev_shift.move_to_trash.assert_not_called()
+
+    # 6. Turning an appointment into a meeting or changing type to RecurringMaster
+    #    between phases invalidates the token.
+    appt2 = _cal_standin(id="RAW-APPT-TOCTOU", subject="Hold slot")
+    account._by_id["RAW-APPT-TOCTOU"] = appt2
+    e_toctou = ctx.aliaser.alias_for("RAW-APPT-TOCTOU", "e")
+    p1_toctou = call(ctx, "cancel_event", {"event_id": e_toctou})
+    assert p1_toctou["preview"]["action"] == "delete"
+    appt2.is_meeting = True
+    appt2.required_attendees = [_att("guest@example.com")]
+    p2_toctou = call(ctx, "cancel_event", {
+        "event_id": e_toctou,
+        "confirm_token": p1_toctou["confirm_token"],
+    })
+    assert p2_toctou["ok"] is False and p2_toctou["error"]["code"] == "confirm_invalid"
+    appt2.cancel.assert_not_called()
+    appt2.move_to_trash.assert_not_called()
+
+    appt_type = _cal_standin(id="RAW-TYPE-FLIP", type="Single")
+    account._by_id["RAW-TYPE-FLIP"] = appt_type
+    e_type = ctx.aliaser.alias_for("RAW-TYPE-FLIP", "e")
+    p1_type = call(ctx, "cancel_event", {"event_id": e_type})
+    appt_type.type = "RecurringMaster"
+    p2_type = call(ctx, "cancel_event", {
+        "event_id": e_type,
+        "confirm_token": p1_type["confirm_token"],
+    })
+    assert p2_type["ok"] is False and p2_type["error"]["code"] == "confirm_invalid"
+    appt_type.move_to_trash.assert_not_called()
+
+    # 7. Recurring series master explicitly flags whole-series cancellation in preview.
+    series_master = _cal_standin(
+        id="RAW-SERIES-MASTER",
+        subject="Weekly standup",
+        type="RecurringMaster",
+        is_meeting=True,
+        required_attendees=[_att("peer@corp.example")],
+    )
+    account._by_id["RAW-SERIES-MASTER"] = series_master
+    e_master = ctx.aliaser.alias_for("RAW-SERIES-MASTER", "e")
+    p1_master = call(ctx, "cancel_event", {"event_id": e_master})
+    assert p1_master["preview"]["type"] == "RecurringMaster"
+    assert p1_master["preview"]["series"] is True
+    assert p1_master["preview"]["scope"] == "series"
+    assert "entire series" in p1_master["preview"]["note"]
+
+    # 8. Recipient guard blocks denylisted attendees; external attendees emit warnings.
+    ext_mtg = _cal_standin(
+        id="RAW-EXT-MTG",
+        is_meeting=True,
+        required_attendees=[_att("peer@corp.example"), _att("guest@partner.example")],
+    )
+    account._by_id["RAW-EXT-MTG"] = ext_mtg
+    e_ext = ctx.aliaser.alias_for("RAW-EXT-MTG", "e")
+    p1_ext = call(ctx, "cancel_event", {"event_id": e_ext})
+    assert p1_ext["ok"] is True and p1_ext["requires_confirmation"] is True
+    assert p1_ext["warnings"] == ["external recipients: guest@partner.example"]
+
+    ctx_deny = full_ctx(
+        tmp_path / "deny",
+        account,
+        ews_recipient_denylist="*@blocked.example",
+    )
+    blocked_mtg = _cal_standin(
+        id="RAW-BLOCKED-MTG",
+        is_meeting=True,
+        required_attendees=[_att("ceo@blocked.example"), _att("peer@corp.example")],
+    )
+    account._by_id["RAW-BLOCKED-MTG"] = blocked_mtg
+    e_blocked = ctx_deny.aliaser.alias_for("RAW-BLOCKED-MTG", "e")
+    res_blocked = call(ctx_deny, "cancel_event", {
+        "event_id": e_blocked,
+        "message": "Cancelled",
+    })
+    assert res_blocked["ok"] is False
+    assert res_blocked["error"]["code"] == "recipient_blocked"
+    assert "confirm_token" not in res_blocked
+    blocked_mtg.cancel.assert_not_called()
+
+
+
+

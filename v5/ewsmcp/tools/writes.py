@@ -40,11 +40,14 @@ import html as _html
 import logging
 import mimetypes
 import os
+import re
 import stat
 import threading
 import time
+import unicodedata
 from collections import deque
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from datetime import date, datetime, timezone
@@ -65,6 +68,7 @@ from exchangelib.items import (
     SEND_TO_ALL_AND_SAVE_COPY,
     SEND_TO_CHANGED_AND_SAVE_COPY,
     SEND_TO_NONE,
+    Item,
 )
 from exchangelib.recurrence import (
     AbsoluteMonthlyPattern,
@@ -77,7 +81,8 @@ from ..dates import parse_when
 from ..dto import fmt_dt
 from ..errors import ToolError, map_exception
 from ..flag_property import ensure_registered as ensure_flag_status_registered
-from .base import Context, ToolSpec, preview_content_hash
+from ..htmlsafe import HTMLValidationError, inspect_draft_links, sanitise_html
+from .base import Context, ToolSpec, _normalise_recipient, preview_content_hash
 
 ensure_flag_status_registered()
 
@@ -105,6 +110,7 @@ def _write_through(ctx: Context, method: str, *args: Any) -> None:
         logger.warning("write-through %s failed (sync will repair): %s",
                        method, exc)
 _DRAFT_MODES = ("new", "reply", "reply_all", "forward")
+_BODY_FORMATS = ("text", "html")
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _SERIES_TYPE = "RecurringMaster"
 _OCCURRENCE_TYPES = ("Occurrence", "Exception")
@@ -247,6 +253,9 @@ _DRAFT_ATTACH_FIELDS: List[str] = [
 _DRAFT_UPDATE_FIELDS: List[str] = [
     "id", "changekey", "parent_folder_id", "subject", "to_recipients", "cc_recipients",
 ]
+_DRAFT_UPDATE_ATTACH_FIELDS: List[str] = [
+    *_DRAFT_UPDATE_FIELDS, "attachments",
+]
 _DRAFT_DELETE_FIELDS: List[str] = [
     "id", "changekey", "parent_folder_id",
 ]
@@ -256,6 +265,15 @@ _DRAFT_PREVIEW_FIELDS: List[str] = [
     "text_body", "body", "attachments",
 ]
 _DRAFT_SEND_FIELDS: List[str] = [*_DRAFT_PREVIEW_FIELDS, "message_id"]
+_EVENT_CANCEL_FIELDS: List[str] = [
+    "id", "changekey", "item_class", "subject", "start", "end", "type",
+    "is_meeting", "my_response_type", "organizer",
+    "required_attendees", "optional_attendees", "resources",
+]
+# Source-message fetches when attaching an existing message as .eml: check
+# item_class and declared size first, and download mime_content only after.
+_ATTACH_MESSAGE_META_FIELDS: List[str] = ["id", "item_class", "subject", "size"]
+_ATTACH_MESSAGE_MIME_FIELDS: List[str] = ["id", "mime_content"]
 
 
 # --- shared helpers ----------------------------------------------------------
@@ -268,6 +286,30 @@ def _wrap_html(text: str) -> HTMLBody:
         "<p>" + _html.escape(p).replace("\n", "<br/>") + "</p>" for p in paragraphs
     ) or "<p></p>"
     return HTMLBody(f"<html><body>{rendered}</body></html>")
+
+
+async def _prepare_draft_body(
+    body: str, body_format: str
+) -> tuple[HTMLBody, str, Optional[Dict[str, Any]]]:
+    if body_format not in _BODY_FORMATS:
+        raise ToolError(
+            "validation",
+            f"body_format must be one of {_BODY_FORMATS}, got {body_format!r}",
+        )
+    if not isinstance(body, str):
+        raise ToolError("validation", "body must be a string")
+    if body_format == "text":
+        return _wrap_html(body), body, None
+    try:
+        cleaned = await asyncio.to_thread(sanitise_html, body)
+    except HTMLValidationError as exc:
+        raise ToolError("validation", str(exc)) from None
+    except Exception as exc:
+        raise ToolError(
+            "validation",
+            f"invalid HTML body ({type(exc).__name__}: {exc})",
+        ) from None
+    return HTMLBody(cleaned.html), cleaned.text, cleaned.sanitised
 
 
 def _email_list(recipients: Any) -> List[str]:
@@ -562,20 +604,170 @@ def _decode_attachments(
     return decoded
 
 
-def _attach_one(msg: Any, attachment: Dict[str, Any]) -> Dict[str, Any]:
+_RESERVED_WIN_STEMS = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+_MAX_EML_STEM_CHARS = 120
+_MAX_EML_STEM_BYTES = 200
+_LINE_BREAK_CONTROLS = frozenset({
+    "\r", "\n", "\t", "\v", "\f", "\u0085", "\u2028", "\u2029",
+})
+_FS_UNSAFE_CHARS = frozenset('/\\:*?"<>|\uff0f\uff3c')
+_HEADER_LINE_RE = re.compile(rb"[^\n]*\n|[^\n]+")
+_NON_MAIL_FAKE_ATTRS = (
+    "is_meeting", "my_response_type", "required_attendees",
+    "optional_attendees", "resources", "is_complete",
+    "email_addresses", "phone_numbers",
+)
+_MAX_ECHO_SELECTOR_CHARS = 80
+
+
+def _cap_eml_stem(stem: str) -> str:
+    capped = stem[:_MAX_EML_STEM_CHARS]
+    while len(capped.encode("utf-8")) > _MAX_EML_STEM_BYTES:
+        capped = capped[:-1]
+    return capped.rstrip(" ._")
+
+
+def _is_reserved_win_stem(stem: str) -> bool:
+    head = unicodedata.normalize("NFKC", stem.split(".", 1)[0].strip(" _")).upper()
+    return head in _RESERVED_WIN_STEMS
+
+
+def _eml_filename(raw_subject: Any) -> str:
+    """Sanitise a message subject (or caller filename) into a safe .eml name."""
+    if not isinstance(raw_subject, str):
+        return "message.eml"
+    pieces: List[str] = []
+    for ch in raw_subject:
+        if ch in _LINE_BREAK_CONTROLS:
+            pieces.append(" ")
+            continue
+        cat = unicodedata.category(ch)
+        if cat in ("Cc", "Cf", "Cs"):
+            continue
+        if ch in _FS_UNSAFE_CHARS:
+            pieces.append("_")
+            continue
+        pieces.append(ch)
+    text = "".join(pieces)
+    while text.lower().endswith(".eml"):
+        text = text[:-4].rstrip(" ._")
+    text = re.sub(r"\.{2,}", "_", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"_+", "_", text)
+    stem = text.strip(" ._")
+    if not stem:
+        return "message.eml"
+    if _is_reserved_win_stem(stem):
+        stem = f"_{stem}"
+    stem = _cap_eml_stem(stem)
+    if not stem:
+        return "message.eml"
+    if _is_reserved_win_stem(stem):
+        stem = _cap_eml_stem(f"_{stem}") or "message"
+    return f"{stem}.eml"
+
+
+def _strip_bcc_headers(mime_bytes: bytes) -> bytes:
+    """Remove top-level Bcc and Resent-Bcc header fields (folded continuation
+    lines included) while leaving the message body untouched."""
+    out: List[bytes] = []
+    dropping = False
+    for match in _HEADER_LINE_RE.finditer(mime_bytes):
+        line = match.group(0)
+        if line in (b"\r\n", b"\n"):
+            out.append(line)
+            out.append(mime_bytes[match.end():])
+            return b"".join(out)
+        if line[:1] in (b" ", b"\t"):
+            if not dropping:
+                out.append(line)
+            continue
+        name, sep, _ = line.partition(b":")
+        if sep and name.strip().lower() in (b"bcc", b"resent-bcc"):
+            dropping = True
+            continue
+        dropping = False
+        out.append(line)
+    return b"".join(out)
+
+
+def _require_mail_message(source: Any, account: Any, tool: str) -> None:
+    if isinstance(source, Item) and not isinstance(source, Message):
+        raise ToolError(
+            "validation",
+            f"{tool}: source item is not a mail message",
+        )
+    item_class = getattr(source, "item_class", None)
+    if (
+        isinstance(item_class, str)
+        and item_class.strip()
+        and not item_class.strip().startswith("IPM.Note")
+    ):
+        raise ToolError(
+            "validation",
+            f"{tool}: source item is not a mail message",
+        )
+    if not isinstance(source, Message):
+        fid = _item_folder_id(source)
+        cal_fid = getattr(getattr(account, "calendar", None), "id", None)
+        if fid is not None and (
+            (cal_fid is not None and fid == cal_fid)
+            or (
+                isinstance(fid, str)
+                and any(tok in fid.upper() for tok in ("CALENDAR", "CONTACT", "TASK"))
+            )
+        ):
+            raise ToolError(
+                "validation",
+                f"{tool}: source item is not a mail message",
+            )
+        obj_vars = vars(source) if hasattr(source, "__dict__") else {}
+        if any(attr in obj_vars for attr in _NON_MAIL_FAKE_ATTRS):
+            raise ToolError(
+                "validation",
+                f"{tool}: source item is not a mail message",
+            )
+
+
+def _attach_one(
+    msg: Any, attachment: Dict[str, Any], aliaser: Any = None
+) -> Dict[str, Any]:
     """Create the attachment server-side; this also moves msg.changekey on."""
-    msg.attach(FileAttachment(name=attachment["name"], content=attachment["content"],
-                              content_type=attachment["content_type"]))
-    return {"name": attachment["name"], "size": len(attachment["content"])}
+    before_atts = getattr(msg, "attachments", None)
+    before_len = len(before_atts) if isinstance(before_atts, (list, tuple)) else 0
+    fa = FileAttachment(
+        name=attachment["name"],
+        content=attachment["content"],
+        content_type=attachment["content_type"],
+    )
+    msg.attach(fa)
+    entry: Dict[str, Any] = {
+        "name": attachment["name"],
+        "size": len(attachment["content"]),
+    }
+    att_id = _attachment_id(fa)
+    if att_id is None:
+        after_atts = getattr(msg, "attachments", None)
+        if isinstance(after_atts, (list, tuple)) and len(after_atts) > before_len:
+            att_id = _attachment_id(after_atts[-1])
+    if att_id is not None:
+        entry["id"] = aliaser.alias_for(att_id, "a") if aliaser is not None else att_id
+    return entry
 
 
-def _attach_all(msg: Any, attachments: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _attach_all(
+    msg: Any, attachments: List[Dict[str, Any]], aliaser: Any = None
+) -> Dict[str, Any]:
     """Attach to a draft that already exists: a failure must not hide its id."""
     added: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
     for attachment in attachments:
         try:
-            added.append(_attach_one(msg, attachment))
+            added.append(_attach_one(msg, attachment, aliaser=aliaser))
         except Exception as exc:
             failed.append({"name": attachment["name"], "error": map_exception(exc).message})
     result: Dict[str, Any] = {}
@@ -586,10 +778,141 @@ def _attach_all(msg: Any, attachments: List[Dict[str, Any]]) -> Dict[str, Any]:
     return result
 
 
+def _format_selector_for_error(sel: str) -> str:
+    if len(sel) <= _MAX_ECHO_SELECTOR_CHARS:
+        return repr(sel)
+    return f"{sel[:_MAX_ECHO_SELECTOR_CHARS]!r} (truncated)"
+
+
+class _PartialDetachError(ToolError):
+    """Raised when detach() fails after deleting at least one attachment."""
+
+    def __init__(
+        self,
+        base: ToolError,
+        *,
+        removed: List[Dict[str, Any]],
+        attachments: List[Dict[str, Any]],
+    ) -> None:
+        removed_names = ", ".join(
+            str(r.get("name") or r.get("id") or "") for r in removed
+        )
+        extra_hint = (
+            "Partial attachment removal: 'removed' lists attachments already "
+            "deleted and 'attachments' lists what remains on the draft; no "
+            "other draft fields were changed. Retry with only the remaining "
+            "attachments."
+        )
+        combined_hint = f"{base.hint} {extra_hint}" if base.hint else extra_hint
+        super().__init__(
+            base.code,
+            f"{base.message} (after removing: {removed_names})",
+            hint=combined_hint,
+            retry_after_s=base.retry_after_s,
+        )
+        self.removed = removed
+        self.attachments = attachments
+
+    def to_dict(self) -> Dict[str, Any]:
+        out = super().to_dict()
+        out["error"]["removed"] = self.removed
+        out["error"]["attachments"] = self.attachments
+        out["removed"] = self.removed
+        out["attachments"] = self.attachments
+        return out
+
+
+def _normalise_remove_selectors(raw_selectors: Any) -> List[str]:
+    if not isinstance(raw_selectors, list) or not raw_selectors:
+        raise ToolError(
+            "validation",
+            "remove_attachments must be a non-empty list of attachment names or ids",
+        )
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in raw_selectors:
+        if not isinstance(item, str) or not item.strip():
+            raise ToolError(
+                "validation",
+                "remove_attachments entries must be non-empty strings",
+            )
+        cleaned = item.strip()
+        if cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+def _select_attachments_to_remove(
+    ctx: Context, msg: Any, selectors: List[str]
+) -> List[Any]:
+    """Match all selectors (all-or-nothing) before any EWS write runs."""
+    raw_atts = getattr(msg, "attachments", None)
+    current_atts = list(raw_atts) if isinstance(raw_atts, (list, tuple)) else []
+    chosen: List[Any] = []
+    chosen_ptrs: set[int] = set()
+    for sel in selectors:
+        try:
+            resolved_sel: Optional[str] = ctx.aliaser.resolve(sel)
+        except KeyError:
+            resolved_sel = None
+        id_matches = [
+            att
+            for att in current_atts
+            for aid in (_attachment_id(att),)
+            if aid is not None
+            and (aid == sel or (resolved_sel is not None and aid == resolved_sel))
+        ]
+        if id_matches:
+            matched = id_matches[0]
+        else:
+            exact = [
+                att
+                for att in current_atts
+                if isinstance(getattr(att, "name", None), str) and att.name == sel
+            ]
+            ci = (
+                exact
+                if exact
+                else [
+                    att
+                    for att in current_atts
+                    if isinstance(getattr(att, "name", None), str)
+                    and att.name.lower() == sel.lower()
+                ]
+            )
+            shown = _format_selector_for_error(sel)
+            if not ci:
+                raise ToolError(
+                    "validation",
+                    f"no attachment on draft matches {shown}",
+                )
+            if len(ci) > 1:
+                choice_ids = [
+                    ctx.aliaser.alias_for(aid, "a")
+                    for att in ci
+                    for aid in (_attachment_id(att),)
+                    if aid is not None
+                ]
+                choices = ", ".join(choice_ids) if choice_ids else "none available"
+                raise ToolError(
+                    "validation",
+                    f"attachment name {shown} is ambiguous ({len(ci)} matches); "
+                    f"choose one of the attachment ids: {choices}",
+                    hint=f"Pass one of [{choices}] in remove_attachments.",
+                )
+            matched = ci[0]
+        if id(matched) not in chosen_ptrs:
+            chosen_ptrs.add(id(matched))
+            chosen.append(matched)
+    return chosen
+
+
 # --- WRITE class (reversible; tier ≥ draft) ----------------------------------
 
 
 async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
+                        body_format: str = "text",
                         reply_to: Optional[str] = None,
                         to: Optional[List[str]] = None,
                         cc: Optional[List[str]] = None,
@@ -605,7 +928,7 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
         raise ToolError("validation", f"to is required for mode={mode!r}")
     if importance not in (None, "normal", "high"):
         raise ToolError("validation", "importance must be 'normal' or 'high'")
-    html_body = _wrap_html(body)
+    html_body, snippet_source, sanitised = await _prepare_draft_body(body, body_format)
     decoded = _decode_attachments(attachments or [], ctx.settings)
 
     def work(account: Any) -> Any:
@@ -620,7 +943,7 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
             if importance == "high":
                 msg.importance = "High"
             msg.save()  # SAVE_ONLY into Drafts — nothing leaves the mailbox
-            attached = _attach_all(msg, decoded)
+            attached = _attach_all(msg, decoded, aliaser=ctx.aliaser)
             return (msg.id, getattr(msg, "changekey", None), list(to), list(cc or []),
                     subject or "", attached)
         original = _fetch_one(account, reply_to, only=_REPLY_SOURCE_FIELDS)
@@ -662,34 +985,133 @@ async def _create_draft(ctx: Context, *, body: str, mode: str = "new",
         if decoded:
             # reply.save() returns a bare id holder that cannot attach.
             draft = _fetch_one(account, saved.id, only=_DRAFT_ATTACH_FIELDS)
-            attached = _attach_all(draft, decoded)
+            attached = _attach_all(draft, decoded, aliaser=ctx.aliaser)
             changekey = getattr(draft, "changekey", None)
         return saved.id, changekey, prev_to, prev_cc, final_subject, attached
 
     raw_id, changekey, prev_to, prev_cc, prev_subject, attached = await ctx.gateway.call(work)
     alias = ctx.aliaser.alias_for(str(raw_id), "d", changekey=changekey)
-    return {
+    result: Dict[str, Any] = {
         "ok": True,
         "draft_id": alias,
         "folder": "f:drafts",
-        "preview": _draft_preview(prev_to, prev_cc, prev_subject, body),
+        "body_format": body_format,
+        "preview": _draft_preview(prev_to, prev_cc, prev_subject, snippet_source),
         **attached,
         "note": "saved as draft — NOT sent",
     }
+    if sanitised is not None:
+        result["sanitised"] = sanitised
+    return result
 
 
-async def _update_draft(ctx: Context, *, draft_id: str,
-                        to: Optional[List[str]] = None,
-                        cc: Optional[List[str]] = None,
-                        bcc: Optional[List[str]] = None,
-                        subject: Optional[str] = None,
-                        body: Optional[str] = None) -> Dict[str, Any]:
-    if to is None and cc is None and bcc is None and subject is None and body is None:
-        raise ToolError("validation", "nothing to update: pass to/cc/bcc/subject/body")
+async def _update_draft(
+    ctx: Context,
+    *,
+    draft_id: str,
+    to: Optional[List[str]] = None,
+    cc: Optional[List[str]] = None,
+    bcc: Optional[List[str]] = None,
+    subject: Optional[str] = None,
+    body: Optional[str] = None,
+    body_format: str = "text",
+    remove_attachments: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if body_format not in _BODY_FORMATS:
+        raise ToolError(
+            "validation",
+            f"body_format must be one of {_BODY_FORMATS}, got {body_format!r}",
+        )
+    selectors = (
+        _normalise_remove_selectors(remove_attachments)
+        if remove_attachments is not None
+        else None
+    )
+    if (
+        to is None
+        and cc is None
+        and bcc is None
+        and subject is None
+        and body is None
+        and selectors is None
+    ):
+        raise ToolError(
+            "validation",
+            "nothing to update: pass to/cc/bcc/subject/body/remove_attachments",
+        )
+    if body is None and body_format != "text":
+        raise ToolError("validation", f"body is required when body_format={body_format!r}")
 
-    def work(account: Any) -> Dict[str, Any]:
-        msg = _fetch_one(account, draft_id, only=_DRAFT_UPDATE_FIELDS)
+    prepared_body: Optional[HTMLBody] = None
+    snippet_source: Optional[str] = None
+    sanitised: Optional[Dict[str, Any]] = None
+    if body is not None:
+        prepared_body, snippet_source, sanitised = await _prepare_draft_body(
+            body, body_format
+        )
+
+    def work(account: Any) -> Any:
+        projection = (
+            _DRAFT_UPDATE_ATTACH_FIELDS
+            if selectors is not None
+            else _DRAFT_UPDATE_FIELDS
+        )
+        msg = _fetch_one(account, draft_id, only=projection)
         _require_in_drafts(msg, account, "update_draft")
+        remaining: Optional[List[Dict[str, Any]]] = None
+        if selectors is not None:
+            to_remove = _select_attachments_to_remove(ctx, msg, selectors)
+            planned = [
+                (att, _draft_attachments_from_items([att], ctx.aliaser)[0])
+                for att in to_remove
+            ]
+            try:
+                msg.detach(to_remove)
+            except Exception as exc:
+                raw_after = getattr(msg, "attachments", None)
+                after_list = (
+                    list(raw_after)
+                    if isinstance(raw_after, (list, tuple))
+                    else []
+                )
+                after_ptrs = {id(a) for a in after_list}
+                removed_done = [
+                    dto for att, dto in planned if id(att) not in after_ptrs
+                ]
+                if not removed_done:
+                    raise
+                remaining_now = _draft_attachments_from_items(
+                    after_list, ctx.aliaser
+                )
+                mapped = (
+                    exc if isinstance(exc, ToolError) else map_exception(exc)
+                )
+                if not isinstance(exc, ToolError) and mapped.code in (
+                    "upstream_unavailable",
+                    "upstream_error",
+                    "throttled",
+                ):
+                    ctx._circuit_failures += 1
+                    if (
+                        ctx._circuit_failures
+                        >= ctx.settings.circuit_failure_threshold
+                    ):
+                        ctx._circuit_open_until = (
+                            time.time() + ctx.settings.circuit_open_seconds
+                        )
+                        ctx._circuit_failures = 0
+                raise _PartialDetachError(
+                    mapped,
+                    removed=removed_done,
+                    attachments=remaining_now,
+                ) from None
+            removed_ptrs = {id(a) for a in to_remove}
+            raw_after = getattr(msg, "attachments", None)
+            after_list = (
+                list(raw_after) if isinstance(raw_after, (list, tuple)) else []
+            )
+            surviving = [a for a in after_list if id(a) not in removed_ptrs]
+            remaining = _draft_attachments_from_items(surviving, ctx.aliaser)
         changed: List[str] = []  # update_fields uses exchangelib field names
         for value, field in ((to, "to_recipients"), (cc, "cc_recipients"),
                              (bcc, "bcc_recipients")):
@@ -699,22 +1121,37 @@ async def _update_draft(ctx: Context, *, draft_id: str,
         if subject is not None:
             msg.subject = subject
             changed.append("subject")
-        if body is not None:
-            msg.body = _wrap_html(body)
+        if prepared_body is not None:
+            msg.body = prepared_body
             changed.append("body")
-        msg.save(update_fields=changed)
+        if changed:
+            msg.save(update_fields=changed)
         prev_subject = msg.subject if isinstance(msg.subject, str) else None
-        return {
+        preview = {
             "to": _email_list(getattr(msg, "to_recipients", None)),
             "cc": _email_list(getattr(msg, "cc_recipients", None)),
             "subject": prev_subject,
-            "body_snippet": (body or "")[:200] if body is not None else None,
+            "body_snippet": (
+                (snippet_source or "")[:200] if snippet_source is not None else None
+            ),
         }
+        return preview, remaining, getattr(msg, "changekey", None)
 
     async with _draft_lock(draft_id):
-        preview = await ctx.gateway.call(work)
-    return {"ok": True, "draft_id": ctx.aliaser.alias_for(draft_id, "d"),
-            "preview": preview}
+        preview, remaining, changekey = await ctx.gateway.call(work)
+    raw_ck = changekey if isinstance(changekey, str) else None
+    result: Dict[str, Any] = {
+        "ok": True,
+        "draft_id": ctx.aliaser.alias_for(draft_id, "d", changekey=raw_ck),
+        "preview": preview,
+    }
+    if remaining is not None:
+        result["attachments"] = remaining
+    if body is not None:
+        result["body_format"] = body_format
+    if sanitised is not None:
+        result["sanitised"] = sanitised
+    return result
 
 
 async def _add_draft_attachment(
@@ -724,8 +1161,131 @@ async def _add_draft_attachment(
     filename: Optional[str] = None,
     content_base64: Optional[str] = None,
     path: Optional[str] = None,
+    message_id: Optional[str] = None,
     content_type: Optional[str] = None,
 ) -> Dict[str, Any]:
+    forms = (
+        (content_base64 is not None)
+        + (path is not None)
+        + (message_id is not None)
+    )
+    if forms == 0:
+        raise ToolError(
+            "validation",
+            "add_draft_attachment requires one of content_base64, path, or message_id",
+        )
+    if forms > 1:
+        raise ToolError(
+            "validation",
+            "pass only one of content_base64, path, or message_id",
+        )
+    if message_id is not None:
+        if not isinstance(message_id, str) or not message_id.strip():
+            raise ToolError("validation", "message_id must be a non-empty string")
+        if content_type is not None and (
+            not isinstance(content_type, str)
+            or content_type.strip().lower() != "message/rfc822"
+        ):
+            raise ToolError(
+                "validation",
+                "content_type for message_id attachments is always 'message/rfc822'",
+            )
+        if filename is not None and (
+            not isinstance(filename, str) or not _clean_filename(filename)
+        ):
+            raise ToolError("validation", "an attachment needs a filename")
+        try:
+            source_raw_id = ctx.aliaser.resolve(message_id.strip())
+        except KeyError as exc:
+            raise ToolError(
+                "validation", str(exc.args[0] if exc.args else exc)
+            ) from None
+        max_bytes = max_attachment_bytes(ctx.settings)
+
+        def work_msg(account: Any) -> Any:
+            msg = _fetch_one(account, draft_id, only=_DRAFT_ATTACH_FIELDS)
+            _require_in_drafts(msg, account, "add_draft_attachment")
+            if source_raw_id == draft_id or getattr(msg, "id", None) == source_raw_id:
+                raise ToolError(
+                    "validation",
+                    "add_draft_attachment: cannot attach a draft to itself",
+                )
+            source_meta = _fetch_one(
+                account, source_raw_id, only=_ATTACH_MESSAGE_META_FIELDS
+            )
+            if getattr(source_meta, "id", None) == draft_id:
+                raise ToolError(
+                    "validation",
+                    "add_draft_attachment: cannot attach a draft to itself",
+                )
+            _require_mail_message(source_meta, account, "add_draft_attachment")
+            declared_size = getattr(source_meta, "size", None)
+            if (
+                isinstance(declared_size, int)
+                and not isinstance(declared_size, bool)
+                and declared_size > max_bytes
+            ):
+                raise ToolError(
+                    "validation",
+                    f"attachments exceed {max_bytes} bytes per call",
+                )
+            source = _fetch_one(
+                account, source_raw_id, only=_ATTACH_MESSAGE_MIME_FIELDS
+            )
+            _require_mail_message(source, account, "add_draft_attachment")
+            raw_mime = getattr(source, "mime_content", None)
+            if isinstance(raw_mime, str):
+                mime_bytes = raw_mime.encode("utf-8", errors="replace")
+            elif isinstance(raw_mime, (bytes, bytearray)):
+                mime_bytes = bytes(raw_mime)
+            else:
+                mime_bytes = b""
+            if not mime_bytes:
+                raise ToolError("validation", "source message has no MIME content")
+            if mime_bytes.lstrip()[:32].upper().startswith(
+                (b"BEGIN:VCALENDAR", b"BEGIN:VCARD")
+            ):
+                raise ToolError(
+                    "validation",
+                    "add_draft_attachment: source item is not a mail message",
+                )
+            if len(mime_bytes) > max_bytes:
+                raise ToolError(
+                    "validation",
+                    f"attachments exceed {max_bytes} bytes per call",
+                )
+            cleaned_mime = _strip_bcc_headers(mime_bytes)
+            if not cleaned_mime:
+                raise ToolError("validation", "source message has no MIME content")
+            raw_subj = getattr(source_meta, "subject", None)
+            if raw_subj is None:
+                raw_subj = getattr(source, "subject", None)
+            eml_name = _eml_filename(
+                _clean_filename(filename) if filename is not None else raw_subj
+            )
+            eml_att = {
+                "name": eml_name,
+                "content": cleaned_mime,
+                "content_type": "message/rfc822",
+            }
+            added = _attach_one(msg, eml_att, aliaser=ctx.aliaser)
+            return (
+                added,
+                _draft_attachments(msg, ctx.aliaser),
+                getattr(msg, "changekey", None),
+            )
+
+        async with _draft_lock(draft_id):
+            added, on_draft, changekey = await ctx.gateway.call(work_msg)
+        raw_ck = changekey if isinstance(changekey, str) else None
+        return {
+            "ok": True,
+            "draft_id": ctx.aliaser.alias_for(draft_id, "d", changekey=raw_ck),
+            "added": added,
+            "attachments": on_draft,
+            "note": "saved as draft — NOT sent",
+        }
+
     raw_item: Dict[str, Any] = {"content_type": content_type}
     if filename is not None:
         raw_item["filename"] = filename
@@ -738,12 +1298,17 @@ async def _add_draft_attachment(
     def work(account: Any) -> Any:
         msg = _fetch_one(account, draft_id, only=_DRAFT_ATTACH_FIELDS)
         _require_in_drafts(msg, account, "add_draft_attachment")
-        added = _attach_one(msg, attachment)
-        return added, _attachment_list(msg), getattr(msg, "changekey", None)
+        added = _attach_one(msg, attachment, aliaser=ctx.aliaser)
+        return (
+            added,
+            _draft_attachments(msg, ctx.aliaser),
+            getattr(msg, "changekey", None),
+        )
 
     async with _draft_lock(draft_id):
         added, on_draft, changekey = await ctx.gateway.call(work)
-    return {"ok": True, "draft_id": ctx.aliaser.alias_for(draft_id, "d", changekey=changekey),
+    raw_ck = changekey if isinstance(changekey, str) else None
+    return {"ok": True, "draft_id": ctx.aliaser.alias_for(draft_id, "d", changekey=raw_ck),
             "added": added, "attachments": on_draft, "note": "saved as draft — NOT sent"}
 
 
@@ -1107,6 +1672,28 @@ def _attachment_list(msg: Any) -> List[Dict[str, Any]]:
     return sorted(listed, key=lambda a: str(a["name"]))
 
 
+def _draft_attachments_from_items(
+    items: List[Any], aliaser: Any = None
+) -> List[Dict[str, Any]]:
+    listed: List[Dict[str, Any]] = []
+    for a in items:
+        entry: Dict[str, Any] = {
+            "name": getattr(a, "name", None),
+            "size": getattr(a, "size", None),
+        }
+        att_id = _attachment_id(a)
+        if att_id is not None:
+            entry["id"] = aliaser.alias_for(att_id, "a") if aliaser is not None else att_id
+        listed.append(entry)
+    return sorted(listed, key=lambda a: (str(a["name"]), str(a.get("id") or "")))
+
+
+def _draft_attachments(msg: Any, aliaser: Any = None) -> List[Dict[str, Any]]:
+    raw = getattr(msg, "attachments", None)
+    items = list(raw) if isinstance(raw, (list, tuple)) else []
+    return _draft_attachments_from_items(items, aliaser)
+
+
 def _bound_attachments(msg: Any) -> List[Dict[str, Any]]:
     bound: List[Dict[str, Any]] = []
     for a in getattr(msg, "attachments", None) or []:
@@ -1121,14 +1708,15 @@ def _bound_attachments(msg: Any) -> List[Dict[str, Any]]:
     return sorted(bound, key=lambda a: (str(a["name"]), str(a.get("id") or "")))
 
 
-def _draft_content(msg: Any) -> Dict[str, Any]:
-    """The draft fields the confirm token binds and the preview shows.
+def _draft_base_content(msg: Any) -> Dict[str, Any]:
+    """The draft fields the confirm token binds.
 
     Recipients are sorted so reordering doesn't invalidate a token, but
     adding/removing one does (a content change worth re-previewing).
     """
     subject = getattr(msg, "subject", None)
     raw_body = getattr(msg, "body", None)
+    body_html = str(raw_body) if isinstance(raw_body, str) else ""
     body_text = getattr(msg, "text_body", None)
     if not isinstance(body_text, str):
         body_text = str(raw_body) if raw_body is not None else ""
@@ -1138,19 +1726,42 @@ def _draft_content(msg: Any) -> Dict[str, Any]:
         "cc": sorted(_email_list(getattr(msg, "cc_recipients", None))),
         "bcc": sorted(_email_list(getattr(msg, "bcc_recipients", None))),
         "body_text": body_text,
-        "_body_html": str(raw_body) if isinstance(raw_body, str) else "",
+        "_body_html": body_html,
         "attachment_count": len(getattr(msg, "attachments", None) or []),
         "attachments": _attachment_list(msg),
         "_attachments": _bound_attachments(msg),
     }
 
 
+def _apply_link_inspection(
+    content: Dict[str, Any], link_info: Dict[str, Any]
+) -> Dict[str, Any]:
+    content["links"] = link_info["links"]
+    if "links_total" in link_info:
+        content["links_total"] = link_info["links_total"]
+    content["link_hosts"] = link_info["link_hosts"]
+    if "link_hosts_total" in link_info:
+        content["link_hosts_total"] = link_info["link_hosts_total"]
+    if link_info["warnings"]:
+        content["warnings"] = link_info["warnings"]
+    if "warnings_total" in link_info:
+        content["warnings_total"] = link_info["warnings_total"]
+    if link_info.get("links_unverified"):
+        content["links_unverified"] = True
+    return content
+
+
+def _draft_content(msg: Any) -> Dict[str, Any]:
+    content = _draft_base_content(msg)
+    return _apply_link_inspection(content, inspect_draft_links(content["_body_html"]))
+
+
 async def _send_draft_preview(ctx: Context, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Confirm-gate hook: fetch the draft's CURRENT content (both phases).
 
-    Phase 1 hashes it into the token and shows it as the preview; phase 2
-    refetches and the hash mismatch kills the token if the draft changed in
-    between (update_draft TOCTOU) — ported from the v3.5 implementation.
+    Phase 1 hashes it into the token, inspects every link/host off the event
+    loop, and shows it as the preview; phase 2 refetches and the hash mismatch
+    kills the token if the draft changed in between (update_draft TOCTOU).
     """
     draft_id = kwargs.get("draft_id")
     if not isinstance(draft_id, str) or not draft_id:
@@ -1163,9 +1774,14 @@ async def _send_draft_preview(ctx: Context, kwargs: Dict[str, Any]) -> Dict[str,
     def work(account: Any) -> Dict[str, Any]:
         msg = _fetch_one(account, raw_id, only=_DRAFT_PREVIEW_FIELDS)
         _require_in_drafts(msg, account, "send_draft")
-        return _draft_content(msg)
+        return _draft_base_content(msg)
 
     content = await ctx.gateway.call(work)
+    if not kwargs.get("confirm_token"):
+        link_info = await asyncio.to_thread(
+            inspect_draft_links, content["_body_html"]
+        )
+        _apply_link_inspection(content, link_info)
     content["draft_id"] = draft_id  # echo the caller's handle in the preview
     return content
 
@@ -1221,7 +1837,7 @@ async def _send_draft(
     def work(account: Any) -> Dict[str, Any]:
         msg = _fetch_one(account, draft_id, only=_DRAFT_SEND_FIELDS)
         _require_in_drafts(msg, account, "send_draft")
-        current_hash = preview_content_hash(_draft_content(msg))
+        current_hash = preview_content_hash(_draft_base_content(msg))
         if current_hash != _verified_content_hash:
             raise ToolError(
                 "confirm_invalid",
@@ -1314,14 +1930,379 @@ async def _set_oof(ctx: Context, *, state: str,
 
 # --- DESTRUCTIVE class (tier full) -------------------------------------------
 
+_ATTENDEE_RESPONSE_TYPES = frozenset({
+    "Accept", "Decline", "Tentative", "NoResponseReceived",
+})
+_CALENDAR_FAKE_ATTRS = (
+    "is_meeting", "my_response_type", "organizer",
+    "required_attendees", "optional_attendees", "resources",
+    "start", "end", "type",
+)
+_NON_CALENDAR_FAKE_ATTRS = (
+    "to_recipients", "cc_recipients", "bcc_recipients",
+    "is_read", "is_complete", "email_addresses", "phone_numbers",
+)
+_CANCEL_EVENT_TOP_KEYS = frozenset({"event_id", "message"})
+_STALE_EVENT_HINT = (
+    "The calendar entry or arguments changed since the preview — call again "
+    "without confirm_token for a fresh preview."
+)
+_FOREIGN_ORGANIZER_HINT = (
+    "Use respond_to_event (for example response='decline') to respond to a "
+    "meeting organized by someone else."
+)
+_PENDING_CANCEL: ContextVar[Optional[tuple[int, str, str, str, Any]]] = (
+    ContextVar("_PENDING_CANCEL", default=None)
+)
 
-async def _cancel_event(ctx: Context, *, event_id: str,
-                        message: Optional[str] = None) -> Dict[str, Any]:
+
+def _require_calendar_item(item: Any, account: Any = None) -> None:
+    if isinstance(item, Item) and not isinstance(item, CalendarItem):
+        raise ToolError(
+            "validation", "cancel_event: the item is not a calendar event"
+        )
+    item_class = getattr(item, "item_class", None)
+    if (
+        isinstance(item_class, str)
+        and item_class.strip()
+        and not item_class.strip().startswith("IPM.Appointment")
+    ):
+        raise ToolError(
+            "validation", "cancel_event: the item is not a calendar event"
+        )
+    if not isinstance(item, CalendarItem):
+        eff_account = account if account is not None else getattr(item, "account", None)
+        fid = _item_folder_id(item)
+        cal_fid = getattr(getattr(eff_account, "calendar", None), "id", None)
+        drafts_fid = getattr(getattr(eff_account, "drafts", None), "id", None)
+        if fid is not None and (
+            (drafts_fid is not None and fid == drafts_fid)
+            or (cal_fid is not None and fid != cal_fid)
+            or (
+                isinstance(fid, str)
+                and any(
+                    tok in fid.upper()
+                    for tok in ("INBOX", "DRAFT", "SENT", "TRASH", "CONTACT", "TASK")
+                )
+            )
+        ):
+            raise ToolError(
+                "validation", "cancel_event: the item is not a calendar event"
+            )
+        if not callable(getattr(item, "cancel", None)) or not callable(
+            getattr(item, "move_to_trash", None)
+        ):
+            raise ToolError(
+                "validation", "cancel_event: the item is not a calendar event"
+            )
+        obj_vars = vars(item) if hasattr(item, "__dict__") else {}
+        if any(attr in obj_vars for attr in _NON_CALENDAR_FAKE_ATTRS) or not any(
+            attr in obj_vars for attr in _CALENDAR_FAKE_ATTRS
+        ):
+            raise ToolError(
+                "validation", "cancel_event: the item is not a calendar event"
+            )
+
+
+def _account_smtp_addresses(
+    ctx: Context, account: Any = None, item: Any = None
+) -> set[str]:
+    eff_account = account if account is not None else getattr(item, "account", None)
+    candidates = [
+        getattr(ctx.settings, "ews_email", None),
+        getattr(eff_account, "primary_smtp_address", None),
+        getattr(getattr(eff_account, "identity", None), "primary_smtp_address", None),
+    ]
+    out: set[str] = set()
+    for cand in candidates:
+        if isinstance(cand, str):
+            norm = _normalise_recipient(cand)
+            if norm is not None:
+                out.add(norm)
+    return out
+
+
+def _organizer_smtp(organizer: Any) -> Optional[str]:
+    if organizer is None:
+        return None
+    if isinstance(organizer, str):
+        return _normalise_recipient(organizer)
+    routing = getattr(organizer, "routing_type", None)
+    if isinstance(routing, str) and routing.strip().upper() not in ("", "SMTP"):
+        return None
+    raw_addr = getattr(organizer, "email_address", None)
+    if not isinstance(raw_addr, str):
+        return None
+    return _normalise_recipient(raw_addr)
+
+
+def _attendee_addresses(attendees: List[Any]) -> List[str]:
+    out: List[str] = []
+    for att in attendees:
+        if isinstance(att, str):
+            if att.strip():
+                out.append(att.strip())
+            continue
+        mb = getattr(att, "mailbox", None)
+        addr = getattr(mb, "email_address", None) if mb is not None else None
+        if not isinstance(addr, str) or not addr.strip():
+            addr = getattr(att, "email_address", None)
+        if isinstance(addr, str) and addr.strip():
+            out.append(addr.strip())
+    return sorted(out)
+
+
+def _attendee_key(att: Any) -> str:
+    if isinstance(att, str):
+        return att.strip().lower()
+    mb = getattr(att, "mailbox", None)
+    addr = (
+        getattr(mb, "email_address", None)
+        if mb is not None
+        else getattr(att, "email_address", None)
+    )
+    if isinstance(addr, str) and addr.strip():
+        return addr.strip().lower()
+    name = (
+        getattr(mb, "name", None)
+        if mb is not None
+        else getattr(att, "name", None)
+    )
+    return name.strip().lower() if isinstance(name, str) and name.strip() else ""
+
+
+def _bound_dt(value: Any) -> Optional[str]:
+    return value.isoformat() if isinstance(value, (datetime, date)) else None
+
+
+def _inspect_cancel_target(
+    ctx: Context,
+    item: Any,
+    *,
+    event_handle: str,
+    raw_id: str,
+    message: Optional[str],
+    account: Any = None,
+) -> tuple[str, Dict[str, Any]]:
+    # 1. Must be a CalendarItem; anything else fails closed.
+    _require_calendar_item(item, account)
+
+    raw_resp = getattr(item, "my_response_type", None)
+    my_response = (
+        raw_resp.strip()
+        if isinstance(raw_resp, str) and raw_resp.strip()
+        else None
+    )
+    raw_is_meeting = getattr(item, "is_meeting", None)
+    is_meeting: Optional[bool] = (
+        raw_is_meeting if isinstance(raw_is_meeting, bool) else None
+    )
+
+    attendee_objs: List[Any] = []
+    for attr in ("required_attendees", "optional_attendees", "resources"):
+        raw_list = getattr(item, attr, None)
+        if isinstance(raw_list, (list, tuple)):
+            attendee_objs.extend(raw_list)
+    attendee_count = len(attendee_objs)
+    has_attendees = attendee_count > 0
+
+    # 2. Organizer response type: ours regardless of organizer address spelling.
+    if my_response == "Organizer":
+        if is_meeting is True or has_attendees:
+            action = "cancel"
+        elif is_meeting is False and not has_attendees:
+            action = "delete"
+        else:
+            raise ToolError(
+                "validation",
+                "cancel_event: cannot determine whether this entry is a meeting "
+                "(is_meeting is missing)",
+            )
+    # 3. Attendee response types: someone else's meeting -> respond_to_event.
+    elif my_response in _ATTENDEE_RESPONSE_TYPES:
+        raise ToolError(
+            "validation",
+            "cannot cancel a meeting organized by someone else; "
+            "use respond_to_event instead",
+            hint=_FOREIGN_ORGANIZER_HINT,
+        )
+    # 4. Unknown or missing response type: fail closed unless unambiguous.
+    elif my_response is None or my_response == "Unknown":
+        if is_meeting is False and not has_attendees:
+            action = "delete"
+        elif is_meeting is True:
+            own_addrs = _account_smtp_addresses(ctx, account, item)
+            org_smtp = _organizer_smtp(getattr(item, "organizer", None))
+            if org_smtp is not None and org_smtp in own_addrs:
+                action = "cancel"
+            elif org_smtp is not None:
+                raise ToolError(
+                    "validation",
+                    "cannot cancel a meeting organized by someone else; "
+                    "use respond_to_event instead",
+                    hint=_FOREIGN_ORGANIZER_HINT,
+                )
+            else:
+                raise ToolError(
+                    "validation",
+                    "cancel_event: cannot verify the meeting organizer "
+                    "(missing or non-SMTP organizer address); use "
+                    "respond_to_event if someone else organized this meeting",
+                    hint=_FOREIGN_ORGANIZER_HINT,
+                )
+        else:
+            raise ToolError(
+                "validation",
+                "cancel_event: cannot determine whether this entry is a meeting "
+                "(is_meeting is missing or inconsistent with attendees)",
+            )
+    else:
+        raise ToolError(
+            "validation",
+            f"cancel_event: unrecognised my_response_type {my_response!r}",
+        )
+
+    raw_subject = getattr(item, "subject", None)
+    subject = raw_subject if isinstance(raw_subject, str) else ""
+    raw_type = getattr(item, "type", None)
+    item_type = (
+        raw_type.strip()
+        if isinstance(raw_type, str) and raw_type.strip()
+        else None
+    )
+    is_series = item_type == _SERIES_TYPE
+    raw_start = getattr(item, "start", None)
+    raw_end = getattr(item, "end", None)
+
+    content: Dict[str, Any] = {
+        "event_id": event_handle,
+        "subject": subject,
+        "action": action,
+        "attendee_count": attendee_count,
+    }
+    if action == "cancel":
+        content["attendees"] = _attendee_addresses(attendee_objs)
+    tz = ctx.settings.ews_tz
+    for dt_key, raw_dt in (("start", raw_start), ("end", raw_end)):
+        if isinstance(raw_dt, (datetime, date)):
+            formatted = fmt_dt(raw_dt, tz)
+            if formatted is not None:
+                content[dt_key] = formatted
+    if item_type is not None:
+        content["type"] = item_type
+    if is_series:
+        content["series"] = True
+        content["scope"] = "series"
+        content["note"] = (
+            "This entry is a recurring series master: confirming will cancel "
+            "the entire series."
+            if action == "cancel"
+            else "This entry is a recurring series master: confirming will "
+            "move the entire series to Deleted Items."
+        )
+    if message and action == "cancel":
+        content["message"] = message[:200]
+    content["_attachments"] = [{
+        "op": "cancel_event",
+        "event_id": raw_id,
+        "action": action,
+        "type": item_type,
+        "series": is_series,
+        "start": _bound_dt(raw_start),
+        "end": _bound_dt(raw_end),
+        "is_meeting": is_meeting,
+        "attendee_count": attendee_count,
+        "attendees": sorted(_attendee_key(a) for a in attendee_objs),
+        "message": message or "",
+    }]
+    return action, content
+
+
+async def _cancel_event_preview(
+    ctx: Context, kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
+    _PENDING_CANCEL.set(None)
+    unknown = sorted(str(k) for k in kwargs if k not in _CANCEL_EVENT_TOP_KEYS)
+    if unknown:
+        raise ToolError(
+            "validation",
+            f"cancel_event: unknown argument(s): {', '.join(unknown)}",
+            hint="Check the argument names and types against the tool schema.",
+        )
+    event_id = kwargs.get("event_id")
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise ToolError("validation", "event_id is required")
+    message = kwargs.get("message")
+    if message is not None and not isinstance(message, str):
+        raise ToolError("validation", "message must be a string")
+    try:
+        raw_id = ctx.aliaser.resolve(event_id)
+    except KeyError as exc:
+        raise ToolError("validation", str(exc.args[0] if exc.args else exc)) from None
+
+    def work(account: Any) -> tuple[str, Any, Dict[str, Any]]:
+        item = _fetch_one(account, raw_id, only=_EVENT_CANCEL_FIELDS)
+        action, content = _inspect_cancel_target(
+            ctx,
+            item,
+            event_handle=event_id,
+            raw_id=raw_id,
+            message=message,
+            account=account,
+        )
+        return action, item, content
+
+    action, item, content = await ctx.gateway.call(work)
+    _PENDING_CANCEL.set(
+        (id(ctx), raw_id, preview_content_hash(content), action, item)
+    )
+    return content
+
+
+async def _cancel_event(
+    ctx: Context,
+    *,
+    event_id: str,
+    message: Optional[str] = None,
+    _verified_content_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    stashed = _PENDING_CANCEL.get()
+    _PENDING_CANCEL.set(None)
+    if not isinstance(_verified_content_hash, str) or not _verified_content_hash:
+        raise ToolError(
+            "confirm_invalid",
+            "confirm_token rejected (stale): the calendar entry changed after preview",
+            hint=_STALE_EVENT_HINT,
+        )
+
     def work(account: Any) -> Dict[str, Any]:
-        item = _fetch_one(account, event_id)
+        if stashed is not None and stashed[:3] == (
+            id(ctx),
+            event_id,
+            _verified_content_hash,
+        ):
+            action, item = stashed[3], stashed[4]
+        else:
+            item = _fetch_one(account, event_id, only=_EVENT_CANCEL_FIELDS)
+            action, content = _inspect_cancel_target(
+                ctx,
+                item,
+                event_handle=event_id,
+                raw_id=event_id,
+                message=message,
+                account=account,
+            )
+            if preview_content_hash(content) != _verified_content_hash:
+                raise ToolError(
+                    "confirm_invalid",
+                    "confirm_token rejected (stale): the calendar entry changed "
+                    "after preview",
+                    hint=_STALE_EVENT_HINT,
+                )
+        if action == "delete":
+            item.move_to_trash(send_meeting_cancellations=SEND_TO_NONE)
+            return {"deleted": True}
         kwargs = {"new_body": message} if message else {}
-        # 5.0.3 CalendarItem.cancel() exists (CancelCalendarItem service);
-        # Exchange itself rejects the call when we are not the organizer.
         item.cancel(**kwargs)
         return {"cancelled": True}
 
@@ -1412,8 +2393,67 @@ _ATTACHMENT_FIELDS = {
     "content_type": {"type": "string",
                      "description": "MIME type; derived from the file name if omitted."},
 }
+_ADD_ATTACHMENT_FIELDS = {
+    "filename": {
+        "type": "string",
+        "description": (
+            "File name; required with content_base64, defaults to the file's "
+            "own name when path is given, or to the sanitised subject (.eml) "
+            "when message_id is given."
+        ),
+    },
+    "content_base64": {
+        "type": "string",
+        "description": (
+            "The file content, base64-encoded (mutually exclusive with path "
+            "and message_id)."
+        ),
+    },
+    "path": {
+        "type": "string",
+        "description": (
+            "Relative file path inside EWS_ATTACHMENT_DIR (mutually exclusive "
+            "with content_base64 and message_id)."
+        ),
+    },
+    "message_id": {
+        "type": "string",
+        "description": (
+            "Existing mail message id (m-alias or raw id; not the draft "
+            "itself or a non-mail item) to attach as a message/rfc822 .eml "
+            "file built from its MIME content with Bcc/Resent-Bcc stripped "
+            "(mutually exclusive with content_base64 and path)."
+        ),
+    },
+    "content_type": {
+        "type": "string",
+        "description": (
+            "MIME type; derived from the file name if omitted (always "
+            "message/rfc822 when message_id is given)."
+        ),
+    },
+}
+_REMOVE_ATTACHMENTS = {
+    "type": "array",
+    "items": {"type": "string"},
+    "minItems": 1,
+    "description": (
+        "Attachment names or attachment ids (a-aliases or raw ids) to remove "
+        "from the draft (all-or-nothing selector matching before any deletion)."
+    ),
+}
 _ATTACHMENTS = {"type": "array", "maxItems": MAX_ATTACHMENTS,
                 "items": _obj(_ATTACHMENT_FIELDS)}
+_BODY_FORMAT = {
+    "type": "string",
+    "enum": list(_BODY_FORMATS),
+    "default": "text",
+    "description": (
+        "text (default, escaped and wrapped in minimal HTML) or html "
+        "(rebuilt through an allow-list sanitiser; remote images, scripts, "
+        "forms and non-http/https/mailto links are stripped)."
+    ),
+}
 
 
 # --- the pack -----------------------------------------------------------------
@@ -1425,16 +2465,17 @@ TOOLS: List[ToolSpec] = [
             "Author mail as a DRAFT (never sends). mode=new needs to+body; "
             "reply/reply_all/forward need reply_to (the original message id) "
             "and quote the original server-side; forward also needs to. "
-            "body is plain text (the server wraps it in minimal HTML). "
-            "importance applies to mode=new only. attachments adds files; if one "
-            "fails the draft still exists and attachments_failed names it. "
-            "Use send_draft to send."
+            "body_format='text' (default) escapes plain text; 'html' rebuilds "
+            "markup through an allow-list sanitiser and reports removals in "
+            "sanitised. importance applies to mode=new only. attachments adds "
+            "files; if one fails the draft still exists and attachments_failed "
+            "names it. Use send_draft to send."
         ),
         side_effect_class="write",
         input_schema=_obj({
             "mode": {"type": "string", "enum": list(_DRAFT_MODES), "default": "new"},
             "reply_to": _STR, "to": _EMAILS, "cc": _EMAILS, "bcc": _EMAILS,
-            "subject": _STR, "body": _STR,
+            "subject": _STR, "body": _STR, "body_format": _BODY_FORMAT,
             "importance": {"type": "string", "enum": ["normal", "high"]},
             "attachments": _ATTACHMENTS,
         }, required=["body"]),
@@ -1443,23 +2484,41 @@ TOOLS: List[ToolSpec] = [
     ),
     ToolSpec(
         name="update_draft",
-        description=("Update fields of an existing draft (to/cc/bcc/subject/body). "
-                     "Only the supplied fields change."),
+        description=(
+            "Update fields of an existing draft (to/cc/bcc/subject/body) "
+            "and/or remove attachments by name or id (remove_attachments). "
+            "Only the supplied fields change; body uses body_format ('text' "
+            "by default, or sanitised 'html'). remove_attachments matches all "
+            "selectors before any write (all-or-nothing matching), refuses "
+            "ambiguous names with the attachment ids to choose from, detaches "
+            "before saving other fields, and returns remaining attachments "
+            "(or removed + remaining attachments if a multi-delete fails "
+            "mid-way)."
+        ),
         side_effect_class="write",
         input_schema=_obj({
             "draft_id": _STR, "to": _EMAILS, "cc": _EMAILS, "bcc": _EMAILS,
-            "subject": _STR, "body": _STR,
+            "subject": _STR, "body": _STR, "body_format": _BODY_FORMAT,
+            "remove_attachments": _REMOVE_ATTACHMENTS,
         }, required=["draft_id"]),
         handler=_update_draft,
         confirm=False,
     ),
     ToolSpec(
         name="add_draft_attachment",
-        description=("Add one file to an existing draft (via content_base64 or "
-                     "path inside EWS_ATTACHMENT_DIR). Refuses items that are "
-                     "not in f:drafts. Returns all attachments of the draft."),
+        description=(
+            "Add one attachment to an existing draft via content_base64, a "
+            "relative path inside EWS_ATTACHMENT_DIR, or message_id (attaches "
+            "a mail message's MIME content with Bcc/Resent-Bcc stripped as a "
+            "message/rfc822 .eml file named after its sanitised subject, "
+            "checking declared size before download and refusing non-mail "
+            "items or the draft itself; the three forms are mutually "
+            "exclusive). Refuses items that are not in f:drafts. Returns the "
+            "added attachment and all attachments on the draft (with short "
+            "a-alias ids)."
+        ),
         side_effect_class="write",
-        input_schema=_obj({"draft_id": _STR, **_ATTACHMENT_FIELDS},
+        input_schema=_obj({"draft_id": _STR, **_ADD_ATTACHMENT_FIELDS},
                           required=["draft_id"]),
         handler=_add_draft_attachment,
         confirm=False,
@@ -1556,8 +2615,10 @@ TOOLS: List[ToolSpec] = [
         description=(
             "Send an existing draft (the ONLY way mail leaves this mailbox). "
             "Two-phase: the first call fetches the draft and returns its REAL "
-            "recipients/subject/body/attachments as a preview + confirm_token bound to "
-            "that content; the second call with the token re-verifies the "
+            "recipients/subject/body/attachments/links (with warnings on "
+            "mismatched link text) as a preview + confirm_token bound to "
+            "that content (attachments bound by name, size, and id, not a "
+            "content hash); the second call with the token re-verifies the "
             "content and sends (editing the draft in between invalidates the "
             "token). Optional idempotency_key dedupes retries (replays return "
             "the stored result)."
@@ -1584,13 +2645,23 @@ TOOLS: List[ToolSpec] = [
     ),
     ToolSpec(
         name="cancel_event",
-        description=("Cancel a meeting you organize — sends cancellations to all "
-                     "attendees (destructive, two-phase confirmed)."),
+        description=(
+            "Cancel a meeting you organize (sends cancellations to attendees, "
+            "checked by the recipient guard and external-recipient warning) "
+            "or move a plain non-meeting appointment without attendees to "
+            "Deleted Items (nothing sent). Fails closed on non-calendar items "
+            "and meetings organized by someone else or with an unverified "
+            "organizer — use respond_to_event instead. Destructive, two-phase "
+            "confirmed; the preview states action ('cancel' or 'delete'), "
+            "attendee_count, start, end, and whole-series status, and binds "
+            "them into the token."
+        ),
         side_effect_class="destructive",
         input_schema=_obj({"event_id": _STR, "message": _STR},
                           required=["event_id"]),
         handler=_cancel_event,
         confirm=True,
+        preview=_cancel_event_preview,
     ),
     ToolSpec(
         name="delete_messages",

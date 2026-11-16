@@ -19,6 +19,7 @@ together with the pins, never the pins alone.
 """
 
 import inspect
+from unittest.mock import patch
 
 import pytest
 from exchangelib import (
@@ -30,17 +31,26 @@ from exchangelib import (
     Credentials,
     EWSDateTime,
     EWSTimeZone,
+    FileAttachment,
     HTMLBody,
     Message,
     OofSettings,
 )
+from exchangelib.attachments import Attachment, AttachmentId
 from exchangelib.errors import (
     ErrorFolderNotFound,
     ErrorItemNotFound,
     ErrorServerBusy,
     UnauthorizedError,
 )
-from exchangelib.fields import BooleanField, IntegerField
+from exchangelib.fields import (
+    AttendeesField,
+    BooleanField,
+    ChoiceField,
+    IntegerField,
+    MailboxField,
+    MimeContentField,
+)
 from exchangelib.folders import (
     DeletedItems,
     Folder,
@@ -50,7 +60,7 @@ from exchangelib.folders import (
     SingleFolderQuerySet,
 )
 from exchangelib.folders.collections import FolderCollection
-from exchangelib.items import Item, ReplyToItem
+from exchangelib.items import SEND_TO_NONE, Item, ReplyToItem
 from exchangelib.properties import (
     Actions,
     Address,
@@ -66,7 +76,7 @@ from exchangelib.properties import (
 )
 from exchangelib.protocol import CachingProtocol, FaultTolerance, Protocol
 from exchangelib.queryset import Q
-from exchangelib.services import GetFolder
+from exchangelib.services import DeleteAttachment, GetFolder
 from exchangelib.services.common import EWSAccountService
 from exchangelib.services.inbox_rules import (
     CreateInboxRule,
@@ -92,6 +102,8 @@ PINS = {
     Account.fetch: ["self", "ids", "folder", "only_fields", "chunk_size"],
     # --- draft lifecycle (writes._create_draft / _update_draft)
     Item.attach: ["self", "attachments"],
+    Item.detach: ["self", "attachments"],
+    Attachment.detach: ["self"],
     Message.create_reply: ["self", "subject", "body", "to_recipients",
                            "cc_recipients", "bcc_recipients", "author"],
     Message.create_reply_all: ["self", "subject", "body", "author"],
@@ -347,14 +359,21 @@ def test_writes_draft_field_projections_match_real_message_fields():
         writes._REPLY_SOURCE_FIELDS,
         writes._DRAFT_ATTACH_FIELDS,
         writes._DRAFT_UPDATE_FIELDS,
+        writes._DRAFT_UPDATE_ATTACH_FIELDS,
         writes._DRAFT_DELETE_FIELDS,
         writes._DRAFT_PREVIEW_FIELDS,
         writes._DRAFT_SEND_FIELDS,
+        writes._EVENT_CANCEL_FIELDS,
+        writes._ATTACH_MESSAGE_META_FIELDS,
     ):
         assert projection
         assert "mime_content" not in projection
         for name in projection:
             validator.validate_item_field(field=name, version=version)
+
+    assert "mime_content" in writes._ATTACH_MESSAGE_MIME_FIELDS
+    for name in writes._ATTACH_MESSAGE_MIME_FIELDS:
+        validator.validate_item_field(field=name, version=version)
 
     # Verify offline that a real Message populated only with _REPLY_SOURCE_FIELDS
     # supports create_reply, create_reply_all, and create_forward without error.
@@ -500,4 +519,177 @@ def test_inbox_rule_model_fields_pin():
         "server_reply_with_message",
         "stop_processing_rules",
     ]
+
+
+def test_message_mime_content_and_attachment_detach_pins():
+    """Pin Message.mime_content, Message.size, Message/Item.detach,
+    Attachment.detach, and saved-item detach via DeleteAttachment.get."""
+    assert isinstance(Item.mime_content, MimeContentField)
+    assert isinstance(Message.mime_content, MimeContentField)
+    assert Message.mime_content.field_uri == "item:MimeContent"
+    assert isinstance(Message.size, IntegerField)
+    assert Message.size.field_uri == "item:Size"
+    assert "mime_content" in [f.name for f in Message.FIELDS]
+    assert _params(Message.detach) == ["self", "attachments"]
+    assert _params(Attachment.detach) == ["self"]
+    assert callable(getattr(DeleteAttachment, "get", None))
+    att_fields = {f.name for f in Attachment.FIELDS}
+    assert {"attachment_id", "name", "content_type", "size"}.issubset(att_fields)
+
+    CachingProtocol.clear_cache()
+    try:
+        account = Account(
+            primary_smtp_address="user@example.com",
+            config=Configuration(
+                service_endpoint="https://ews.example.com/EWS/Exchange.asmx",
+                credentials=Credentials("svc", "secret"),
+                auth_type=BASIC,
+                version=Version(build=EXCHANGE_2016),
+            ),
+            autodiscover=False,
+            access_type=DELEGATE,
+            default_timezone=EWSTimeZone("UTC"),
+        )
+        raw_eml = b"From: sender@example.com\r\nSubject: Sample\r\n\r\nBody\r\n"
+        source = Message(account=account, subject="Sample", mime_content=raw_eml)
+        assert source.mime_content == raw_eml
+
+        # Unsaved draft path.
+        draft = Message(account=account, subject="Draft")
+        eml_file = FileAttachment(
+            name="Sample.eml",
+            content=source.mime_content,
+            content_type="message/rfc822",
+        )
+        draft.attach(eml_file)
+        assert eml_file.parent_item is draft
+        assert list(draft.attachments) == [eml_file]
+        draft.detach([eml_file])
+        assert list(draft.attachments) == []
+
+        # Saved draft path (what update_draft uses): Item.detach calls
+        # Attachment.detach -> DeleteAttachment.get once per attachment, and a
+        # mid-batch error leaves remaining attachments in draft.attachments.
+        att_one = FileAttachment(
+            name="one.txt",
+            content=b"1",
+            attachment_id=AttachmentId(id="ATT-SAVED-1"),
+        )
+        att_two = FileAttachment(
+            name="two.txt",
+            content=b"2",
+            attachment_id=AttachmentId(id="ATT-SAVED-2"),
+        )
+        saved_draft = Message(
+            account=account,
+            id="RAW-SAVED-DRAFT",
+            changekey="CK-SAVED-0",
+            subject="Saved draft",
+            attachments=[att_one, att_two],
+        )
+        assert att_one.parent_item is saved_draft
+        assert att_two.parent_item is saved_draft
+
+        delete_calls: list[list[str]] = []
+
+        def fake_get_ok(self, items, **kwargs):
+            delete_calls.append([item.id for item in items])
+            return None
+
+        with patch.object(DeleteAttachment, "get", fake_get_ok):
+            saved_draft.detach([att_one, att_two])
+        assert delete_calls == [["ATT-SAVED-1"], ["ATT-SAVED-2"]]
+        assert list(saved_draft.attachments) == []
+        assert att_one.attachment_id is None
+        assert att_one.parent_item is None
+
+        # Partial failure on saved item: first succeeds, second raises.
+        p_one = FileAttachment(
+            name="p1.txt",
+            content=b"1",
+            attachment_id=AttachmentId(id="ATT-P-1"),
+        )
+        p_two = FileAttachment(
+            name="p2.txt",
+            content=b"2",
+            attachment_id=AttachmentId(id="ATT-P-2"),
+        )
+        partial_draft = Message(
+            account=account,
+            id="RAW-SAVED-PARTIAL",
+            changekey="CK-PARTIAL-0",
+            subject="Partial draft",
+            attachments=[p_one, p_two],
+        )
+        partial_calls: list[list[str]] = []
+
+        def fake_get_fail_second(self, items, **kwargs):
+            partial_calls.append([item.id for item in items])
+            if len(partial_calls) == 2:
+                raise ErrorServerBusy("busy")
+            return None
+
+        with patch.object(DeleteAttachment, "get", fake_get_fail_second):
+            with pytest.raises(ErrorServerBusy):
+                partial_draft.detach([p_one, p_two])
+        assert partial_calls == [["ATT-P-1"], ["ATT-P-2"]]
+        assert [a.name for a in partial_draft.attachments] == ["p2.txt"]
+    finally:
+        CachingProtocol.clear_cache()
+
+
+def test_calendar_item_move_to_trash_and_meeting_fields_pins():
+    """Pin CalendarItem.move_to_trash and the fields cancel_event reads to
+    distinguish a plain appointment from a meeting and check its organizer."""
+    assert issubclass(CalendarItem, Item)
+    assert _params(CalendarItem.move_to_trash) == [
+        "self",
+        "send_meeting_cancellations",
+        "affected_task_occurrences",
+        "suppress_read_receipts",
+    ]
+    trash_sig = inspect.signature(CalendarItem.move_to_trash)
+    assert trash_sig.parameters["send_meeting_cancellations"].default == SEND_TO_NONE
+
+    cal_fields = {f.name for f in CalendarItem.FIELDS}
+    assert {
+        "item_class",
+        "subject",
+        "start",
+        "end",
+        "type",
+        "is_meeting",
+        "organizer",
+        "my_response_type",
+        "required_attendees",
+        "optional_attendees",
+        "resources",
+    }.issubset(cal_fields)
+    assert isinstance(CalendarItem.is_meeting, BooleanField)
+    assert CalendarItem.is_meeting.field_uri == "calendar:IsMeeting"
+    assert isinstance(CalendarItem.type, ChoiceField)
+    assert CalendarItem.type.field_uri == "calendar:CalendarItemType"
+    assert {c.value for c in CalendarItem.type.choices} == {
+        "Exception",
+        "Occurrence",
+        "RecurringMaster",
+        "Single",
+    }
+    assert isinstance(CalendarItem.organizer, MailboxField)
+    assert CalendarItem.organizer.field_uri == "calendar:Organizer"
+    assert isinstance(CalendarItem.required_attendees, AttendeesField)
+    assert CalendarItem.required_attendees.field_uri == "calendar:RequiredAttendees"
+    assert isinstance(CalendarItem.optional_attendees, AttendeesField)
+    assert CalendarItem.optional_attendees.field_uri == "calendar:OptionalAttendees"
+    assert isinstance(CalendarItem.my_response_type, ChoiceField)
+    assert CalendarItem.my_response_type.field_uri == "calendar:MyResponseType"
+    assert {c.value for c in CalendarItem.my_response_type.choices} == {
+        "Accept",
+        "Decline",
+        "NoResponseReceived",
+        "Organizer",
+        "Tentative",
+        "Unknown",
+    }
+
 

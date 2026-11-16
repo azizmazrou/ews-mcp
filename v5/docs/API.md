@@ -29,8 +29,8 @@ the registry is the single source of truth for what exists.
 | `update_task` | write | draft | Update ONE task: mark it complete and/or set its due date ('today', '+Nd', YYYY-MM-DD). |
 | `waiting_on` | read | read | Deterministic mirror query: messages YOU sent whose thread has received no inbound reply after `days` days — the 'what am I waiting on?' list. |
 | `create_draft` | write | draft | Author mail as a DRAFT (never sends). |
-| `update_draft` | write | draft | Update fields of an existing draft (to/cc/bcc/subject/body). |
-| `add_draft_attachment` | write | draft | Add one file to an existing draft (via content_base64 or path inside EWS_ATTACHMENT_DIR). |
+| `update_draft` | write | draft | Update fields of an existing draft (to/cc/bcc/subject/body) and/or remove attachments by name or id (remove_attachments). |
+| `add_draft_attachment` | write | draft | Add one attachment to an existing draft via content_base64, a relative path inside EWS_ATTACHMENT_DIR, or message_id (attaches a mail message's MIME content with Bcc/Resent-Bcc stripped as a message/rfc822 .eml file named after its sanitised subject, checking declared size before download and refusing non-mail items or the draft itself; the three forms are mutually exclusive). |
 | `delete_draft` | write | draft | Move a draft to trash (recoverable). |
 | `update_messages` | write | draft | Bulk-update up to 50 messages: set_read, categories_add/categories_remove, and/or flag_complete. |
 | `move_messages` | write | draft | Move up to 50 messages to a folder (id, f:alias or path). |
@@ -38,7 +38,7 @@ the registry is the single source of truth for what exists.
 | `update_event` | write | draft | Update event fields (subject/start/end/location/body/reminder). |
 | `send_draft` | send | full | Send an existing draft (the ONLY way mail leaves this mailbox). |
 | `respond_to_event` | send | full | Accept/tentative/decline a meeting — this SENDS a response to the organizer, so it is two-phase confirmed. |
-| `cancel_event` | destructive | full | Cancel a meeting you organize — sends cancellations to all attendees (destructive, two-phase confirmed). |
+| `cancel_event` | destructive | full | Cancel a meeting you organize (sends cancellations to attendees, checked by the recipient guard and external-recipient warning) or move a plain non-meeting appointment without attendees to Deleted Items (nothing sent). |
 | `delete_messages` | destructive | full | Delete up to 50 messages. |
 | `set_oof` | send | full | Set out-of-office auto-replies (externally visible → send class, two-phase confirmed). |
 | `list_rules` | read | read | List server-side Exchange Inbox rules. |
@@ -243,7 +243,7 @@ Deterministic mirror query: messages YOU sent whose thread has received no inbou
 
 #### `create_draft` — write (min tier: draft)
 
-Author mail as a DRAFT (never sends). mode=new needs to+body; reply/reply_all/forward need reply_to (the original message id) and quote the original server-side; forward also needs to. body is plain text (the server wraps it in minimal HTML). importance applies to mode=new only. attachments adds files; if one fails the draft still exists and attachments_failed names it. Use send_draft to send.
+Author mail as a DRAFT (never sends). mode=new needs to+body; reply/reply_all/forward need reply_to (the original message id) and quote the original server-side; forward also needs to. body_format='text' (default) escapes plain text; 'html' rebuilds markup through an allow-list sanitiser and reports removals in sanitised. importance applies to mode=new only. attachments adds files; if one fails the draft still exists and attachments_failed names it. Use send_draft to send.
 
 | parameter | type | required | description |
 |---|---|---|---|
@@ -254,12 +254,13 @@ Author mail as a DRAFT (never sends). mode=new needs to+body; reply/reply_all/fo
 | `bcc` | array | no |  |
 | `subject` | string | no |  |
 | `body` | string | yes |  |
+| `body_format` | string | no | text (default, escaped and wrapped in minimal HTML) or html (rebuilt through an allow-list sanitiser; remote images, scripts, forms and non-http/https/mailto links are stripped). (one of: `text`, `html`; default `text`) |
 | `importance` | string | no | (one of: `normal`, `high`) |
 | `attachments` | array | no |  |
 
 #### `update_draft` — write (min tier: draft)
 
-Update fields of an existing draft (to/cc/bcc/subject/body). Only the supplied fields change.
+Update fields of an existing draft (to/cc/bcc/subject/body) and/or remove attachments by name or id (remove_attachments). Only the supplied fields change; body uses body_format ('text' by default, or sanitised 'html'). remove_attachments matches all selectors before any write (all-or-nothing matching), refuses ambiguous names with the attachment ids to choose from, detaches before saving other fields, and returns remaining attachments (or removed + remaining attachments if a multi-delete fails mid-way).
 
 | parameter | type | required | description |
 |---|---|---|---|
@@ -269,18 +270,21 @@ Update fields of an existing draft (to/cc/bcc/subject/body). Only the supplied f
 | `bcc` | array | no |  |
 | `subject` | string | no |  |
 | `body` | string | no |  |
+| `body_format` | string | no | text (default, escaped and wrapped in minimal HTML) or html (rebuilt through an allow-list sanitiser; remote images, scripts, forms and non-http/https/mailto links are stripped). (one of: `text`, `html`; default `text`) |
+| `remove_attachments` | array | no | Attachment names or attachment ids (a-aliases or raw ids) to remove from the draft (all-or-nothing selector matching before any deletion). |
 
 #### `add_draft_attachment` — write (min tier: draft)
 
-Add one file to an existing draft (via content_base64 or path inside EWS_ATTACHMENT_DIR). Refuses items that are not in f:drafts. Returns all attachments of the draft.
+Add one attachment to an existing draft via content_base64, a relative path inside EWS_ATTACHMENT_DIR, or message_id (attaches a mail message's MIME content with Bcc/Resent-Bcc stripped as a message/rfc822 .eml file named after its sanitised subject, checking declared size before download and refusing non-mail items or the draft itself; the three forms are mutually exclusive). Refuses items that are not in f:drafts. Returns the added attachment and all attachments on the draft (with short a-alias ids).
 
 | parameter | type | required | description |
 |---|---|---|---|
 | `draft_id` | string | yes |  |
-| `filename` | string | no | File name; required with content_base64, defaults to the file's own name when path is given. |
-| `content_base64` | string | no | The file content, base64-encoded (mutually exclusive with path). |
-| `path` | string | no | Relative file path inside EWS_ATTACHMENT_DIR (mutually exclusive with content_base64). |
-| `content_type` | string | no | MIME type; derived from the file name if omitted. |
+| `filename` | string | no | File name; required with content_base64, defaults to the file's own name when path is given, or to the sanitised subject (.eml) when message_id is given. |
+| `content_base64` | string | no | The file content, base64-encoded (mutually exclusive with path and message_id). |
+| `path` | string | no | Relative file path inside EWS_ATTACHMENT_DIR (mutually exclusive with content_base64 and message_id). |
+| `message_id` | string | no | Existing mail message id (m-alias or raw id; not the draft itself or a non-mail item) to attach as a message/rfc822 .eml file built from its MIME content with Bcc/Resent-Bcc stripped (mutually exclusive with content_base64 and path). |
+| `content_type` | string | no | MIME type; derived from the file name if omitted (always message/rfc822 when message_id is given). |
 
 #### `delete_draft` — write (min tier: draft)
 
@@ -349,7 +353,7 @@ Update event fields (subject/start/end/location/body/reminder). An occurrence id
 
 #### `send_draft` — send (min tier: full)
 
-Send an existing draft (the ONLY way mail leaves this mailbox). Two-phase: the first call fetches the draft and returns its REAL recipients/subject/body/attachments as a preview + confirm_token bound to that content; the second call with the token re-verifies the content and sends (editing the draft in between invalidates the token). Optional idempotency_key dedupes retries (replays return the stored result).
+Send an existing draft (the ONLY way mail leaves this mailbox). Two-phase: the first call fetches the draft and returns its REAL recipients/subject/body/attachments/links (with warnings on mismatched link text) as a preview + confirm_token bound to that content (attachments bound by name, size, and id, not a content hash); the second call with the token re-verifies the content and sends (editing the draft in between invalidates the token). Optional idempotency_key dedupes retries (replays return the stored result).
 
 > Two-phase confirm for some argument combinations: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 
@@ -372,7 +376,7 @@ Accept/tentative/decline a meeting — this SENDS a response to the organizer, s
 
 #### `cancel_event` — destructive (min tier: full)
 
-Cancel a meeting you organize — sends cancellations to all attendees (destructive, two-phase confirmed).
+Cancel a meeting you organize (sends cancellations to attendees, checked by the recipient guard and external-recipient warning) or move a plain non-meeting appointment without attendees to Deleted Items (nothing sent). Fails closed on non-calendar items and meetings organized by someone else or with an unverified organizer — use respond_to_event instead. Destructive, two-phase confirmed; the preview states action ('cancel' or 'delete'), attendee_count, start, end, and whole-series status, and binds them into the token.
 
 > Two-phase confirm: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 
@@ -478,9 +482,9 @@ Every list-shaped tool ships exactly:
 
 ## Ids
 
-All ids in outputs are short aliases: `m` message, `d` draft, `e` event,
-`t` thread, `p` person, `k` task, `f` folder, `r` rule. Inputs accept aliases or
-raw EWS ids. A stale alias returns `not_found` with a re-search hint —
+All ids in outputs are short aliases: `m` message, `d` draft, `a` attachment,
+`e` event, `t` thread, `p` person, `k` task, `f` folder, `r` rule. Inputs accept
+aliases or raw EWS ids. A stale alias returns `not_found` with a re-search hint —
 ids change when items move; re-run the search or `list_rules` for fresh ones.
 
 ## Error taxonomy
@@ -509,19 +513,58 @@ attendees) run in two phases:
 
 1. Call WITHOUT `confirm_token` → a preview + a short-lived token.
    Nothing executes. For `send_draft` the preview shows the draft's REAL
-   `to`, `cc`, `bcc`, `subject`, `body_snippet`, `attachment_count`, and
-   `attachments`, and the token is HMAC-bound to subject, sorted
-   recipients, body, and attachments (ids, names, and sizes). For
-   `save_rule` and `delete_rule`, the token binds the planned rule
-   (including raw target folder ids), the rule it replaces or deletes
-   (including a SHA-256 fingerprint of its serialised XML), and the
-   `outlook_only_rules` flag; unrelated rules changing in between do not
-   invalidate it.
+   `to`, `cc`, `bcc`, `subject`, `body_snippet`, `attachment_count`,
+   `attachments`, `link_hosts` (ordered with hosts of mismatching links
+   first, then other link hosts, then `embedded: true` non-anchor hosts,
+   then `unparsed: true` hosts found only by scanning the raw body text,
+   capped at 50 with `link_hosts_total` and setting `links_unverified:
+   true` when above 50), `links` (up to 20 distinct `{text, href}` pairs
+   with mismatching links listed first and `text` cut to 120 characters,
+   plus `links_total` when more exist), `warnings` (ordered by severity so
+   critical notices — unverified/size, mismatch warnings, targets outside
+   normal markup, and omission notices — come first and are never cut,
+   while other warning kinds fold beyond three into one line with a count),
+   and `links_unverified: true` whenever the stored HTML could not be
+   inspected completely (see "Draft bodies" below for the four promises and
+   what is not promised). The token is HMAC-bound to subject, sorted
+   recipients, text and HTML body, and attachments (bound by `name`, `size`,
+   and `id` — not by a hash of attachment content).
+   For `cancel_event`, each phase makes one projected fetch and runs an
+   explicit fail-closed decision table: non-`CalendarItem` entries fail with
+   `validation`; `my_response_type="Organizer"` cancels when `is_meeting` is
+   true or any attendee list is non-empty and deletes when `is_meeting` is
+   false and all attendee lists are empty; attendee response types (`Accept`,
+   `Decline`, `Tentative`, `NoResponseReceived`) fail with `validation`
+   pointing to `respond_to_event`; and `Unknown` or missing response types
+   delete only when `is_meeting` is explicitly false and all attendee lists
+   are empty, compare the organizer's SMTP address against the account's own
+   addresses when `is_meeting` is true (ours → cancel; foreign →
+   `validation` pointing to `respond_to_event`; missing or non-SMTP →
+   `validation`), and fail with `validation` when `is_meeting` is missing.
+   When `action` is `"cancel"`, the resolved `attendees` pass through the
+   recipient allow/denylist guard and external-recipient warning just like
+   `send_draft`. The preview reports `action` (`"cancel"` or `"delete"`),
+   `attendee_count`, `start`, `end`, `type`, and — on a recurring master
+   (`type="RecurringMaster"`) — `series: true`, `scope: "series"`, and a
+   series warning `note`; the token binds `event_id`, `action`, `subject`,
+   `start`, `end`, `type`, `series`, `is_meeting`, sorted `attendees`, and
+   `message`. For `save_rule` and
+   `delete_rule`, the token binds
+   the planned rule (including raw target folder ids), the rule it
+   replaces or deletes (including a SHA-256 fingerprint of its serialised
+   XML), and the `outlook_only_rules` flag; unrelated rules changing in
+   between do not invalidate it.
 2. Call again with identical arguments plus `confirm_token` → executes
    once. For `send_draft`, phase 2 fetches the draft once under the
    per-draft lock, re-checks its content hash against the verified hash,
-   and sends that same object; a draft (or attachment list) changed
-   after the preview is refused with `confirm_invalid`. For `save_rule`
+   and sends that same object; a draft (or attachment list — including an
+   attachment removed via `update_draft(remove_attachments=…)` or a
+   message attached via `add_draft_attachment(message_id=…)`) changed
+   after the preview is refused with `confirm_invalid`. For `cancel_event`,
+   phase 2 fetches the projected calendar entry once, re-verifies the bound
+   hash (including `start`, `end`, and `type`), and either cancels the
+   meeting (`cancelled: true`) or moves the plain appointment to Deleted
+   Items with `SEND_TO_NONE` (`deleted: true`, never a hard delete). For `save_rule`
    and `delete_rule`, phase 2 runs under the in-process `_rules_lock` and
    re-verifies the bound rule state before mutating Exchange. Tokens also
    die on argument changes, on TTL expiry (`CONFIRM_TTL_SECONDS`, default
@@ -565,6 +608,157 @@ the `200`-folder cap, when non-zero). `sender` is matched within each
 merged `offset..offset + limit` page, so a page can contain fewer than
 `limit` items (or zero) while older matches remain; keep paging while
 `next_offset` is non-null.
+
+## Draft attachments
+
+- **Adding files or messages (`add_draft_attachment`, `create_draft`).**
+  `add_draft_attachment` accepts exactly one of three mutually exclusive
+  sources: `content_base64` (with `filename`), a relative `path` inside
+  `EWS_ATTACHMENT_DIR`, or `message_id` (an existing mail message — non-mail
+  items and the draft itself are refused with `validation`). With
+  `message_id`, the source message's declared `size` is checked against
+  `EWS_MAX_ATTACHMENT_MB` before downloading `mime_content` (and the byte
+  length is checked again after download), `Bcc` and `Resent-Bcc` headers
+  (folded lines included) are removed from the copy before attaching, and
+  the `.eml` filename strips format and control characters (bidi marks,
+  zero-width characters, C0/C1 controls), prefixes a leading `_` onto
+  reserved Windows device stems (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+  `LPT1`–`LPT9`), and caps the stem at 120 characters and 200 UTF-8 bytes
+  before `.eml` (`message.eml` fallback). Returned attachment entries carry
+  short `a`-alias `id` values alongside `name` and `size`. On `send_draft`,
+  each attachment is bound into the confirmation token by `name`, `size`,
+  and `id` (not by a hash of its byte content).
+- **Removing attachments (`update_draft(remove_attachments=[…])`).**
+  Each entry in `remove_attachments` is an attachment name or attachment
+  id (`a`-alias or raw EWS attachment id). Selector **matching** is
+  all-or-nothing under the per-draft lock before any Exchange write runs
+  (and refuses items outside `f:drafts`): an unknown entry fails with
+  `validation` naming the selector (cut to 80 characters) without modifying
+  the draft, and an attachment name matching more than one attachment fails
+  with `validation` listing the `a`-alias ids to choose from. Attachment
+  removals run **before** saving other draft fields (`to`, `cc`, `bcc`,
+  `subject`, `body`): Because Exchange deletes one attachment per server
+  call, if a removal fails after earlier removals in the same call
+  succeeded, no other draft field has been changed and the error carries
+  `removed` and the remaining `attachments` so the caller can continue from
+  the real state. On full success, returns the remaining `attachments`.
+
+## Draft bodies
+
+`create_draft` and `update_draft` accept `body_format`: `"text"` (the
+default, which HTML-escapes plain text and wraps paragraphs in `<p>`) or
+`"html"` (for structured or right-to-left mail). Calendar event bodies
+remain plain text only.
+
+- **Allow-list rebuild (`ewsmcp.htmlsafe`).** With `body_format="html"`,
+  the input is scanned in one linear-time non-raising pass (custom
+  stdlib-only tokenizer, never `html.parser`, executed off the event loop;
+  trailing `/` is ignored on non-void HTML elements; numeric character
+  references in attribute values decode with or without `;`, while named
+  character references in attributes decode only when terminated with `;`
+  so query parameters like `&region=sa` stay verbatim; runs of more than 30
+  combining marks are cut to 30) and
+  serialised anew as `<html><body…>…</body></html>` with every text node
+  and attribute value escaped (`dir`, `lang`, `align`, and `style` on
+  input `<html>` or `<body>` are carried onto output `<body>`, with
+  `<body>` winning; omitted `</head>` closes automatically at `<body>` or
+  the first non-head element; implied end tags close `<p>`, `<li>`, and
+  table cells/rows/sections the way browsers do; anchors with no visible
+  text anywhere in their descendants — table cells included — are removed
+  and counted in `removed_links`; and the output is re-sanitised to a fixed
+  point while keeping first-pass removal counts). Allowed elements:
+  `p`, `br`, `div`, `span`, `b`, `strong`, `i`, `em`, `u`, `s`, `strike`,
+  `sub`, `sup`, `ul`, `ol`, `li`, `table`, `thead`, `tbody`, `tfoot`,
+  `tr`, `td`, `th`, `caption`, `colgroup`, `col`, `h1`–`h6`, `blockquote`,
+  `pre`, `code`, `hr`, `a`, `font`. Active, embedded, form, foreign, and
+  image elements (`script`, `style`, `head`, `title`, `meta`, `link`,
+  `base`, `object`, `embed`, `iframe`, `frame`, `frameset`, `applet`,
+  `noembed`, `noframes`, `form`, `input`, `button`, `select`, `option`,
+  `textarea`, `svg`, `math`, `template`, `noscript`, `audio`, `video`,
+  `source`, `track`, `canvas`, `map`, `area`, `img`) are dropped
+  (containers together with their contents, with `script`, `style`,
+  `title`, `textarea`, `noembed`, `noframes`, `xmp`, `iframe`, and
+  `plaintext` scanned using HTML5 raw-text rules; `img` is excluded so
+  remote URLs cannot act as a tracking or exfiltration channel), bidi
+  override controls (`U+202D` and `U+202E`) are stripped from text, and
+  other unknown tags are unwrapped keeping their text. Comments, marked
+  sections, CDATA, processing instructions, and doctypes are stripped.
+- **Attributes, links, and `style`.** Global attributes are `dir`
+  (`ltr|rtl|auto`), `lang`, `align` (`left|right|center|justify`), and
+  `style`; element-specific attributes are `href`/`title` on `a`,
+  `colspan`/`rowspan`/`width`/`height` on `td`/`th`,
+  `border`/`cellpadding`/`cellspacing`/`width` on `table`,
+  `face`/`size`/`color` on `font`, `start`/`type` on `ol`, and
+  `span`/`width` on `col` (all `on…` handlers and unknown attributes are
+  dropped). `a[href]` permits only `http`, `https`, and single-address
+  `mailto` (scheme checked after decoding character references and
+  stripping whitespace and control characters; `mailto:` query/fragment
+  parts and extra recipients are stripped and counted in `removed_links`,
+  and refused or unparseable `href` values are removed while keeping the
+  link text). `style` normalises internal whitespace, splits declarations,
+  and keeps only safe typography, colour, spacing, border, dimension, and
+  list properties (`unicode-bidi` allows only
+  `normal|embed|isolate|plaintext`; `font-size` of `0` or below `6px`/`6pt`
+  is dropped) whose values are at most 200 characters, free of `url(`,
+  `expression`, `@`, `\`, `<`, `>`, `/*`, and `javascript`, and composed
+  solely of letters (including non-Latin font names), digits, spaces, and
+  `# % . , ( ) ' " - + !`.
+- **Refusals and reporting.** The 200,000-character limit applies to the
+  input string (escaped output may be longer); inputs above 200,000
+  characters or leaving no visible non-blank text after sanitising (blank
+  fillers such as `U+3164` and `U+2800` do not count as visible) fail with
+  `validation` before saving. `create_draft` (and `update_draft` when
+  `body` is supplied) returns `body_format` and, only when markup or link
+  parts were stripped, `sanitised: {removed_elements, removed_attributes,
+  removed_links}`. On `send_draft`, phase 1 inspects URL-bearing attributes
+  (`href`, `xlink:href`, `action`, `formaction`, `src`, `srcset`,
+  `background`, `poster`, `data`, `cite`) via the tokenizer (up to
+  2,000,000 characters) and also takes the **union over six readings of the
+  raw body text** (`http`, `https`, `ftp`, `ftps`, `ws`, `wss`, `file`,
+  scheme-relative `//`, and `mailto:`, without quote or markup parsing):
+  three character-reference readings (**none** decoded; **as a browser
+  decodes** — numeric always with or without `;`, named with `;`, and the
+  legacy HTML5 names without `;` only; and **everything decoded to a fixed
+  point of three passes**) crossed with two whitespace readings (tab, CR,
+  and LF **deleted**, and tab, CR, and LF **replaced by a space**):
+
+  | preview field | meaning |
+  |---|---|
+  | `link_hosts` | Up to 50 `{host, count[, as_written][, embedded][, unparsed]}` entries ordered with hosts of mismatching links first, then other link hosts, then `embedded: true` non-anchor hosts, then `unparsed: true` hosts found only by the raw-text union scan (`as_written` on IDN/punycode or trailing-dot hosts; hosts over 253 characters are cut to 80 characters with a warning and not passed to IDNA), plus `link_hosts_total` and `links_unverified: true` when more than 50 exist. |
+  | `links` | Up to 20 distinct `{text, href}` pairs from parsed `<a>` elements with mismatching links listed first (`text` cut to 120 characters; `unparsed` raw-scan hosts never add to `links`), plus `links_total` when more exist. |
+  | `warnings` | Ordered before the 20-item cap as: unverified and size notices; then the singular hosts-omitted notice and outside-normal-markup notice (each exists at most once); then mismatch warnings (including `mailto:` links with multiple recipients or query parameters), shown up to 100 with one count line beyond 100 saying how many more mismatching links exist and setting `links_unverified: true`; then everything else (numeric addresses, overlong hosts, IDN/punycode, malformed/non-anchor URLs, empty links — each folded into one count line beyond three). Critical notices are never cut; `warnings_total` is included whenever warnings were folded or capped. |
+  | `links_unverified` | `true` when the stored body exceeds 2,000,000 characters (hosts come from the raw-text union scan only), when `link_hosts` exceeds 50, when mismatch warnings exceed 100, or on an internal inspection error. |
+
+- **What draft HTML and `send_draft` preview promise (and what they do not).**
+  Four promises are kept:
+  1. **Sanitised bodies are exact**: for any body written through
+     `sanitise_html`, its links, their text, and mismatch warnings are
+     accurate because this server wrote the markup.
+  2. **Every URL host in the text is surfaced**: for any stored body,
+     `link_hosts` includes the union over six readings of the raw text
+     (character references: none decoded, browser rules, and 3-pass fixed
+     point; whitespace: tab/CR/LF deleted and replaced by a space; marked
+     `unparsed: true` when outside parsed links), or `links_unverified` is
+     `true`.
+  3. **Critical notices are never cut**: unverified and size notices come
+     first, then the singular "hosts omitted" and "outside normal markup"
+     notices, then mismatch warnings (up to 100, followed by a count line
+     and `links_unverified: true` when more exist), ahead of all folded
+     non-critical warnings.
+  4. **Bounded cost and GIL time**: `sanitise_html` runs in under 2 s up to
+     200,000 characters; `inspect_draft_links` runs in under 5 s up to
+     2,000,000 characters (above which it runs the raw-text host scan only
+     and sets `links_unverified: true`), and neither holds the Python
+     interpreter lock for more than ~0.2 s in a single library call.
+
+  Two things are **not** promised:
+  - Pairing link text with link target inside quoted or otherwise foreign
+    HTML that this server did not write.
+  - Detecting look-alike characters in link text beyond one rule: removing
+    whitespace of any kind around dots before matching host-like tokens,
+    and warning when a whitespace-free link-text token mixes ASCII letters
+    with any non-ASCII character (pure non-Latin link text such as Arabic
+    gets no warning).
 
 ## Inbox rules
 
@@ -644,7 +838,8 @@ two-phase confirmed):
 | `oof_settings(action=set)` | `set_oof` |
 | `whoami` / `get_server_info` | `get_server_status` |
 | `create_draft` / `create_reply_draft` / `create_forward_draft` | `create_draft` (modes) |
-| `update_draft` | `update_draft` |
+| `update_draft` / `remove_attachment` | `update_draft` (`remove_attachments`) |
+| `add_attachment` / `add_email_attachment` | `add_draft_attachment` (`content_base64`, `path`, or `message_id`) |
 | `send_draft` | `send_draft` (content-bound two-phase) |
 | `send_email` / `reply_email` / `forward_email` | **removed** — draft-first only |
 | `update_email` / `mark_read` / `update_messages` | `update_messages` (bulk) |
@@ -653,7 +848,7 @@ two-phase confirmed):
 | `create_appointment` | `create_event` |
 | `update_appointment` | `update_event` |
 | `respond_to_meeting` | `respond_to_event` |
-| `delete_appointment` | `cancel_event` |
+| `delete_appointment` | `cancel_event` (cancels meetings you organize; deletes plain appointments) |
 | `get_tasks` | `list_tasks` |
 | `update_task` / `complete_task` | `update_task` |
 | — (new) | `get_mailbox_overview`, `check_messages`, `waiting_on`, `add_draft_attachment`, `list_rules`, `save_rule`, `delete_rule`, `find_similar`* |
