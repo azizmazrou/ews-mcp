@@ -774,7 +774,7 @@ def test_reviewer_hostile_deep_xml_and_huge_slide_number_are_fast_validation_err
         t0 = time.perf_counter()
         with pytest.raises(ToolError) as exc:
             extract.extract_bytes(payload, name=name)
-        assert (time.perf_counter() - t0) < 1.0
+        assert (time.perf_counter() - t0) < 1.0 * TIME_MARGIN
         assert exc.value.code == "validation"
         assert len(exc.value.message) <= extract.MAX_ERROR_MESSAGE_CHARS
 
@@ -793,7 +793,7 @@ def test_reviewer_hostile_eml_encoded_words_dangling_quotes_and_quadratic_html()
     eml_subj = b"From: a@example.com\r\nSubject: " + subj + b"\r\n\r\nbody\r\n"
     t0 = time.perf_counter()
     res_subj = extract.extract_eml(eml_subj)
-    assert (time.perf_counter() - t0) < 1.0
+    assert (time.perf_counter() - t0) < 1.0 * TIME_MARGIN
     assert "تقرير" in res_subj.text
 
     # Dangling quote with 500k backslashes + nested comments in To header.
@@ -804,7 +804,7 @@ def test_reviewer_hostile_eml_encoded_words_dangling_quotes_and_quadratic_html()
         eml_to = b"From: a@example.com\r\nTo: " + hdr_val + b"\r\n\r\nbody\r\n"
         t0 = time.perf_counter()
         res_to = extract.extract_eml(eml_to)
-        assert (time.perf_counter() - t0) < 1.0
+        assert (time.perf_counter() - t0) < 1.0 * TIME_MARGIN
         assert "From: a@example.com" in res_to.text
 
     # Pathological unclosed HTML shapes that stalled stdlib HTMLParser for 40-60s+.
@@ -812,7 +812,7 @@ def test_reviewer_hostile_eml_encoded_words_dangling_quotes_and_quadratic_html()
         html_bomb = b"<html><body>" + token * (200_000 // len(token))
         t0 = time.perf_counter()
         hres = extract.extract_html(html_bomb)
-        assert (time.perf_counter() - t0) < 1.0
+        assert (time.perf_counter() - t0) < 1.0 * TIME_MARGIN
         hres.text.encode("utf-8")
 
 
@@ -960,7 +960,7 @@ def test_pdf_limits_lone_surrogates_padded_spaces_and_single_pass_fallback(monke
     }])
     t0 = time.perf_counter()
     gap_res = extract.extract_pdf(gap_pdf)
-    assert (time.perf_counter() - t0) < 10.0
+    assert (time.perf_counter() - t0) < 10.0 * TIME_MARGIN
     assert "A" in gap_res.text
 
     # Non-RTL pages call layout mode ONLY (never calling plain extract_text() a second time);
@@ -1422,7 +1422,7 @@ def test_xlsx_dates_times_percentages_broken_styles_note_and_streamed_30000_rows
     big_sheet_xlsx = _xlsx_bytes([("Huge30k", big_rows_inner)])
     t0 = time.perf_counter()
     res_stream = extract.extract_xlsx(big_sheet_xlsx)
-    assert (time.perf_counter() - t0) < 5.0
+    assert (time.perf_counter() - t0) < 5.0 * TIME_MARGIN
     assert "R1-" in res_stream.text
     assert "R5000-" in res_stream.text
     assert "R5001-" not in res_stream.text

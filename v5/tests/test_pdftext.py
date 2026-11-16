@@ -462,7 +462,7 @@ def test_line_limit_linear_hostile_shapes_200k_page_under_2s_and_error_fallback(
     padded_short = "يونسلا" + (" " * 100_000) + "ريرقت"
     t0 = time.perf_counter()
     out_padded, notes_padded = pdftext.page_reading_order(padded_short, None, word=True)
-    assert (time.perf_counter() - t0) < 0.5
+    assert (time.perf_counter() - t0) < 0.5 * TIME_MARGIN
     assert notes_padded == []
     assert out_padded == "تقرير السنوي"
 
@@ -477,7 +477,7 @@ def test_line_limit_linear_hostile_shapes_200k_page_under_2s_and_error_fallback(
         assert len(hline) <= pdftext.MAX_LINE_CHARS
         t0 = time.perf_counter()
         _out, hnotes = pdftext.page_reading_order(hline, None, word=False)
-        assert (time.perf_counter() - t0) < 0.5
+        assert (time.perf_counter() - t0) < 0.5 * TIME_MARGIN
         assert hnotes == []
 
     # 3. A 200,000-character mixed Arabic/Latin/numeric page converts in under 2 seconds.

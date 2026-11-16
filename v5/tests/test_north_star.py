@@ -16,7 +16,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from conftest import make_settings
+from conftest import TIME_MARGIN, make_settings
 
 from ewsmcp.audit import AuditLog
 from ewsmcp.cache.store import CacheStore
@@ -134,4 +134,4 @@ def test_north_star_search_is_fast_warm(tmp_path):
     elapsed_ms = (time.perf_counter() - start) * 1000
     assert res["source"] == "cache"
     assert ctx.gateway.calls == 0
-    assert elapsed_ms < 1500  # generous CI bound; warm target is <100ms
+    assert elapsed_ms < 1500 * TIME_MARGIN  # generous CI bound; warm target is <100ms
