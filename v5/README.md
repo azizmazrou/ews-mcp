@@ -157,7 +157,7 @@ network of its host, not your workstation's VPN; see
 loopback-bound, read-tier Compose setup):
 
 ```bash
-docker build -t ews-mcp:dev .
+docker build -t ews-mcp:dev v5
 docker run --rm -p 127.0.0.1:8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 ```
 
