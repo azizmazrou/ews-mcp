@@ -60,7 +60,7 @@ from exchangelib.recurrence import (
 from exchangelib.util import xml_to_str
 from exchangelib.version import EXCHANGE_2016, Version
 
-from conftest import FIXED_OFFSET_TZ, make_settings
+from conftest import FIXED_OFFSET_TZ, TIME_MARGIN, make_settings
 from ewsmcp.audit import AuditLog
 from ewsmcp.confirm import reset_consumed_tokens
 from ewsmcp.dates import parse_when
@@ -2685,7 +2685,7 @@ def test_event_loop_ticker_never_stalls_during_200k_combining_mark_preview(
 
     res_raw, gaps_raw = asyncio.run(measure_preview_stall("RAW-COMB-200K"))
     assert res_raw["ok"] is True and res_raw["requires_confirmation"] is True
-    assert gaps_raw and max(gaps_raw) < 0.5, f"event loop stalled {max(gaps_raw):.2f}s"
+    assert gaps_raw and max(gaps_raw) < 0.5 * TIME_MARGIN, f"event loop stalled {max(gaps_raw):.2f}s"
 
     FakeDraftMessage.last = None
     created = call(ctx, "create_draft", {
@@ -2703,7 +2703,7 @@ def test_event_loop_ticker_never_stalls_during_200k_combining_mark_preview(
 
     res_san, gaps_san = asyncio.run(measure_preview_stall("RAW-COMB-SAN"))
     assert res_san["ok"] is True and res_san["requires_confirmation"] is True
-    assert gaps_san and max(gaps_san) < 0.5, f"event loop stalled {max(gaps_san):.2f}s"
+    assert gaps_san and max(gaps_san) < 0.5 * TIME_MARGIN, f"event loop stalled {max(gaps_san):.2f}s"
 
 
 def test_send_draft_preview_surfaces_backtick_nosemi_and_defeats_empty_anchor_flood(

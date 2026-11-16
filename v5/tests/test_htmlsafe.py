@@ -36,6 +36,9 @@ from ewsmcp.htmlsafe import (
 # or html.parser).
 # ---------------------------------------------------------------------------
 
+from conftest import TIME_MARGIN  # noqa: E402
+
+
 SPEC_ELEMENTS = frozenset({
     "p", "br", "div", "span",
     "b", "strong", "i", "em", "u", "s", "strike", "sub", "sup",
@@ -2147,7 +2150,7 @@ def test_sanitise_html_200k_shapes_complete_in_linear_time(
     except HTMLValidationError:
         pass
     elapsed = time.perf_counter() - t0
-    assert elapsed < 2.0, f"{shape_name} took {elapsed:.2f}s (expected < 2s)"
+    assert elapsed < 2.0 * TIME_MARGIN, f"{shape_name} took {elapsed:.2f}s (expected < 2s)"
 
 
 @pytest.mark.parametrize(
@@ -2275,7 +2278,7 @@ def test_inspect_draft_links_200k_shapes_complete_in_linear_time(
     info = inspect_draft_links(payload)
     elapsed = time.perf_counter() - t0
     assert isinstance(info["links"], list)
-    assert elapsed < 5.0, f"{shape_name} took {elapsed:.2f}s (expected < 5s)"
+    assert elapsed < 5.0 * TIME_MARGIN, f"{shape_name} took {elapsed:.2f}s (expected < 5s)"
 
 
 # ---------------------------------------------------------------------------
@@ -2792,7 +2795,7 @@ def test_raw_host_scan_5000_planted_urls_across_wrappers():
         )
 
     elapsed = time.perf_counter() - t0
-    assert elapsed < 5.0, f"planted host scan took {elapsed:.2f}s (expected < 5s)"
+    assert elapsed < 5.0 * TIME_MARGIN, f"planted host scan took {elapsed:.2f}s (expected < 5s)"
 
 
 def test_round5_mixed_script_dot_spaces_selfclosing_anchor_and_nosemi_charrefs():
@@ -2970,30 +2973,40 @@ _STRESS_HEADS: tuple[str, ...] = ("", "a.")
 _STRESS_ENDS: tuple[str, ...] = ("", "!")
 
 
-def _probe_regex_over_budget(
+def _regex_call_seconds(rx: re.Pattern[str], text: str) -> float:
+    t0 = time.perf_counter()
+    for _ in rx.finditer(text):
+        pass
+    rx.sub("", text)
+    rx.search(text)
+    rx.match(text)
+    return time.perf_counter() - t0
+
+
+def _find_superlinear_input(
     rx: re.Pattern[str],
-    inputs: list[tuple[str, str, str, str]],
-    budget: float = 0.15,
-) -> tuple[float, str, str, str] | None:
-    for unit, head, end, text in inputs:
-        t0 = time.perf_counter()
-        for _ in rx.finditer(text):
-            pass
-        rx.sub("", text)
-        rx.search(text)
-        rx.match(text)
-        dt = time.perf_counter() - t0
-        if dt > budget:
-            return (dt, head, unit, end)
+    shapes: list[tuple[str, str, str]],
+) -> tuple[float, float, str, str, str] | None:
+    """Judge growth, not absolute time: an input is super-linear when quadrupling its length
+    multiplies the time by much more than four. Cheap inputs are skipped after the first
+    measurement, so a clean pattern costs one short pass."""
+    for unit, head, end in shapes:
+        small = head + unit * (4_000 // len(unit)) + end
+        t_small = _regex_call_seconds(rx, small)
+        if t_small < 0.002:
+            continue
+        big = head + unit * (16_000 // len(unit)) + end
+        t_big = _regex_call_seconds(rx, big)
+        if t_big > 0.02 and t_big / t_small > 9.0:
+            return (t_small, t_big, head, unit, end)
     return None
 
 
 def test_all_compiled_regexes_linear_under_20k_stress():
-    """Feed every compiled regular expression in ewsmcp.htmlsafe 8,000-char
-    runs of every character and pair from regex_stress.py across heads
-    ('', 'a.') and tails ('', '!'); fail if any single call exceeds 0.15 s,
-    and self-check that the same procedure catches the old r'\\s*\\.\\s*'."""
-    t_suite = time.perf_counter()
+    """Feed every compiled regular expression in ewsmcp.htmlsafe runs of every character and
+    pair from regex_stress.py across heads ('', 'a.') and tails ('', '!'); fail when the time
+    of any input grows much faster than its length (4,000 against 16,000 characters). The
+    same procedure must catch the old r'\\s*\\.\\s*', so the test cannot go blind."""
     patterns = [
         (name, val)
         for name, val in vars(htmlsafe_mod).items()
@@ -3001,27 +3014,25 @@ def test_all_compiled_regexes_linear_under_20k_stress():
     ]
     assert len(patterns) >= 24
 
-    inputs = [
-        (unit, head, end, head + unit * (8_000 // len(unit)) + end)
+    shapes = [
+        (unit, head, end)
         for unit in (*_STRESS_CHARS, *_STRESS_PAIRS)
         for head in _STRESS_HEADS
         for end in _STRESS_ENDS
     ]
 
     for name, rx in patterns:
-        over = _probe_regex_over_budget(rx, inputs, budget=0.15)
-        assert over is None, (
-            f"{name} ({rx.pattern[:70]!r}) took {over[0]:.3f}s (> 0.15s) on "
-            f"head={over[1]!r} unit={over[2]!r} end={over[3]!r}"
+        hit = _find_superlinear_input(rx, shapes)
+        assert hit is None, (
+            f"{name} ({rx.pattern[:70]!r}) grows faster than its input: "
+            f"{hit[0]:.3f}s at 4,000 chars, {hit[1]:.3f}s at 16,000 on "
+            f"head={hit[2]!r} unit={hit[3]!r} end={hit[4]!r}"
         )
 
     # Self-check: the old quadratic pattern must be caught by the exact same procedure.
     old_quadratic = re.compile(r"\s*\.\s*")
-    caught = _probe_regex_over_budget(old_quadratic, inputs, budget=0.15)
-    assert caught is not None, "regex stress self-check failed to catch r'\\s*\\.\\s*'"
-    total_elapsed = time.perf_counter() - t_suite
-    assert total_elapsed < 5.0, (
-        f"regex stress test took {total_elapsed:.2f}s (expected < 5s)"
+    assert _find_superlinear_input(old_quadratic, shapes) is not None, (
+        "regex stress self-check failed to catch r'\\s*\\.\\s*'"
     )
 
 

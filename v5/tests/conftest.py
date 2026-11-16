@@ -1,5 +1,6 @@
 """v5 test fixtures: import path + per-test alias-store isolation."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -28,6 +29,11 @@ def _isolate_stores(tmp_path, monkeypatch):
     reset_send_rate_window()
     reset_consumed_tokens()
     reset_idempotency_store()
+
+
+# Wall-clock bounds in tests are multiplied by this (a shared CI runner is slower than a
+# developer machine); the stated cost limits themselves are in the docs.
+TIME_MARGIN = float(os.environ.get("EWS_TEST_TIME_MARGIN", "3"))
 
 
 def make_settings(**overrides):

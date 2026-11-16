@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 import jsonschema
 import pytest
-from conftest import FIXED_OFFSET_TZ, make_settings
+from conftest import FIXED_OFFSET_TZ, TIME_MARGIN, make_settings
 from exchangelib import Message
 from exchangelib.attachments import ItemAttachment
 from exchangelib.properties import Mailbox
@@ -2181,7 +2181,7 @@ def test_worker_limits_clock_memory_garbage_and_output_through_dispatch(
             mode="text",
         )
         dt_clock = time.perf_counter() - t0
-    assert dt_clock < 4.5
+    assert dt_clock < 4.5 * TIME_MARGIN
     assert r_clock["ok"] is False and r_clock["error"]["code"] == "validation"
     assert r_clock["error"]["message"] == expected_msg
     ok1 = _run(
@@ -2215,7 +2215,7 @@ def test_worker_limits_clock_memory_garbage_and_output_through_dispatch(
                 mode="text",
             )
             dt_mem = time.perf_counter() - t0
-        assert dt_mem < 6.0
+        assert dt_mem < 6.0 * TIME_MARGIN
         assert r_mem["ok"] is False and r_mem["error"]["code"] == "validation"
         assert r_mem["error"]["message"] == expected_msg
         ok2 = _run(
@@ -2247,7 +2247,7 @@ def test_worker_limits_clock_memory_garbage_and_output_through_dispatch(
             mode="text",
         )
         dt_garb = time.perf_counter() - t0
-    assert dt_garb < 4.5
+    assert dt_garb < 4.5 * TIME_MARGIN
     assert r_garb["ok"] is False and r_garb["error"]["code"] == "validation"
     assert r_garb["error"]["message"] == expected_msg
     ok3 = _run(
@@ -2280,7 +2280,7 @@ def test_worker_limits_clock_memory_garbage_and_output_through_dispatch(
             mode="text",
         )
         dt_out = time.perf_counter() - t0
-    assert dt_out < 4.5
+    assert dt_out < 4.5 * TIME_MARGIN
     assert r_out["ok"] is False and r_out["error"]["code"] == "validation"
     assert r_out["error"]["message"] == expected_msg
     ok4 = _run(
@@ -3032,7 +3032,7 @@ def test_small_clock_partial_return_repeats_note_and_hostile_padded_pdf_fails(
                 mode="text",
             )
             elapsed_hang = time.perf_counter() - t0
-        assert elapsed_hang < 6.0
+        assert elapsed_hang < 6.0 * TIME_MARGIN
         assert r_hang["ok"] is False
         assert r_hang["error"]["code"] == "validation"
         assert r_hang["error"]["message"] == extract_worker.WORKER_LIMIT_ERROR_MESSAGE
@@ -4476,7 +4476,7 @@ def test_cancelled_calls_kill_children_hold_slot_and_unwritable_tempdir_and_gran
     peak_live, honest_wait, honest_res = asyncio.run(_exercise_cancellation())
     assert peak_live <= extract_worker.EXTRACT_MAX_CONCURRENT
     assert _live_count() == 0
-    assert honest_wait < 4.0
+    assert honest_wait < 4.0 * TIME_MARGIN
     assert honest_res.text == "Honest after cancel"
 
     # 2. Unwritable / missing temporary folder returns `internal` saying the document

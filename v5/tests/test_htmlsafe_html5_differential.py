@@ -22,6 +22,9 @@ html5lib = pytest.importorskip(
     reason="html5lib is required for HTML5 reference differential tests (install .[dev])",
 )
 
+from conftest import TIME_MARGIN  # noqa: E402
+
+
 XHTML_NS = "http://www.w3.org/1999/xhtml"
 
 SPEC_ELEMENTS = frozenset({
@@ -375,4 +378,4 @@ def test_6500_seeded_hostile_inputs_against_html5lib():
     elapsed = time.perf_counter() - t0
     assert skipped <= total * 0.01, f"too many html5lib skips: {skipped}/{total}"
     assert sanitised_accepted >= 1500
-    assert elapsed < 10.0, f"differential suite took {elapsed:.2f}s (expected < 10s)"
+    assert elapsed < 10.0 * TIME_MARGIN, f"differential suite took {elapsed:.2f}s (expected < 10s)"

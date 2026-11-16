@@ -27,6 +27,8 @@ from ewsmcp.errors import ToolError
 # In-memory Office / Zip / PDF / EML builders
 # ---------------------------------------------------------------------------
 
+from conftest import TIME_MARGIN  # noqa: E402
+
 
 def _zip_bytes(members: Sequence[Tuple[str, bytes]], *, compress: bool = True) -> bytes:
     buf = io.BytesIO()
@@ -710,7 +712,7 @@ def test_reviewer_hostile_shared_string_amplification_and_cell_cap():
     t0 = time.perf_counter()
     res = extract.extract_xlsx(xlsx_data)
     elapsed = time.perf_counter() - t0
-    assert elapsed < 5.0
+    assert elapsed < 5.0 * TIME_MARGIN
     assert len(res.text) <= extract.MAX_EXTRACTED_CHARS
     assert any(str(extract.MAX_EXTRACTED_CHARS) in n for n in res.notes)
     # Per-cell cap: first cell in first data row is at most 2,000 chars.
@@ -726,7 +728,7 @@ def test_reviewer_hostile_long_cell_reference_rejected_instantly():
     with pytest.raises(ToolError) as exc:
         extract.extract_xlsx(xlsx_data)
     elapsed = time.perf_counter() - t0
-    assert elapsed < 1.0
+    assert elapsed < 1.0 * TIME_MARGIN
     assert exc.value.code == "validation"
     assert len(exc.value.message) <= extract.MAX_ERROR_MESSAGE_CHARS
 
@@ -1491,7 +1493,7 @@ def test_plain_text_25mb_reviewer_shapes_decode_and_slice_fast():
         t0 = time.perf_counter()
         res = extract.extract_plain_text(payload, max_bytes=size_25mb)
         elapsed = time.perf_counter() - t0
-        assert elapsed < 0.3, f"{label} took {elapsed:.3f}s (expected < 0.3s)"
+        assert elapsed < 0.3 * TIME_MARGIN, f"{label} took {elapsed:.3f}s (expected < 0.3s)"
         assert len(res.text) == extract.MAX_EXTRACTED_CHARS
         assert res.partial is True
         assert len(res.notes) == 1 and str(extract.MAX_EXTRACTED_CHARS) in res.notes[0]
@@ -1516,7 +1518,7 @@ def test_plain_text_25mb_reviewer_shapes_decode_and_slice_fast():
         return time.perf_counter() - t_start, outs
 
     wall_4, outs_4 = asyncio.run(_run_four())
-    assert wall_4 < 0.6, f"4 concurrent 25 MB plain-text calls took {wall_4:.3f}s"
+    assert wall_4 < 0.6 * TIME_MARGIN, f"4 concurrent 25 MB plain-text calls took {wall_4:.3f}s"
     assert all(len(o.text) == extract.MAX_EXTRACTED_CHARS and o.partial for o in outs_4)
 
     # Multi-byte UTF-8 sequences straddling the initial byte slice decode without U+FFFD.

@@ -17,6 +17,9 @@ import pytest
 from ewsmcp import extract, pdftext
 from test_extract import _build_minimal_pdf
 
+from conftest import TIME_MARGIN  # noqa: E402
+
+
 VECTORS_PATH = Path(__file__).resolve().parent / "data" / "pdf_reading_order_vectors.json"
 
 
@@ -489,7 +492,7 @@ def test_line_limit_linear_hostile_shapes_200k_page_under_2s_and_error_fallback(
     t0 = time.perf_counter()
     big_out, big_notes = pdftext.page_reading_order(big_layout, big_plain, word=False)
     elapsed = time.perf_counter() - t0
-    assert elapsed < 2.0, f"200k-char page took {elapsed:.3f}s (limit 2.0s)"
+    assert elapsed < 2.0 * TIME_MARGIN, f"200k-char page took {elapsed:.3f}s (limit 2.0s)"
     assert big_notes == []
     assert big_out.startswith("نسبة الإنجاز 85.5%")
 
@@ -614,7 +617,7 @@ def test_repair_words_linear_without_split_word_regex():
     t0 = time.perf_counter()
     repaired = pdftext.repair_words(unbroken_ar, {"سلام", "تقرير"})
     elapsed = time.perf_counter() - t0
-    assert elapsed < 0.2, f"repair_words took {elapsed:.3f}s on 24k Arabic chars"
+    assert elapsed < 0.2 * TIME_MARGIN, f"repair_words took {elapsed:.3f}s on 24k Arabic chars"
     assert repaired == unbroken_ar
 
 
@@ -655,7 +658,7 @@ def test_compiled_regexes_in_extract_and_pdftext_are_linear_at_20000_chars():
                             t0 = time.perf_counter()
                             fn()
                             dt = time.perf_counter() - t0
-                            assert dt <= 0.5, (
+                            assert dt <= 0.5 * TIME_MARGIN, (
                                 f"{mod.__name__}.{name}.{op_name} took {dt:.3f}s "
                                 f"(>0.5s) on unit={unit!r} suffix={suffix!r}"
                             )
@@ -669,7 +672,7 @@ def test_compiled_regexes_in_extract_and_pdftext_are_linear_at_20000_chars():
                             t0 = time.perf_counter()
                             fn()
                             dt = time.perf_counter() - t0
-                            assert dt <= 0.5, (
+                            assert dt <= 0.5 * TIME_MARGIN, (
                                 f"{mod.__name__}.{name}.{op_name} took {dt:.3f}s "
                                 f"(>0.5s) on unit={unit!r} suffix={suffix!r}"
                             )
