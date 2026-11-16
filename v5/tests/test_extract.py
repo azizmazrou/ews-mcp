@@ -1529,3 +1529,18 @@ def test_plain_text_25mb_reviewer_shapes_decode_and_slice_fast():
         assert "\ufffd" not in res_mb.text
         assert res_mb.text == "a" + ch * 49
         assert res_mb.partial is True
+
+
+def test_relationship_targets_cannot_leave_the_archive():
+    """A relationship target is a member name inside the archive: it may go up within the
+    archive, never above its root, and an absolute form is read from the root."""
+    resolve = extract._resolve_rel_target
+    assert resolve("xl", "worksheets/sheet1.xml") == "xl/worksheets/sheet1.xml"
+    assert resolve("xl", "../docProps/core.xml") == "docProps/core.xml"
+    assert resolve("xl", "/xl/worksheets/sheet1.xml") == "xl/worksheets/sheet1.xml"
+    for climbing in ("../../outside.xml", "../../../etc/hosts", "..\\..\\outside.xml", "worksheets/../../../x"):
+        assert resolve("xl", climbing) is None, climbing
+    assert resolve("", "../outside.xml") is None
+    assert resolve("xl", "") is None
+    assert resolve("xl", "   ") is None
+

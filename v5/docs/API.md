@@ -951,7 +951,9 @@ cannot be written):
   unseen selector is passed with `offset > 0`, the picker resolves it with a
   single metadata fetch and serves the cached entry without re-downloading or
   re-extracting.
-- **Hostile-input bounds.** Attachments above `EWS_MAX_ATTACHMENT_MB`, ZIP
+- **Hostile-input bounds.** Attachments above `EWS_MAX_ATTACHMENT_MB` (by declared size
+  before download and by the bytes that arrive; `mode="save"` parses nothing and
+  writes what Exchange delivers), ZIP
   members using compression methods other than stored or deflated, archives
   with more than `2,000` members (checked before reading any member), non-streamed
   members exceeding `30` MiB read or XML parts exceeding `20` MiB, archives

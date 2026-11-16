@@ -4590,3 +4590,102 @@ def test_cancelled_calls_kill_children_hold_slot_and_unwritable_tempdir_and_gran
             is True
         )
     assert prctl_calls == [(extract_worker.PR_SET_DUMPABLE, 0, 0, 0, 0)]
+
+
+def test_get_attachment_refuses_bytes_over_the_ceiling_when_the_declared_size_lies(
+    tmp_path, monkeypatch
+):
+    """The declared size comes from the sender's side and can be wrong: the bytes that
+    really arrive are measured before anything parses them, for a document as for a text
+    file. Saving is not a parse: it writes what Exchange delivered, whole."""
+    account = _account()
+    ctx = _ctx(tmp_path, account, ews_max_attachment_mb=1)
+    big = b"PK" + os.urandom(2 * 1024 * 1024)
+    lying_doc = _IdCountingAttachment(
+        "ATT-LIE-DOC", "report.docx", big, "application/octet-stream", size=10
+    )
+    lying_doc.size = 10
+    lying_txt = _IdCountingAttachment("ATT-LIE-TXT", "notes.txt", big, "text/plain", size=10)
+    lying_txt.size = 10
+    item = _neutral_msg("RAW-LIE=", "Lying sizes")
+    item.attachments = [lying_doc, lying_txt]
+    account.fetch = MagicMock(return_value=[item])
+
+    reader_starts = []
+
+    async def _no_worker(*args, **kwargs):
+        reader_starts.append("worker")
+        raise AssertionError("the worker must not be started for bytes over the ceiling")
+
+    def _no_plain(*args, **kwargs):
+        reader_starts.append("plain")
+        raise AssertionError("the text reader must not be called for bytes over the ceiling")
+
+    monkeypatch.setattr(mail_read, "extract_bytes_in_worker", _no_worker)
+    monkeypatch.setattr(mail_read, "extract_plain_text", _no_plain)
+
+    for selector, att in (("0", lying_doc), ("1", lying_txt)):
+        for mode in ("text", "auto"):
+            res = _run(ctx, "get_attachment", message_id="RAW-LIE=", attachment=selector, mode=mode)
+            assert res["ok"] is False, (selector, mode)
+            assert res["error"]["code"] == "validation", (selector, mode, res["error"])
+            assert "EWS_MAX_ATTACHMENT_MB" in res["error"]["message"], (selector, mode)
+            assert "text" not in res
+        assert att.reads >= 1
+    assert reader_starts == []
+
+    saved = _run(ctx, "get_attachment", message_id="RAW-LIE=", attachment="0", mode="save")
+    assert saved["ok"] is True and saved["mode"] == "save"
+    assert os.path.getsize(saved["saved_path"]) == len(big)
+
+
+def _child_answer(**fields):
+    base = {"ok": True, "text": "plain", "extracted_from": "docx"}
+    base.update(fields)
+    return json.dumps(base).encode("utf-8")
+
+
+def test_parent_treats_the_childs_answer_as_hostile():
+    """The child parsed a hostile document, so its answer is hostile input too: wrong types
+    are refused with the one fixed message, and text that cannot be encoded is repaired."""
+    validate = extract_worker._parse_and_validate_child_output
+
+    good = validate(_child_answer())
+    assert good.text == "plain" and good.extracted_from == "docx"
+
+    lone = "\ud83d"
+    cleaned = validate(_child_answer(text=f"a{lone}b", notes=[f"note {lone} end"]))
+    assert cleaned.text == "a\ufffdb"
+    cleaned.text.encode("utf-8")
+    for note in cleaned.notes:
+        note.encode("utf-8")
+
+    wrong_answers = [
+        _child_answer(text=123),
+        _child_answer(text=["a", "b"]),
+        _child_answer(text=None),
+        _child_answer(text={"a": 1}),
+        _child_answer(text=True),
+        _child_answer(extracted_from=5),
+        _child_answer(extracted_from=None),
+        _child_answer(extracted_from=["docx"]),
+        _child_answer(extracted_from="exe"),
+        _child_answer(notes="one note"),
+        _child_answer(notes=[1]),
+        _child_answer(partial="yes"),
+        _child_answer(pages="3"),
+        _child_answer(pages=-1),
+        _child_answer(pages=True),
+        _child_answer(surprise="field"),
+        json.dumps(["ok"]).encode("utf-8"),
+        json.dumps({"ok": "true", "text": "x", "extracted_from": "docx"}).encode("utf-8"),
+        b"",
+        b"\xff\xfe not utf-8",
+        b"{not json",
+    ]
+    for raw in wrong_answers:
+        with pytest.raises(ToolError) as caught:
+            validate(raw)
+        assert caught.value.code == "validation", raw[:60]
+        assert caught.value.message == extract_worker.WORKER_LIMIT_ERROR_MESSAGE, raw[:60]
+
