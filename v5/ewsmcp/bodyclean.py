@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from html import unescape
-from html.parser import HTMLParser
+from typing import Callable
 
 # --------------------------------------------------------------------------
 # Line normalization helpers
@@ -344,68 +344,640 @@ def _render_link(href: str, label: str) -> str:
     return f"{label} ({href})"
 
 
-class _HTMLToText(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._out: list[str] = []
-        self._skip = 0
-        self._href: str = ""
-        self._label: list[str] | None = None
+_ASCII_LOWER_TRANS = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "abcdefghijklmnopqrstuvwxyz",
+)
 
-    def _append(self, s: str) -> None:
-        if self._label is not None:
-            self._label.append(" " if s == "\n" else s)
+
+def _ascii_lower(s: str) -> str:
+    return s.lower() if s.isascii() else s.translate(_ASCII_LOWER_TRANS)
+
+
+_FOREIGN_ROOTS = frozenset({"svg", "math"})
+_FOREIGN_BREAKOUT_TAGS = frozenset({
+    "b", "big", "blockquote", "body", "br", "center", "code", "dd", "div",
+    "dl", "dt", "em", "embed", "h1", "h2", "h3", "h4", "h5", "h6", "head",
+    "hr", "i", "img", "li", "listing", "menu", "meta", "nobr", "ol", "p",
+    "pre", "ruby", "s", "small", "span", "strong", "strike", "sub", "sup",
+    "table", "tt", "u", "ul", "var",
+})
+_FOREIGN_BREAKOUT_END_TAGS = frozenset({"p", "br"})
+_FONT_BREAKOUT_ATTRS = frozenset({"color", "face", "size"})
+_HEAD_ALLOWED_TAGS = frozenset({
+    "title", "meta", "link", "style", "script",
+    "base", "basefont", "bgsound", "noscript", "noframes",
+    "template", "html", "head",
+})
+_HEAD_CLOSE_END_TAGS = frozenset({"head", "body", "html"})
+_NON_HTML_WS_RE = re.compile(r"[^ \t\n\r\x0c]")
+_MARKUP_OPEN_RE = re.compile(r"<[A-Za-z/?!]")
+_COMMENT_END_RE = re.compile(r"--!?>")
+_TAG_NAME_RE = re.compile(r"[A-Za-z][^ \t\n\r\x0c/>]*+")
+# Linear only as used below: _TAG_TAIL_RE via .match(s, j) at a tag (stopping
+# the whole scan on None), and _ATTR_RE via .match(attr_slice, pos) stepping
+# from one match end to the next and stopping at the first failure or non-advance
+# (never .search() or .finditer(), which retry from every trailing space or '/').
+_TAG_TAIL_RE = re.compile(
+    r"""(?>(?:
+        [ \t\n\r\x0c]++
+      | /(?![>])
+      | (?:=[^ \t\n\r\x0c/>=]*+|[^ \t\n\r\x0c/>=]++)
+        [ \t\n\r\x0c]*+
+        (?:=[ \t\n\r\x0c]*+
+            (?:"[^"]*+"|'[^']*+'|(?![\"'])[^ \t\n\r\x0c>]*+)
+        | (?!=)
+        )
+    )*+)
+    (/?)>""",
+    re.VERBOSE,
+)
+_ATTR_RE = re.compile(
+    r"""[ \t\n\r\x0c/]*+
+    (=[^ \t\n\r\x0c/>=]*+|[^ \t\n\r\x0c/>=]++)
+    [ \t\n\r\x0c]*+
+    (?:=[ \t\n\r\x0c]*+
+        (?:"([^"]*+)"|'([^']*+)'|(?![\"'])([^ \t\n\r\x0c>]*+))
+    )?+""",
+    re.VERBOSE,
+)
+
+
+def _end_tag_re(name: str) -> re.Pattern[str]:
+    return re.compile(rf"</{name}(?=[ \t\n\r\x0c/>])", re.IGNORECASE | re.ASCII)
+
+
+# HTML raw-text / RCDATA / script / plaintext elements -> (mode, end_re).
+_RAWTEXT_SPECS: dict[str, tuple[str, re.Pattern[str] | None]] = {
+    "script": ("script", None),
+    "style": ("hide", _end_tag_re("style")),
+    "title": ("hide", _end_tag_re("title")),
+    "textarea": ("decode", _end_tag_re("textarea")),
+    "xmp": ("literal", _end_tag_re("xmp")),
+    "iframe": ("literal", _end_tag_re("iframe")),
+    "noembed": ("literal", _end_tag_re("noembed")),
+    "noframes": ("literal", _end_tag_re("noframes")),
+    "plaintext": ("literal", None),
+}
+_SCRIPT_SCAN_RE = re.compile(
+    r"<!--|-->|</?script(?=[ \t\n\r\x0c/>])",
+    re.IGNORECASE | re.ASCII,
+)
+_OVERLONG_NUM_CHARREF_RE = re.compile(r"&#(?:[0-9]{9,}|[xX][0-9a-fA-F]{9,});?")
+_COMPACT_CHUNK_CHARS = 65_536
+
+
+def _replace_overlong_num_charref(match: re.Match[str]) -> str:
+    tok = match.group(0)
+    body = tok[2:-1] if tok.endswith(";") else tok[2:]
+    if body[0] in ("x", "X"):
+        digits = body[1:].lstrip("0") or "0"
+        if len(digits) > 6:
+            return "\ufffd"
+        return f"&#x{digits};"
+    digits = body.lstrip("0") or "0"
+    if len(digits) > 7:
+        return "\ufffd"
+    return f"&#{digits};"
+
+
+def _unescape_charrefs(s: str) -> str:
+    if "&" not in s:
+        return s
+    if "&#" in s and _OVERLONG_NUM_CHARREF_RE.search(s) is not None:
+        s = _OVERLONG_NUM_CHARREF_RE.sub(_replace_overlong_num_charref, s)
+    return unescape(s)
+
+
+def _extract_href(attr_slice: str) -> str:
+    if not attr_slice or "href" not in _ascii_lower(attr_slice):
+        return ""
+    pos = 0
+    end = len(attr_slice)
+    while pos < end:
+        m = _ATTR_RE.match(attr_slice, pos)
+        if m is None or m.end() <= pos:
+            break
+        pos = m.end()
+        if _ascii_lower(m.group(1)) == "href":
+            raw_val = m.group(2) or m.group(3) or m.group(4)
+            if not raw_val:
+                return ""
+            if "\x00" in raw_val:
+                raw_val = raw_val.replace("\x00", "")
+            return _unescape_charrefs(raw_val).strip()
+    return ""
+
+
+def _font_has_breakout_attr(attr_slice: str) -> bool:
+    if not attr_slice:
+        return False
+    low = _ascii_lower(attr_slice)
+    if "color" not in low and "face" not in low and "size" not in low:
+        return False
+    pos = 0
+    end = len(attr_slice)
+    while pos < end:
+        m = _ATTR_RE.match(attr_slice, pos)
+        if m is None or m.end() <= pos:
+            break
+        pos = m.end()
+        if _ascii_lower(m.group(1)) in _FONT_BREAKOUT_ATTRS:
+            return True
+    return False
+
+
+def html_to_text_bounded(
+    html: str,
+    *,
+    max_chars: int | None = None,
+    transform: Callable[[str], str] | None = None,
+) -> tuple[str, bool]:
+    """Single-pass linear-time HTML -> plain text converter; never raises.
+
+    When ``max_chars`` is given, stops assembling once ``max_chars`` output
+    characters have been produced and returns ``(text, was_truncated)``.
+    """
+    if not html:
+        return "", False
+    s = html
+
+    limit = max(1, int(max_chars)) if max_chars is not None else None
+    out_parts: list[str] = []
+    out_chars = 0
+    truncated = False
+    has_output = False
+    pending_blank = False
+
+    line_ready: list[str] = []
+    line_ready_len = 0
+    line_tail_space = False
+    cur_raw: list[str] = []
+    cur_raw_len = 0
+
+    in_head = False
+    # Foreign integration points (foreignObject, desc, mtext, annotation-xml, etc.) are not modelled.
+    foreign_stack: list[str] = []
+    foreign_counts = {"svg": 0, "math": 0}
+    link_href = ""
+    in_link = False
+    link_ready: list[str] = []
+    link_ready_len = 0
+    link_tail_space = False
+    link_raw: list[str] = []
+    link_raw_len = 0
+
+    def commit_collapsed_line(collapsed: str) -> None:
+        nonlocal out_chars, truncated, has_output, pending_blank
+        if truncated:
+            return
+        if not collapsed:
+            if has_output:
+                pending_blank = True
+            return
+        sep = ("\n\n" if pending_blank else "\n") if has_output else ""
+        if limit is not None:
+            needed = len(sep) + len(collapsed)
+            remaining = limit - out_chars
+            if needed > remaining:
+                if remaining > 0:
+                    out_parts.append((sep + collapsed)[:remaining])
+                    out_chars = limit
+                truncated = True
+                has_output = True
+                pending_blank = False
+                return
+        if sep:
+            out_parts.append(sep)
+            out_chars += len(sep)
+        out_parts.append(collapsed)
+        out_chars += len(collapsed)
+        has_output = True
+        pending_blank = False
+
+    def fold_cur_raw(*, check_limit: bool) -> None:
+        nonlocal cur_raw_len, line_ready_len, line_tail_space
+        if not cur_raw:
+            return
+        chunk = "".join(cur_raw)
+        cur_raw.clear()
+        cur_raw_len = 0
+        if transform is not None:
+            chunk = transform(chunk)
+        if not chunk:
+            return
+        leading_ws = chunk[0].isspace()
+        trailing_ws = chunk[-1].isspace()
+        words = chunk.split()
+        if not words:
+            if line_ready:
+                line_tail_space = True
+            return
+        piece = " ".join(words)
+        if line_ready and (line_tail_space or leading_ws):
+            line_ready.append(" ")
+            line_ready_len += 1
+        line_ready.append(piece)
+        line_ready_len += len(piece)
+        line_tail_space = trailing_ws
+        if check_limit and limit is not None:
+            sep_len = (2 if pending_blank else 1) if has_output else 0
+            if out_chars + sep_len + line_ready_len > limit:
+                collapsed = "".join(line_ready)
+                line_ready.clear()
+                line_ready_len = 0
+                line_tail_space = False
+                commit_collapsed_line(collapsed)
+
+    def flush_raw_line() -> None:
+        nonlocal cur_raw_len, line_ready_len, line_tail_space
+        if truncated:
+            return
+        if not line_ready:
+            if not cur_raw:
+                commit_collapsed_line("")
+                return
+            raw_ln = "".join(cur_raw)
+            cur_raw.clear()
+            cur_raw_len = 0
+            if transform is not None:
+                raw_ln = transform(raw_ln)
+            commit_collapsed_line(" ".join(raw_ln.split()))
+            return
+        fold_cur_raw(check_limit=False)
+        collapsed = "".join(line_ready)
+        line_ready.clear()
+        line_ready_len = 0
+        line_tail_space = False
+        commit_collapsed_line(collapsed)
+
+    def fold_link_raw(*, check_limit: bool) -> None:
+        nonlocal link_raw_len, link_ready_len, link_tail_space
+        if not link_raw:
+            return
+        chunk = "".join(link_raw)
+        link_raw.clear()
+        link_raw_len = 0
+        if transform is not None:
+            chunk = transform(chunk)
+        if not chunk:
+            return
+        leading_ws = chunk[0].isspace()
+        trailing_ws = chunk[-1].isspace()
+        words = chunk.split()
+        if not words:
+            if link_ready:
+                link_tail_space = True
+            return
+        piece = " ".join(words)
+        if link_ready and (link_tail_space or leading_ws):
+            link_ready.append(" ")
+            link_ready_len += 1
+        link_ready.append(piece)
+        link_ready_len += len(piece)
+        link_tail_space = trailing_ws
+        if check_limit and limit is not None:
+            if out_chars + line_ready_len + link_ready_len > limit:
+                flush_link()
+                if not truncated:
+                    fold_cur_raw(check_limit=True)
+
+    def emit_out(seg: str) -> None:
+        nonlocal cur_raw_len
+        if not seg or truncated:
+            return
+        if "\n" not in seg:
+            cur_raw.append(seg)
+            cur_raw_len += len(seg)
+            if limit is not None and cur_raw_len >= _COMPACT_CHUNK_CHARS:
+                fold_cur_raw(check_limit=True)
+            return
+        parts = seg.split("\n")
+        last_idx = len(parts) - 1
+        for idx, part in enumerate(parts):
+            if part:
+                cur_raw.append(part)
+                cur_raw_len += len(part)
+                if limit is not None and cur_raw_len >= _COMPACT_CHUNK_CHARS:
+                    fold_cur_raw(check_limit=True)
+                    if truncated:
+                        return
+            if idx < last_idx:
+                flush_raw_line()
+                if truncated:
+                    return
+
+    def flush_link() -> None:
+        nonlocal link_href, in_link, link_raw_len, link_ready_len, link_tail_space
+        if not in_link:
+            return
+        if not link_ready:
+            raw_lbl = "".join(link_raw)
+            link_raw.clear()
+            link_raw_len = 0
+            if transform is not None and raw_lbl:
+                raw_lbl = transform(raw_lbl)
+            label = " ".join(raw_lbl.split()) if raw_lbl else ""
         else:
-            self._out.append(s)
+            fold_link_raw(check_limit=False)
+            label = "".join(link_ready)
+            link_ready.clear()
+            link_ready_len = 0
+            link_tail_space = False
+        href = link_href
+        link_href = ""
+        in_link = False
+        if truncated:
+            return
+        rendered = _render_link(href, label)
+        if rendered:
+            emit_out(rendered)
 
-    def handle_starttag(self, tag: str, attrs) -> None:
-        tag = tag.lower()
-        if tag in _SKIP_TAGS:
-            self._skip += 1
+    def append_piece(seg: str) -> None:
+        nonlocal link_raw_len
+        if "\x00" in seg:
+            seg = seg.replace("\x00", "")
+        if not seg or truncated:
             return
-        if self._skip:
+        if in_link:
+            link_raw.append(seg)
+            link_raw_len += len(seg)
+            if limit is not None and link_raw_len >= _COMPACT_CHUNK_CHARS:
+                fold_link_raw(check_limit=True)
+        else:
+            emit_out(seg)
+
+    def append_newline() -> None:
+        nonlocal link_raw_len
+        if truncated:
             return
+        if in_link:
+            link_raw.append(" ")
+            link_raw_len += 1
+            if limit is not None and link_raw_len >= _COMPACT_CHUNK_CHARS:
+                fold_link_raw(check_limit=True)
+        else:
+            flush_raw_line()
+
+    n = len(s)
+    i = 0
+
+    def clear_foreign() -> None:
+        foreign_stack.clear()
+        foreign_counts["svg"] = 0
+        foreign_counts["math"] = 0
+
+    def emit_raw_segment(raw_seg: str) -> None:
+        nonlocal in_head
+        if in_head:
+            ws_m = _NON_HTML_WS_RE.search(raw_seg)
+            if ws_m is None:
+                return
+            in_head = False
+            raw_seg = raw_seg[ws_m.start() :]
+        append_piece(_unescape_charrefs(raw_seg))
+
+    def find_rawtext_end(end_re: re.Pattern[str], pos: int) -> tuple[int, int | None]:
+        cm = end_re.search(s, pos)
+        if cm is None:
+            return n, None
+        after_close = cm.end()
+        if after_close < n and s[after_close] == ">":
+            return cm.start(), after_close + 1
+        tm_close = _TAG_TAIL_RE.match(s, after_close)
+        return cm.start(), (tm_close.end() if tm_close is not None else None)
+
+    def scan_script_end(pos: int) -> int | None:
+        # 0 = plain script data, 1 = escaped, 2 = double-escaped.
+        state = 0
+        while pos < n:
+            sm = _SCRIPT_SCAN_RE.search(s, pos)
+            if sm is None:
+                return None
+            c1 = sm.group(0)[1]
+            if c1 == "!":  # <!--
+                k = sm.end()
+                while k < n and s[k] == "-":
+                    k += 1
+                if k < n and s[k] == ">":
+                    state = 0
+                    pos = k + 1
+                else:
+                    if state == 0:
+                        state = 1
+                    pos = k
+            elif c1 == "-":  # -->
+                state = 0
+                pos = sm.end()
+            elif c1 == "/":  # </script(?=[ \t\n\r\x0c/>])
+                if state == 2:
+                    state = 1
+                    pos = sm.end() + 1
+                else:
+                    after_close = sm.end()
+                    if after_close < n and s[after_close] == ">":
+                        return after_close + 1
+                    tm_close = _TAG_TAIL_RE.match(s, after_close)
+                    return tm_close.end() if tm_close is not None else None
+            else:  # <script(?=[ \t\n\r\x0c/>])
+                if state == 1:
+                    state = 2
+                pos = sm.end() + 1
+        return None
+
+    while i < n and not truncated:
+        m = _MARKUP_OPEN_RE.search(s, i)
+        if m is None:
+            emit_raw_segment(s[i:n])
+            break
+        lt = m.start()
+        if lt > i:
+            emit_raw_segment(s[i:lt])
+            if truncated:
+                break
+
+        nxt = s[lt + 1]
+
+        # 1. Comments, foreign CDATA, DOCTYPE, conditional/bogus declarations: <!...>
+        if nxt == "!":
+            if s.startswith("<!--", lt):
+                if s.startswith("<!-->", lt):
+                    i = lt + 5
+                    continue
+                if s.startswith("<!--->", lt):
+                    i = lt + 6
+                    continue
+                end_m = _COMMENT_END_RE.search(s, lt + 4)
+                if end_m is None:
+                    break
+                i = end_m.end()
+                continue
+            if foreign_stack and s.startswith("<![CDATA[", lt):
+                end_cd = s.find("]]>", lt + 9)
+                if end_cd == -1:
+                    append_piece(s[lt + 9 : n])
+                    break
+                append_piece(s[lt + 9 : end_cd])
+                i = end_cd + 3
+                continue
+            gt = s.find(">", lt + 2)
+            if gt == -1:
+                break
+            i = gt + 1
+            continue
+
+        # 2. Processing instructions / XML declarations: <?...>
+        if nxt == "?":
+            gt = s.find(">", lt + 2)
+            if gt == -1:
+                break
+            i = gt + 1
+            continue
+
+        # 3. End tags: </...>
+        if nxt == "/":
+            if lt + 2 >= n:
+                in_head = False
+                append_piece("</")
+                break
+            c2 = s[lt + 2]
+            if not ("A" <= c2 <= "Z" or "a" <= c2 <= "z"):
+                if c2 == ">":
+                    i = lt + 3
+                    continue
+                gt = s.find(">", lt + 2)
+                if gt == -1:
+                    break
+                i = gt + 1
+                continue
+            nm = _TAG_NAME_RE.match(s, lt + 2)
+            j = nm.end() if nm else lt + 3
+            end_tag = _ascii_lower(s[lt + 2 : j])
+            if j < n and s[j] == ">":
+                i = j + 1
+            else:
+                tm = _TAG_TAIL_RE.match(s, j)
+                if tm is None:
+                    break
+                i = tm.end()
+            if end_tag in _FOREIGN_ROOTS:
+                if foreign_counts[end_tag] > 0:
+                    while True:
+                        popped = foreign_stack.pop()
+                        foreign_counts[popped] -= 1
+                        if popped == end_tag:
+                            break
+                continue
+            if foreign_stack and end_tag in _FOREIGN_BREAKOUT_END_TAGS:
+                clear_foreign()
+            if in_head:
+                if end_tag in _HEAD_CLOSE_END_TAGS:
+                    in_head = False
+                continue
+            if end_tag == "a":
+                flush_link()
+                continue
+            if end_tag in ("td", "th"):
+                append_piece(" ")
+                continue
+            if end_tag in _BLOCK_TAGS:
+                append_newline()
+            continue
+
+        # 4. Start tags: <[A-Za-z]...
+        nm = _TAG_NAME_RE.match(s, lt + 1)
+        j = nm.end() if nm else lt + 2
+        tag = _ascii_lower(s[lt + 1 : j])
+        if j < n and s[j] == ">":
+            attr_slice = ""
+            raw_self_closing = False
+            i = j + 1
+        else:
+            tm = _TAG_TAIL_RE.match(s, j)
+            if tm is None:
+                break
+            attr_slice = s[j : tm.start(1)]
+            raw_self_closing = bool(tm.group(1))
+            i = tm.end()
+
+        if foreign_stack and (
+            tag in _FOREIGN_BREAKOUT_TAGS
+            or (tag == "font" and _font_has_breakout_attr(attr_slice))
+        ):
+            clear_foreign()
+
+        if in_head:
+            if tag in _HEAD_ALLOWED_TAGS:
+                spec = _RAWTEXT_SPECS.get(tag)
+                if spec is not None:
+                    mode, end_re = spec
+                    if mode == "script":
+                        next_i = scan_script_end(i)
+                    elif end_re is not None:
+                        _, next_i = find_rawtext_end(end_re, i)
+                    else:
+                        next_i = None
+                    if next_i is None:
+                        break
+                    i = next_i
+                continue
+            in_head = False
+
+        if tag in _FOREIGN_ROOTS:
+            if not raw_self_closing:
+                foreign_stack.append(tag)
+                foreign_counts[tag] += 1
+            continue
+
+        if not foreign_stack and tag in _RAWTEXT_SPECS:
+            mode, end_re = _RAWTEXT_SPECS[tag]
+            if mode == "script":
+                next_i = scan_script_end(i)
+                if next_i is None:
+                    break
+                i = next_i
+                continue
+            if end_re is None:
+                append_piece(s[i:n])
+                break
+            content_end, next_i = find_rawtext_end(end_re, i)
+            if mode == "decode":
+                append_piece(_unescape_charrefs(s[i:content_end]))
+            elif mode == "literal":
+                append_piece(s[i:content_end])
+            if next_i is None:
+                break
+            i = next_i
+            continue
+
+        if tag == "head" and not foreign_stack:
+            in_head = True
+            continue
+
         if tag == "br":
-            self._append("\n")
-            return
+            append_newline()
+            continue
+
         if tag in _BLOCK_TAGS:
-            self._append("\n")
-        if tag == "a":
-            self._flush_link()
-            self._href = (dict(attrs).get("href") or "").strip()
-            self._label = []
+            append_newline()
+            if truncated:
+                break
 
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.lower()
-        if tag in _SKIP_TAGS:
-            if self._skip:
-                self._skip -= 1
-            return
-        if self._skip:
-            return
-        if tag == "a":
-            self._flush_link()
-            return
-        if tag in ("td", "th"):
-            self._append(" ")
-        if tag in _BLOCK_TAGS:
-            self._append("\n")
+        if tag == "a" and not (raw_self_closing and bool(foreign_stack)):
+            flush_link()
+            if truncated:
+                break
+            link_href = _extract_href(attr_slice)
+            in_link = True
 
-    def handle_data(self, data: str) -> None:
-        if self._skip:
-            return
-        self._append(data)
-
-    def _flush_link(self) -> None:
-        if self._label is None:
-            return
-        label = " ".join("".join(self._label).split())
-        href, self._href, self._label = self._href, "", None
-        self._out.append(_render_link(href, label))
-
-    def finish(self) -> str:
-        self._flush_link()
-        return "".join(self._out)
+    if not truncated:
+        flush_link()
+    if not truncated:
+        flush_raw_line()
+    result = "".join(out_parts)
+    if truncated:
+        result = result.rstrip("\n")
+    return result, truncated
 
 
 def html_to_text(html: str) -> str:
@@ -418,23 +990,5 @@ def html_to_text(html: str) -> str:
     """
     if not html:
         return ""
-    parser = _HTMLToText()
-    try:
-        parser.feed(html)
-        parser.close()
-        raw = parser.finish()
-    except Exception:
-        # HTMLParser is lenient, but never let junk markup crash a read
-        # path: fall back to a crude tag strip.
-        raw = unescape(re.sub(r"<[^>]*>", " ", html))
-
-    lines = [" ".join(ln.split()) for ln in raw.split("\n")]
-    out: list[str] = []
-    for ln in lines:
-        if ln:
-            out.append(ln)
-        elif out and out[-1] != "":
-            out.append("")
-    while out and out[-1] == "":
-        out.pop()
-    return "\n".join(out)
+    text, _ = html_to_text_bounded(html)
+    return text

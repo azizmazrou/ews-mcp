@@ -212,6 +212,24 @@ signature stripping) + attachment inventory. Raw HTML only on explicit
 `include_html=true`. Full HTML bodies routinely exceed 100 kB for a short
 message.
 
+Body text comes from the plain-text body Exchange supplies. Only when that is
+empty (and for out-of-office texts and HTML attachments) the server converts
+the HTML itself, with `bodyclean.html_to_text_bounded`: one linear,
+non-raising pass of our own, never the interpreter's `html.parser` (whose
+cost and output change between patch releases). It is a reading aid, not a
+renderer. What it holds to, each with tests: cost proportional to the input;
+mail without malformed markup converts exactly as recorded in
+`tests/data/bodyclean_reference_vectors.json`; and it ends hidden regions
+where a browser ends them (HTML5 rules for comments, `<head>`, `<title>`,
+raw-text elements, the script double escape, CDATA, and leaving `<svg>` /
+`<math>`), so that text after such a region is not lost. Where mail programs
+disagree it shows rather than hides (`iframe`, `noembed`, `noframes`,
+`template` content). Known limits: HTML integration points inside `<svg>` /
+`<math>` (`foreignObject`, `desc`, `mtext`) are not modelled; text that is
+painted from attributes or style sheets (`alt`, `value`, `content:`) and text
+in conditional comments that only one mail program shows is not returned;
+nothing is known about what a script would write.
+
 `AttachmentText` (`toolerror.py`, `extract.py`, `extract_child.py`, `extract_worker.py`, `pdftext.py` + `get_attachment`):
 isolated per-document subprocess extraction (`python -m ewsmcp.extract_child`,
 loading only stdlib, `defusedxml`, and extraction modules — `pypdf` imported

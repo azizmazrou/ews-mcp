@@ -33,13 +33,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.message import Message as EmailMsg
-from html import unescape
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from defusedxml import ElementTree as DefusedET
 from defusedxml.common import DefusedXmlException
 
+from .bodyclean import html_to_text_bounded
 from .pdftext import (
     fix_ligature_maps,
     has_rtl_letters,
@@ -167,12 +167,6 @@ _CT_NAME_RE = re.compile(
     r"""(?<![A-Za-z0-9_*\-])name\s*=\s*(?:"([^"]{0,512})"|'([^']{0,512})'|([^\s;]{1,512}))""",
     re.IGNORECASE,
 )
-
-_HTML_BLOCK_TAGS = frozenset({
-    "p", "div", "tr", "li", "table", "h1", "h2", "h3", "h4", "h5", "h6",
-})
-_HTML_SKIP_TAGS = frozenset({"style", "script", "head"})
-_MAX_HREF_SHOWN = 80
 
 
 @dataclass(frozen=True)
@@ -2245,352 +2239,18 @@ def _decode_text_bytes(data: bytes, *, sniff_html_meta: bool = False) -> str:
     return sanitize_surrogates(data.decode(codec, errors="replace").lstrip("\ufeff"))
 
 
-def _norm_url(url: str) -> str:
-    u = url.strip().casefold()
-    for pfx in ("https://", "http://", "//", "mailto:"):
-        if u.startswith(pfx):
-            u = u[len(pfx) :]
-            break
-    if u.startswith("www."):
-        u = u[4:]
-    return u.rstrip("/")
-
-
-def _render_link(href: str, label: str) -> str:
-    if not label:
-        return href if href and len(href) <= _MAX_HREF_SHOWN else ""
-    if not href or len(href) > _MAX_HREF_SHOWN or _norm_url(href) == _norm_url(label):
-        return label
-    return f"{label} ({href})"
-
-
-def _extract_href_attr(attr_text: str) -> str:
-    """Linear scan of a single tag's attribute slice for href=..."""
-    n = len(attr_text)
-    i = 0
-    while i < n:
-        while i < n and attr_text[i] in " \t\r\n/":
-            i += 1
-        if i >= n:
-            break
-        name_start = i
-        while i < n and attr_text[i] not in " \t\r\n=/":
-            i += 1
-        attr_name = attr_text[name_start:i].lower()
-        while i < n and attr_text[i] in " \t\r\n":
-            i += 1
-        val = ""
-        if i < n and attr_text[i] == "=":
-            i += 1
-            while i < n and attr_text[i] in " \t\r\n":
-                i += 1
-            if i < n and attr_text[i] in ("\"", "'"):
-                q = attr_text[i]
-                i += 1
-                vstart = i
-                end_q = attr_text.find(q, i)
-                if end_q < 0:
-                    val = attr_text[vstart:]
-                    i = n
-                else:
-                    val = attr_text[vstart:end_q]
-                    i = end_q + 1
-            else:
-                vstart = i
-                while i < n and attr_text[i] not in " \t\r\n":
-                    i += 1
-                val = attr_text[vstart:i]
-        if attr_name == "href":
-            return unescape(val).strip()
-    return ""
-
-
-def _unescape_safe(segment: str) -> str:
-    if "&" not in segment:
-        return segment
-    return sanitize_surrogates(unescape(segment))
-
-
-def _html_to_text_bounded(html: str, *, max_chars: int = MAX_EXTRACTED_CHARS) -> Tuple[str, bool]:
-    """Single-pass O(n) HTML -> plain text converter with zero regex backtracking.
-
-    Matches ``bodyclean.html_to_text`` formatting (block newlines, skipped
-    head/script/style, td/th spacing, short link hrefs, collapsed line spaces)
-    while remaining strictly linear on unclosed tags/attributes/comments and
-    stopping assembly once ``max_chars`` is reached.
-    """
+def _html_to_text_bounded(
+    html: str, *, max_chars: int = MAX_EXTRACTED_CHARS
+) -> Tuple[str, bool]:
+    """Single-pass O(n) HTML -> plain text converter shared with ``bodyclean``."""
     if not html:
         return "", False
-
-    acc = _TextAccumulator(max_chars)
-    cur_tokens: List[str] = []
-    cur_len = 0
-    last_line_blank = True  # suppress leading blank lines
-
-    skip_depth = 0
-    link_href = ""
-    link_label: Optional[List[str]] = None
-    link_label_len = 0
-
-    def flush_line(force_blank: bool = False) -> None:
-        nonlocal cur_tokens, cur_len, last_line_blank
-        if not cur_tokens:
-            if force_blank and not last_line_blank and acc.chars > 0:
-                acc.append("\n")
-                last_line_blank = True
-            return
-        line_raw = normalize_arabic_presentation_forms("".join(cur_tokens))
-        cur_tokens = []
-        cur_len = 0
-        collapsed = " ".join(line_raw.split())
-        if not collapsed:
-            if not last_line_blank and acc.chars > 0:
-                acc.append("\n")
-                last_line_blank = True
-            return
-        if acc.chars > 0:
-            acc.append("\n")
-        acc.append(collapsed)
-        last_line_blank = False
-
-    def emit_text(seg: str) -> None:
-        nonlocal cur_len, link_label_len
-        if not seg or acc.truncated:
-            return
-        if link_label is not None:
-            if link_label_len < max_chars:
-                take = seg[: max(1, max_chars - link_label_len)]
-                link_label.append(take.replace("\n", " ").replace("\r", " "))
-                link_label_len += len(take)
-            return
-        # Split on literal newlines so block/line whitespace matches bodyclean.
-        norm_seg = seg.replace("\r\n", "\n").replace("\r", "\n")
-        if "\n" not in norm_seg:
-            cur_tokens.append(norm_seg)
-            cur_len += len(norm_seg)
-            # Flush huge single lines once they exceed remaining budget.
-            if acc.chars + cur_len > max_chars + 4096:
-                flush_line()
-            return
-        pieces = norm_seg.split("\n")
-        for idx, piece in enumerate(pieces):
-            if piece:
-                cur_tokens.append(piece)
-                cur_len += len(piece)
-            if idx < len(pieces) - 1:
-                flush_line(force_blank=True)
-                if acc.truncated:
-                    return
-
-    def flush_link() -> None:
-        nonlocal link_href, link_label, link_label_len
-        if link_label is None:
-            return
-        lbl = " ".join(
-            normalize_arabic_presentation_forms("".join(link_label)).split()
-        )
-        href = link_href
-        link_href = ""
-        link_label = None
-        link_label_len = 0
-        rendered = _render_link(href, lbl)
-        if rendered:
-            emit_text(rendered)
-
-    n = len(html)
-    i = 0
-    no_more_comment_end = False
-    no_more_cdata_end = False
-    no_more_gt = False
-
-    while i < n and not acc.truncated:
-        lt = html.find("<", i)
-        if lt < 0:
-            if skip_depth == 0:
-                emit_text(_unescape_safe(html[i:]))
-            break
-        if lt > i and skip_depth == 0:
-            emit_text(_unescape_safe(html[i:lt]))
-            if acc.truncated:
-                break
-
-        # At '<' at index `lt`
-        if lt + 1 >= n:
-            if skip_depth == 0:
-                emit_text("<")
-            break
-
-        nxt = html[lt + 1]
-
-        # 1. HTML comment <!-- ... -->
-        if nxt == "!" and html.startswith("<!--", lt):
-            if no_more_comment_end:
-                if skip_depth == 0:
-                    emit_text("<!--")
-                i = lt + 4
-                continue
-            end_c = html.find("-->", lt + 4)
-            if end_c < 0:
-                no_more_comment_end = True
-                if skip_depth == 0:
-                    emit_text("<!--")
-                i = lt + 4
-                continue
-            i = end_c + 3
-            continue
-
-        # 2. CDATA <![CDATA[ ... ]]>
-        if nxt == "!" and (html[lt + 2 : lt + 9].upper() == "[CDATA["):
-            if no_more_cdata_end:
-                if skip_depth == 0:
-                    emit_text(html[lt : lt + 9])
-                i = lt + 9
-                continue
-            end_cd = html.find("]]>", lt + 9)
-            if end_cd < 0:
-                no_more_cdata_end = True
-                if skip_depth == 0:
-                    emit_text(html[lt : lt + 9])
-                i = lt + 9
-                continue
-            if skip_depth == 0:
-                emit_text(html[lt + 9 : end_cd])
-            i = end_cd + 3
-            continue
-
-        # 3. Declarations / Processing instructions <! ... > or <? ... >
-        if nxt in ("!", "?"):
-            if no_more_gt:
-                if skip_depth == 0:
-                    emit_text(html[lt : lt + 2])
-                i = lt + 2
-                continue
-            end_decl = html.find(">", lt + 2)
-            if end_decl < 0:
-                no_more_gt = True
-                if skip_depth == 0:
-                    emit_text(html[lt : lt + 2])
-                i = lt + 2
-                continue
-            i = end_decl + 1
-            continue
-
-        # 4. Closing or Opening tag
-        is_end = nxt == "/"
-        name_pos = lt + 2 if is_end else lt + 1
-        if name_pos >= n or not ("A" <= html[name_pos] <= "Z" or "a" <= html[name_pos] <= "z"):
-            if skip_depth == 0:
-                emit_text("<")
-            i = lt + 1
-            continue
-
-        # Read ASCII tag name
-        j = name_pos + 1
-        while j < n:
-            ch = html[j]
-            if (
-                "A" <= ch <= "Z"
-                or "a" <= ch <= "z"
-                or "0" <= ch <= "9"
-                or ch in ":-_"
-            ):
-                j += 1
-            else:
-                break
-        tag = html[name_pos:j].lower()
-
-        # Scan linearly to closing '>' respecting quotes (HTML5 single-pass: if
-        # EOF is hit with no closing '>', the unfinished tag at EOF is dropped
-        # without backtracking!).
-        k = j
-        quote = ""
-        while k < n:
-            c = html[k]
-            if quote:
-                if c == quote:
-                    quote = ""
-            else:
-                if c == ">":
-                    break
-                if c in ("\"", "'") and not is_end:
-                    quote = c
-            k += 1
-
-        if k >= n:
-            # Unclosed tag running to EOF: done in O(n)!
-            break
-
-        attr_slice = html[j:k]
-        self_closing = (not is_end) and attr_slice.rstrip().endswith("/")
-        i = k + 1
-
-        if is_end:
-            if tag in _HTML_SKIP_TAGS:
-                if skip_depth > 0:
-                    skip_depth -= 1
-                continue
-            if skip_depth > 0:
-                continue
-            if tag == "a":
-                flush_link()
-            elif tag in ("td", "th"):
-                emit_text(" ")
-            if tag in _HTML_BLOCK_TAGS:
-                flush_line(force_blank=True)
-            continue
-
-        # Start tag
-        if tag in _HTML_SKIP_TAGS:
-            if not self_closing:
-                # For <script> / <style>, jump directly in C to matching close tag!
-                if tag in ("script", "style"):
-                    lower_tail_pos = i
-                    close_pat = f"</{tag}"
-                    found_close = -1
-                    search_from = lower_tail_pos
-                    while True:
-                        idx_c = html.find("</", search_from)
-                        if idx_c < 0:
-                            break
-                        after = idx_c + 2 + len(tag)
-                        if html[idx_c : after].lower() == close_pat and (
-                            after >= n or html[after] in " \t\r\n>/"
-                        ):
-                            end_gt = html.find(">", after)
-                            found_close = (end_gt + 1) if end_gt >= 0 else n
-                            break
-                        search_from = idx_c + 2
-                    if found_close >= 0:
-                        i = found_close
-                    else:
-                        break
-                else:
-                    skip_depth += 1
-            continue
-
-        if skip_depth > 0:
-            continue
-
-        if tag == "br":
-            if link_label is not None:
-                emit_text(" ")
-            else:
-                flush_line(force_blank=True)
-            continue
-
-        if tag in _HTML_BLOCK_TAGS:
-            flush_line(force_blank=True)
-
-        if tag == "a" and not self_closing:
-            flush_link()
-            link_href = _extract_href_attr(attr_slice)
-            link_label = []
-            link_label_len = 0
-
-    flush_link()
-    flush_line(force_blank=False)
-    text_out = acc.finish().rstrip("\n")
-    return text_out, acc.truncated
+    text_out, truncated = html_to_text_bounded(
+        html,
+        max_chars=max(1, int(max_chars)),
+        transform=normalize_arabic_presentation_forms,
+    )
+    return sanitize_surrogates(text_out), truncated
 
 
 def extract_html(
