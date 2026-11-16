@@ -566,11 +566,18 @@ async def _get_server_status(ctx: Context) -> Dict[str, Any]:
         document_memory_ceiling["note"] = (
             "The memory ceiling for documents is not enforced on this platform."
         )
+    now = time.time()
+    connection: Dict[str, Any] = (
+        dict(ctx.manager.status()) if ctx.manager else {"state": "unmanaged"}
+    )
+    if ctx._circuit_open_until > now:
+        connection["circuit_open"] = True
+        connection["retry_after_s"] = int(ctx._circuit_open_until - now)
     return {
         "ok": True,
         "version": __version__,
-        "uptime_s": int(time.time() - ctx.started_at),
-        "connection": ctx.manager.status() if ctx.manager else {"state": "unmanaged"},
+        "uptime_s": int(now - ctx.started_at),
+        "connection": connection,
         "tier": ctx.settings.ews_capability_tier,
         "send_kill_switch": not ctx.settings.send_enabled,
         "tools": len(ctx.registry),

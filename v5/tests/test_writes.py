@@ -44,6 +44,7 @@ from exchangelib.attachments import AttachmentId
 from exchangelib.errors import ErrorItemNotFound, ErrorServerBusy
 from exchangelib.items import (
     SEND_TO_ALL_AND_SAVE_COPY,
+    SEND_TO_CHANGED_AND_SAVE_COPY,
     SEND_TO_NONE,
     MeetingCancellation,
     MeetingRequest,
@@ -67,7 +68,7 @@ from ewsmcp.dates import parse_when
 from ewsmcp.htmlsafe import MAX_INSPECT_HTML_CHARS
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import writes
-from ewsmcp.tools.base import Context, dispatch, reset_send_rate_window
+from ewsmcp.tools.base import Context, dispatch, mint_token, reset_send_rate_window
 
 SPEC = {s.name: s for s in writes.TOOLS}
 DRAFTS_ID = "FOLDER-DRAFTS"
@@ -702,20 +703,27 @@ def test_create_event_default_saves_without_invites_no_confirm(tmp_path, monkeyp
     assert ctx.aliaser.resolve(res["event_id"]) == "RAW-NEW-EVENT"
 
 
-def test_create_event_with_invites_blocked_by_kill_switch_at_phase_two(
+def test_create_event_with_invites_blocked_by_kill_switch_at_phase_one(
         tmp_path, monkeypatch):
     account = make_account()
-    ctx = make_ctx(tmp_path, account)  # send_enabled defaults to False
+    ctx = make_ctx(tmp_path, account, ews_email="organizer@example.com")
     monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
     FakeCalendarItem.last = None
     kwargs = {"subject": "Board", "start": "2026-07-01T10:00",
-              "end": "2026-07-01T11:00", "attendees": ["x@ext.example"],
+              "end": "2026-07-01T11:00", "attendees": ["guest@example.org"],
               "send_invitations": True}
     p1 = call(ctx, "create_event", kwargs)
-    assert p1["requires_confirmation"] is True  # preview-only mode still works
-    p2 = call(ctx, "create_event", {**kwargs, "confirm_token": p1["confirm_token"]})
-    assert p2["error"]["code"] == "kill_switch"
+    assert p1["ok"] is False
+    assert p1["error"]["code"] == "kill_switch"
+    assert p1["error"]["hint"] == (
+        "Run without notifying attendees, or have the operator flip SEND_ENABLED."
+    )
+    assert "confirm_token" not in p1
     assert FakeCalendarItem.last is None  # nothing was built or saved
+
+    silent = call(ctx, "create_event", {**kwargs, "send_invitations": False})
+    assert silent["ok"] is True and silent["invitations_sent"] is False
+    assert FakeCalendarItem.last.save_calls == [{"send_meeting_invitations": SEND_TO_NONE}]
 
 
 def test_create_event_with_invites_sends_when_enabled(tmp_path, monkeypatch):
@@ -946,15 +954,25 @@ def test_update_event_master_id_needs_an_explicit_scope(tmp_path):
 
 def test_update_event_notify_blocked_by_kill_switch(tmp_path):
     account = make_account()
-    ctx = make_ctx(tmp_path, account)  # send_enabled False
+    ctx = make_ctx(tmp_path, account, ews_email="organizer@example.com")
     ev = MagicMock()
     account._by_id["RAW-E2"] = ev
     kwargs = {"event_id": "RAW-E2", "subject": "Moved", "notify_attendees": True}
     p1 = call(ctx, "update_event", kwargs)
-    assert p1["requires_confirmation"] is True
-    p2 = call(ctx, "update_event", {**kwargs, "confirm_token": p1["confirm_token"]})
-    assert p2["error"]["code"] == "kill_switch"
+    assert p1["ok"] is False
+    assert p1["error"]["code"] == "kill_switch"
+    assert p1["error"]["hint"] == (
+        "Run without notifying attendees, or have the operator flip SEND_ENABLED."
+    )
+    assert "confirm_token" not in p1
+    assert account.fetch_projections == []
     ev.save.assert_not_called()
+
+    silent = call(ctx, "update_event", {**kwargs, "notify_attendees": False})
+    assert silent["ok"] is True and silent["attendees_notified"] is False
+    ev.save.assert_called_once_with(
+        update_fields=["subject"], send_meeting_invitations=SEND_TO_NONE
+    )
 
 
 # --- respond_to_event / cancel_event --------------------------------------------
@@ -3895,6 +3913,1364 @@ def test_cancel_event_plain_appointment_meeting_and_foreign_organizer(tmp_path):
     assert "confirm_token" not in res_blocked
     blocked_mtg.cancel.assert_not_called()
 
+
+# --- cancel_event send kill-switch ----------------------------------------------
+
+
+def test_cancel_event_kill_switch_blocks_meeting_at_phase_one(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account, send_enabled=False, ews_capability_tier="full")
+    item = _cal_standin(
+        id="RAW-KS-MTG",
+        subject="Team review",
+        is_meeting=True,
+        required_attendees=[
+            SimpleNamespace(mailbox=SimpleNamespace(email_address="peer@corp.example"))
+        ],
+    )
+    account._by_id["RAW-KS-MTG"] = item
+    alias = ctx.aliaser.alias_for("RAW-KS-MTG", "e")
+
+    res = call(ctx, "cancel_event", {"event_id": alias, "message": "Rescheduling"})
+    assert res["ok"] is False
+    assert res["error"]["code"] == "kill_switch"
+    assert res["error"]["message"] == (
+        "cancel_event is blocked: notifying attendees sends mail and "
+        "SEND_ENABLED=false on this server."
+    )
+    assert res["error"]["hint"] == (
+        "Cancel the meeting from Outlook, or have the operator flip SEND_ENABLED."
+    )
+    assert "confirm_token" not in res
+    item.cancel.assert_not_called()
+    item.move_to_trash.assert_not_called()
+
+
+def test_cancel_event_with_send_enabled_previews_then_cancels(tmp_path):
+    account = make_account()
+    ctx = full_ctx(tmp_path, account)
+    item = _cal_standin(
+        id="RAW-KS-ON",
+        subject="Team review",
+        is_meeting=True,
+        required_attendees=[
+            SimpleNamespace(mailbox=SimpleNamespace(email_address="peer@corp.example"))
+        ],
+    )
+    account._by_id["RAW-KS-ON"] = item
+    alias = ctx.aliaser.alias_for("RAW-KS-ON", "e")
+    kwargs = {"event_id": alias, "message": "Rescheduling"}
+
+    p1 = call(ctx, "cancel_event", kwargs)
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    assert p1["preview"]["action"] == "cancel"
+    item.cancel.assert_not_called()
+
+    p2 = call(ctx, "cancel_event", {**kwargs, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is True and p2["cancelled"] is True
+    item.cancel.assert_called_once_with(new_body="Rescheduling")
+    item.move_to_trash.assert_not_called()
+
+
+def test_cancel_event_plain_appointment_deletes_when_send_disabled(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account, send_enabled=False, ews_capability_tier="full")
+    appt = _cal_standin(
+        id="RAW-KS-APPT",
+        subject="Focus time",
+        is_meeting=False,
+        my_response_type="Organizer",
+    )
+    account._by_id["RAW-KS-APPT"] = appt
+    alias = ctx.aliaser.alias_for("RAW-KS-APPT", "e")
+
+    p1 = call(ctx, "cancel_event", {"event_id": alias})
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    assert p1["preview"]["action"] == "delete"
+    appt.move_to_trash.assert_not_called()
+
+    p2 = call(ctx, "cancel_event", {
+        "event_id": alias,
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is True and p2["deleted"] is True
+    appt.move_to_trash.assert_called_once_with(
+        send_meeting_cancellations=SEND_TO_NONE
+    )
+    appt.cancel.assert_not_called()
+
+
+def test_cancel_event_phase_two_refused_when_send_disabled(tmp_path):
+    account = make_account()
+    secret = "shared-confirm-secret-for-phase2-test"
+    ctx_on = make_ctx(
+        tmp_path / "on",
+        account,
+        send_enabled=True,
+        ews_capability_tier="full",
+        send_confirm_secret=secret,
+    )
+    ctx_off = Context(
+        settings=make_settings(
+            ews_tz=FIXED_OFFSET_TZ,
+            send_enabled=False,
+            ews_capability_tier="full",
+            send_confirm_secret=secret,
+        ),
+        gateway=FakeGateway(account),
+        manager=None,
+        aliaser=ctx_on.aliaser,
+        audit=AuditLog(str(tmp_path / "off-audit")),
+    )
+    item = _cal_standin(
+        id="RAW-KS-P2",
+        subject="Quarterly sync",
+        is_meeting=True,
+        required_attendees=[
+            SimpleNamespace(mailbox=SimpleNamespace(email_address="peer@corp.example"))
+        ],
+    )
+    account._by_id["RAW-KS-P2"] = item
+    alias = ctx_on.aliaser.alias_for("RAW-KS-P2", "e")
+    kwargs = {"event_id": alias, "message": "Cancelled"}
+
+    p1 = call(ctx_on, "cancel_event", kwargs)
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+
+    p2 = call(ctx_off, "cancel_event", {**kwargs, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is False
+    assert p2["error"]["code"] == "kill_switch"
+    assert "SEND_ENABLED=false" in p2["error"]["message"]
+    item.cancel.assert_not_called()
+    item.move_to_trash.assert_not_called()
+
+    # Handler defence-in-depth on the freshly fetched entry when invoked directly.
+    content = asyncio.run(writes._cancel_event_preview(ctx_on, dict(kwargs)))
+    writes._PENDING_CANCEL.set(None)
+    with pytest.raises(writes.ToolError) as exc_info:
+        asyncio.run(
+            writes._cancel_event(
+                ctx_off,
+                event_id="RAW-KS-P2",
+                message="Cancelled",
+                _verified_content_hash=writes.preview_content_hash(content),
+            )
+        )
+    assert exc_info.value.code == "kill_switch"
+    item.cancel.assert_not_called()
+
+
+def test_cancel_event_decision_table_validation_precedes_kill_switch(tmp_path):
+    account = make_account()
+    ctx = make_ctx(tmp_path, account, send_enabled=False, ews_capability_tier="full")
+    foreign = _cal_standin(
+        id="RAW-KS-FOREIGN",
+        subject="External sync",
+        is_meeting=True,
+        my_response_type="Accept",
+        organizer=SimpleNamespace(email_address="chair@example.com"),
+        required_attendees=[
+            SimpleNamespace(mailbox=SimpleNamespace(email_address="exec@corp.example"))
+        ],
+    )
+    non_cal = SimpleNamespace(
+        id="RAW-KS-MAIL",
+        subject="Invoice",
+        parent_folder_id=SimpleNamespace(id="FOLDER-INBOX"),
+        cancel=MagicMock(),
+        move_to_trash=MagicMock(),
+    )
+    account._by_id["RAW-KS-FOREIGN"] = foreign
+    account._by_id["RAW-KS-MAIL"] = non_cal
+
+    res_foreign = call(
+        ctx, "cancel_event", {"event_id": ctx.aliaser.alias_for("RAW-KS-FOREIGN", "e")}
+    )
+    assert res_foreign["ok"] is False
+    assert res_foreign["error"]["code"] == "validation"
+    assert "respond_to_event" in res_foreign["error"]["message"]
+    assert "confirm_token" not in res_foreign
+    foreign.cancel.assert_not_called()
+
+    res_non_cal = call(
+        ctx, "cancel_event", {"event_id": ctx.aliaser.alias_for("RAW-KS-MAIL", "m")}
+    )
+    assert res_non_cal["ok"] is False
+    assert res_non_cal["error"]["code"] == "validation"
+    assert "confirm_token" not in res_non_cal
+    non_cal.cancel.assert_not_called()
+
+
+# --- round 2: unified notifying gates (update_event preview, hourly cap, handlers) ---
+
+
+def _att_box(email: str) -> SimpleNamespace:
+    return SimpleNamespace(mailbox=SimpleNamespace(email_address=email))
+
+
+def _updatable_event(
+    raw_id: str,
+    *,
+    subject: str = "Initial review",
+    required: tuple[str, ...] = ("colleague@example.com",),
+    optional: tuple[str, ...] = (),
+    resources: tuple[str, ...] = (),
+) -> SimpleNamespace:
+    ev = SimpleNamespace(
+        id=raw_id,
+        changekey="CK-UPD",
+        item_class="IPM.Appointment",
+        subject=subject,
+        start=datetime(2026, 11, 20, 9, 0, tzinfo=LOCAL_TZ),
+        end=datetime(2026, 11, 20, 10, 0, tzinfo=LOCAL_TZ),
+        location="Room A",
+        type="Single",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[_att_box(a) for a in required] if required else None,
+        optional_attendees=[_att_box(a) for a in optional] if optional else None,
+        resources=[_att_box(a) for a in resources] if resources else None,
+    )
+    ev.save = MagicMock(name="save")
+    return ev
+
+
+def test_update_event_notify_preview_recipient_guard_warnings_and_toctou(tmp_path):
+    account = make_account()
+    ev_blocked = _updatable_event(
+        "RAW-UPD-ALLOW",
+        required=("colleague@example.com",),
+        optional=("guest@example.org",),
+    )
+    account._by_id["RAW-UPD-ALLOW"] = ev_blocked
+    ctx_allow = make_ctx(
+        tmp_path / "allow",
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_recipient_allowlist="*@example.com",
+    )
+    e_allow = ctx_allow.aliaser.alias_for("RAW-UPD-ALLOW", "e")
+    blocked = call(ctx_allow, "update_event", {
+        "event_id": e_allow,
+        "subject": "Updated review",
+        "notify_attendees": True,
+    })
+    assert blocked["ok"] is False
+    assert blocked["error"]["code"] == "recipient_blocked"
+    assert "confirm_token" not in blocked
+    ev_blocked.save.assert_not_called()
+
+    # Open lists: preview shows stored required/optional/resource attendees + external warning.
+    ctx = make_ctx(
+        tmp_path / "open",
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    ev_ok = _updatable_event(
+        "RAW-UPD-OK",
+        required=("colleague@example.com",),
+        optional=("guest@example.org",),
+        resources=("room@example.com",),
+    )
+    account._by_id["RAW-UPD-OK"] = ev_ok
+    e_ok = ctx.aliaser.alias_for("RAW-UPD-OK", "e")
+    kwargs = {
+        "event_id": e_ok,
+        "subject": "Updated review",
+        "notify_attendees": True,
+    }
+    proj_before = len(account.fetch_projections)
+    p1 = call(ctx, "update_event", kwargs)
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    assert p1["preview"]["attendees"] == [
+        "colleague@example.com",
+        "guest@example.org",
+        "room@example.com",
+    ]
+    assert p1["preview"]["changes"] == {"subject": "Updated review"}
+    assert p1["warnings"] == ["external recipients: guest@example.org"]
+    assert account.fetch_projections[proj_before:] == [None]
+    ev_ok.save.assert_not_called()
+
+    p2 = call(ctx, "update_event", {**kwargs, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is True
+    assert p2["updated_fields"] == ["subject"]
+    assert p2["attendees_notified"] is True
+    assert account.fetch_projections[proj_before:] == [None, None, None]
+    ev_ok.save.assert_called_once_with(
+        update_fields=["subject"],
+        send_meeting_invitations=SEND_TO_CHANGED_AND_SAVE_COPY,
+    )
+
+    # Stored attendees changed between phases -> confirm_invalid (stale), nothing saved.
+    ev_stale = _updatable_event(
+        "RAW-UPD-STALE",
+        required=("colleague@example.com",),
+    )
+    account._by_id["RAW-UPD-STALE"] = ev_stale
+    e_stale = ctx.aliaser.alias_for("RAW-UPD-STALE", "e")
+    stale_kwargs = {
+        "event_id": e_stale,
+        "subject": "Moved slot",
+        "notify_attendees": True,
+    }
+    p1_stale = call(ctx, "update_event", stale_kwargs)
+    assert p1_stale["requires_confirmation"] is True
+    ev_stale.optional_attendees = [_att_box("added@example.org")]
+    p2_stale = call(ctx, "update_event", {
+        **stale_kwargs,
+        "confirm_token": p1_stale["confirm_token"],
+    })
+    assert p2_stale["ok"] is False
+    assert p2_stale["error"]["code"] == "confirm_invalid"
+    assert "stale" in p2_stale["error"]["message"]
+    ev_stale.save.assert_not_called()
+
+    # Handler-level TOCTOU check on its own fetch (between phase-2 preview and handler).
+    seq_p1 = _updatable_event("RAW-UPD-SEQ", required=("colleague@example.com",))
+    seq_p2 = _updatable_event("RAW-UPD-SEQ", required=("colleague@example.com",))
+    seq_handler = _updatable_event(
+        "RAW-UPD-SEQ",
+        required=("colleague@example.com", "late@example.org"),
+    )
+    seq_objs = [seq_p1, seq_p2, seq_handler]
+    seq_account = SimpleNamespace(
+        drafts=SimpleNamespace(id=DRAFTS_ID),
+        calendar=SimpleNamespace(id="FOLDER-CAL"),
+    )
+    seq_account.fetch = lambda pairs, only_fields=None: [seq_objs.pop(0) for _ in pairs]
+    ctx_seq = make_ctx(
+        tmp_path / "seq",
+        seq_account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    e_seq = ctx_seq.aliaser.alias_for("RAW-UPD-SEQ", "e")
+    seq_kw = {"event_id": e_seq, "subject": "Moved", "notify_attendees": True}
+    tok_seq = call(ctx_seq, "update_event", seq_kw)["confirm_token"]
+    refused_seq = call(ctx_seq, "update_event", {**seq_kw, "confirm_token": tok_seq})
+    assert refused_seq["ok"] is False
+    assert refused_seq["error"]["code"] == "confirm_invalid"
+    seq_handler.save.assert_not_called()
+
+
+def test_notifying_calendar_calls_share_hourly_send_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_capability_tier="full",
+        ews_max_sends_per_hour=1,
+    )
+
+    draft = make_content_draft(
+        subject="Update",
+        to=("colleague@example.com",),
+        body="Ready for review",
+    )
+    account._by_id["RAW-CAP-D1"] = draft
+    d1 = ctx.aliaser.alias_for("RAW-CAP-D1", "d")
+
+    appt_pre = _cal_standin(
+        id="RAW-CAP-APPT-1",
+        subject="Hold",
+        is_meeting=False,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+    )
+    account._by_id["RAW-CAP-APPT-1"] = appt_pre
+    e_appt_pre = ctx.aliaser.alias_for("RAW-CAP-APPT-1", "e")
+
+    # Non-sending create_event and plain-appointment cancel_event do NOT consume the 1/h slot.
+    FakeCalendarItem.last = None
+    no_inv = call(ctx, "create_event", {
+        "subject": "Focus",
+        "start": "2026-07-01T09:00",
+        "end": "2026-07-01T10:00",
+        "attendees": ["colleague@example.com"],
+        "send_invitations": False,
+    })
+    assert no_inv["ok"] is True
+    tok_appt_pre = call(ctx, "cancel_event", {"event_id": e_appt_pre})["confirm_token"]
+    del_pre = call(ctx, "cancel_event", {
+        "event_id": e_appt_pre,
+        "confirm_token": tok_appt_pre,
+    })
+    assert del_pre["ok"] is True and del_pre["deleted"] is True
+
+    # Confirmed send_draft still succeeds and fills the 1/hour cap.
+    tok_d1 = call(ctx, "send_draft", {"draft_id": d1})["confirm_token"]
+    sent_d1 = call(ctx, "send_draft", {"draft_id": d1, "confirm_token": tok_d1})
+    assert sent_d1["ok"] is True and sent_d1["sent"] is True
+
+    # 1. create_event(send_invitations=True) is refused with rate_capped + retry_after_s.
+    FakeCalendarItem.last = None
+    ce_kw = {
+        "subject": "Kickoff",
+        "start": "2026-07-02T10:00",
+        "end": "2026-07-02T11:00",
+        "attendees": ["colleague@example.com"],
+        "send_invitations": True,
+    }
+    tok_ce = call(ctx, "create_event", ce_kw)["confirm_token"]
+    capped_ce = call(ctx, "create_event", {**ce_kw, "confirm_token": tok_ce})
+    assert capped_ce["ok"] is False
+    assert capped_ce["error"]["code"] == "rate_capped"
+    assert capped_ce["error"]["retry_after_s"] > 0
+    assert FakeCalendarItem.last is None
+
+    # 2. update_event(notify_attendees=True) is refused with rate_capped + retry_after_s.
+    ev_upd = _updatable_event("RAW-CAP-UPD", required=("colleague@example.com",))
+    account._by_id["RAW-CAP-UPD"] = ev_upd
+    e_upd = ctx.aliaser.alias_for("RAW-CAP-UPD", "e")
+    ue_kw = {"event_id": e_upd, "subject": "Rescheduled", "notify_attendees": True}
+    tok_ue = call(ctx, "update_event", ue_kw)["confirm_token"]
+    capped_ue = call(ctx, "update_event", {**ue_kw, "confirm_token": tok_ue})
+    assert capped_ue["ok"] is False
+    assert capped_ue["error"]["code"] == "rate_capped"
+    assert capped_ue["error"]["retry_after_s"] > 0
+    ev_upd.save.assert_not_called()
+
+    # 3. cancel_event on a meeting (action='cancel') is refused with rate_capped + retry_after_s.
+    mtg = _cal_standin(
+        id="RAW-CAP-MTG",
+        subject="Sync",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[_att_box("colleague@example.com")],
+    )
+    account._by_id["RAW-CAP-MTG"] = mtg
+    e_mtg = ctx.aliaser.alias_for("RAW-CAP-MTG", "e")
+    can_kw = {"event_id": e_mtg, "message": "Postponed"}
+    tok_can = call(ctx, "cancel_event", can_kw)["confirm_token"]
+    capped_can = call(ctx, "cancel_event", {**can_kw, "confirm_token": tok_can})
+    assert capped_can["ok"] is False
+    assert capped_can["error"]["code"] == "rate_capped"
+    assert capped_can["error"]["retry_after_s"] > 0
+    mtg.cancel.assert_not_called()
+
+    # 4. While the hour is full, non-notifying create_event and plain-appointment delete work.
+    no_inv_full = call(ctx, "create_event", {
+        "subject": "Solo work",
+        "start": "2026-07-03T09:00",
+        "end": "2026-07-03T10:00",
+        "send_invitations": False,
+    })
+    assert no_inv_full["ok"] is True
+
+    appt_full = _cal_standin(
+        id="RAW-CAP-APPT-2",
+        subject="Solo hold",
+        is_meeting=False,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+    )
+    account._by_id["RAW-CAP-APPT-2"] = appt_full
+    e_appt_full = ctx.aliaser.alias_for("RAW-CAP-APPT-2", "e")
+    tok_appt_full = call(ctx, "cancel_event", {"event_id": e_appt_full})["confirm_token"]
+    del_full = call(ctx, "cancel_event", {
+        "event_id": e_appt_full,
+        "confirm_token": tok_appt_full,
+    })
+    assert del_full["ok"] is True and del_full["deleted"] is True
+
+    # 5. Each of the three rate-capped tokens remained valid and itself counts 1 slot on retry.
+    draft2 = make_content_draft(
+        subject="Followup",
+        to=("colleague@example.com",),
+        body="Ping",
+    )
+    account._by_id["RAW-CAP-D2"] = draft2
+    d2 = ctx.aliaser.alias_for("RAW-CAP-D2", "d")
+    tok_d2 = call(ctx, "send_draft", {"draft_id": d2})["confirm_token"]
+
+    for name, kw, saved_tok in (
+        ("create_event", ce_kw, tok_ce),
+        ("update_event", ue_kw, tok_ue),
+        ("cancel_event", can_kw, tok_can),
+    ):
+        reset_send_rate_window()
+        ok_retry = call(ctx, name, {**kw, "confirm_token": saved_tok})
+        assert ok_retry["ok"] is True, name
+        # That calendar notification consumed the 1/hour slot, blocking send_draft.
+        blocked_d2 = call(ctx, "send_draft", {"draft_id": d2, "confirm_token": tok_d2})
+        assert blocked_d2["ok"] is False and blocked_d2["error"]["code"] == "rate_capped", name
+
+
+def test_notifying_event_handlers_enforce_kill_switch_directly(tmp_path, monkeypatch):
+    monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
+    FakeCalendarItem.last = None
+    account = make_account()
+    ctx_on = make_ctx(
+        tmp_path / "on",
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_capability_tier="full",
+    )
+    ctx_off = make_ctx(
+        tmp_path / "off",
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=False,
+        ews_capability_tier="full",
+    )
+
+    # 1. _create_event called directly with send_invitations=True and send_enabled=False.
+    with pytest.raises(writes.ToolError) as ce_exc:
+        asyncio.run(
+            writes._create_event(
+                ctx_off,
+                subject="Board",
+                start="2026-07-01T10:00",
+                end="2026-07-01T11:00",
+                attendees=["colleague@example.com"],
+                send_invitations=True,
+            )
+        )
+    assert ce_exc.value.code == "kill_switch"
+    assert FakeCalendarItem.last is None
+
+    # 2. _update_event called directly with notify_attendees=True and send_enabled=False.
+    ev = _updatable_event("RAW-DIRECT-UPD", required=("colleague@example.com",))
+    account._by_id["RAW-DIRECT-UPD"] = ev
+    upd_content = asyncio.run(
+        writes._update_event_preview(
+            ctx_on,
+            {"event_id": "RAW-DIRECT-UPD", "subject": "Moved", "notify_attendees": True},
+        )
+    )
+    with pytest.raises(writes.ToolError) as ue_exc:
+        asyncio.run(
+            writes._update_event(
+                ctx_off,
+                event_id="RAW-DIRECT-UPD",
+                subject="Moved",
+                notify_attendees=True,
+                _verified_content_hash=writes.preview_content_hash(upd_content),
+            )
+        )
+    assert ue_exc.value.code == "kill_switch"
+    ev.save.assert_not_called()
+
+    # 3. _cancel_event called directly on a meeting with send_enabled=False.
+    mtg = _cal_standin(
+        id="RAW-DIRECT-CAN",
+        subject="Review",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[_att_box("colleague@example.com")],
+    )
+    account._by_id["RAW-DIRECT-CAN"] = mtg
+    can_content = asyncio.run(
+        writes._cancel_event_preview(
+            ctx_on, {"event_id": "RAW-DIRECT-CAN", "message": "Cancelled"}
+        )
+    )
+    writes._PENDING_CANCEL.set(None)
+    with pytest.raises(writes.ToolError) as can_exc:
+        asyncio.run(
+            writes._cancel_event(
+                ctx_off,
+                event_id="RAW-DIRECT-CAN",
+                message="Cancelled",
+                _verified_content_hash=writes.preview_content_hash(can_content),
+            )
+        )
+    assert can_exc.value.code == "kill_switch"
+    mtg.cancel.assert_not_called()
+    mtg.move_to_trash.assert_not_called()
+
+
+# --- round 4: guard mutation pins & regressions ------------------------------
+
+
+def test_kill_switch_hints_fit_each_notifying_calendar_tool(tmp_path, monkeypatch):
+    monkeypatch.setattr(writes, "CalendarItem", FakeCalendarItem)
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=False,
+        ews_capability_tier="full",
+    )
+    ev = _updatable_event("RAW-KS-HINT-UPD", required=("colleague@example.com",))
+    mtg = _cal_standin(
+        id="RAW-KS-HINT-CAN",
+        subject="Planning",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[_att_box("colleague@example.com")],
+    )
+    account._by_id["RAW-KS-HINT-UPD"] = ev
+    account._by_id["RAW-KS-HINT-CAN"] = mtg
+
+    ce = call(ctx, "create_event", {
+        "subject": "Sync",
+        "start": "2026-11-20T09:00",
+        "end": "2026-11-20T10:00",
+        "attendees": ["colleague@example.com"],
+        "send_invitations": True,
+    })
+    ue = call(ctx, "update_event", {
+        "event_id": ctx.aliaser.alias_for("RAW-KS-HINT-UPD", "e"),
+        "subject": "Moved",
+        "notify_attendees": True,
+    })
+    can = call(ctx, "cancel_event", {
+        "event_id": ctx.aliaser.alias_for("RAW-KS-HINT-CAN", "e"),
+    })
+    sd = call(ctx, "send_draft", {"draft_id": "RAW-D1"})
+
+    expected_edit_hint = (
+        "Run without notifying attendees, or have the operator flip SEND_ENABLED."
+    )
+    expected_cancel_hint = (
+        "Cancel the meeting from Outlook, or have the operator flip SEND_ENABLED."
+    )
+    expected_send_hint = (
+        "Create a draft instead; sending requires the operator to flip SEND_ENABLED."
+    )
+    assert ce["error"]["code"] == "kill_switch"
+    assert ce["error"]["hint"] == expected_edit_hint
+    assert ue["error"]["code"] == "kill_switch"
+    assert ue["error"]["hint"] == expected_edit_hint
+    assert can["error"]["code"] == "kill_switch"
+    assert can["error"]["hint"] == expected_cancel_hint
+    assert sd["error"]["code"] == "kill_switch"
+    assert sd["error"]["hint"] == expected_send_hint
+
+
+def test_update_event_token_binds_stored_attendee_identity_same_count(tmp_path):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    ev = _updatable_event("RAW-ATT-SWAP", required=("colleague@example.com",))
+    account._by_id["RAW-ATT-SWAP"] = ev
+    alias = ctx.aliaser.alias_for("RAW-ATT-SWAP", "e")
+    kwargs = {"event_id": alias, "subject": "Moved", "notify_attendees": True}
+
+    p1 = call(ctx, "update_event", kwargs)
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    assert p1["preview"]["attendee_count"] == 1
+
+    # Replace the single attendee with another address while keeping count == 1.
+    ev.required_attendees = [_att_box("replacement@example.com")]
+    p2 = call(ctx, "update_event", {**kwargs, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is False
+    assert p2["error"]["code"] == "confirm_invalid"
+    assert "stale" in p2["error"]["message"]
+    ev.save.assert_not_called()
+
+    # Same-count swap between phase-2 preview and handler fetch is also caught.
+    s_p1 = _updatable_event("RAW-ATT-SWAP-H", required=("colleague@example.com",))
+    s_p2 = _updatable_event("RAW-ATT-SWAP-H", required=("colleague@example.com",))
+    s_h = _updatable_event("RAW-ATT-SWAP-H", required=("replacement@example.com",))
+    objs = [s_p1, s_p2, s_h]
+    seq_acc = SimpleNamespace(
+        drafts=SimpleNamespace(id=DRAFTS_ID),
+        calendar=SimpleNamespace(id="FOLDER-CAL"),
+    )
+    seq_acc.fetch = lambda pairs, only_fields=None: [objs.pop(0) for _ in pairs]
+    ctx_h = make_ctx(
+        tmp_path / "handler",
+        seq_acc,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    e_h = ctx_h.aliaser.alias_for("RAW-ATT-SWAP-H", "e")
+    kw_h = {"event_id": e_h, "subject": "Moved", "notify_attendees": True}
+    tok_h = call(ctx_h, "update_event", kw_h)["confirm_token"]
+    res_h = call(ctx_h, "update_event", {**kw_h, "confirm_token": tok_h})
+    assert res_h["ok"] is False
+    assert res_h["error"]["code"] == "confirm_invalid"
+    s_h.save.assert_not_called()
+
+
+@pytest.mark.parametrize("field, preview_val, tampered_val", [
+    ("subject", "Agenda A", "Agenda B"),
+    ("start", "2026-11-20T09:15", "2026-11-20T09:30"),
+    ("end", "2026-11-20T10:15", "2026-11-20T10:45"),
+    ("location", "Room A", "Room B"),
+    ("body", "Notes v1", "Notes v2"),
+    ("reminder_minutes", 15, 30),
+])
+def test_update_event_token_binds_each_changed_field(
+    tmp_path, field, preview_val, tampered_val,
+):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    ev = _updatable_event("RAW-CHG-BIND", required=("colleague@example.com",))
+    account._by_id["RAW-CHG-BIND"] = ev
+    alias = ctx.aliaser.alias_for("RAW-CHG-BIND", "e")
+
+    p1 = call(ctx, "update_event", {
+        "event_id": alias,
+        field: preview_val,
+        "notify_attendees": True,
+    })
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+
+    p2 = call(ctx, "update_event", {
+        "event_id": alias,
+        field: tampered_val,
+        "notify_attendees": True,
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is False
+    assert p2["error"]["code"] == "confirm_invalid"
+    assert "stale" in p2["error"]["message"]
+    ev.save.assert_not_called()
+
+
+def test_update_event_token_rejects_added_field_at_phase_two(tmp_path):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    ev = _updatable_event("RAW-CHG-ADDED", required=("colleague@example.com",))
+    account._by_id["RAW-CHG-ADDED"] = ev
+    alias = ctx.aliaser.alias_for("RAW-CHG-ADDED", "e")
+
+    p1 = call(ctx, "update_event", {
+        "event_id": alias,
+        "subject": "Original change",
+        "notify_attendees": True,
+    })
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+
+    p2 = call(ctx, "update_event", {
+        "event_id": alias,
+        "subject": "Original change",
+        "body": "Added after preview",
+        "notify_attendees": True,
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is False
+    assert p2["error"]["code"] == "confirm_invalid"
+    assert "stale" in p2["error"]["message"]
+    ev.save.assert_not_called()
+
+
+@pytest.mark.parametrize("start_val, end_val", [
+    (EWSDate(2026, 11, 20), EWSDate(2026, 11, 21)),
+    (date(2026, 11, 20), date(2026, 11, 21)),
+])
+def test_update_event_notify_succeeds_on_all_day_date_event(
+    tmp_path, start_val, end_val,
+):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    ev = _updatable_event("RAW-ALLDAY-UPD", required=("colleague@example.com",))
+    ev.start = start_val
+    ev.end = end_val
+    ev.is_all_day = True
+    account._by_id["RAW-ALLDAY-UPD"] = ev
+    alias = ctx.aliaser.alias_for("RAW-ALLDAY-UPD", "e")
+    kwargs = {"event_id": alias, "subject": "Offsite day", "notify_attendees": True}
+
+    p1 = call(ctx, "update_event", kwargs)
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    assert p1["preview"]["start"] == "2026-11-20"
+    assert p1["preview"]["end"] == "2026-11-21"
+    assert account.fetch_projections == [None]
+
+    p2 = call(ctx, "update_event", {**kwargs, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is True
+    assert p2["updated_fields"] == ["subject"]
+    assert p2["attendees_notified"] is True
+    assert account.fetch_projections == [None, None, None]
+    assert account.fetch_projections[0] == account.fetch_projections[2]
+    ev.save.assert_called_once_with(
+        update_fields=["subject"],
+        send_meeting_invitations=SEND_TO_CHANGED_AND_SAVE_COPY,
+    )
+
+
+@pytest.mark.parametrize("item_class", [
+    "IPM.OLE.CLASS.{00061055-0000-0000-C000-000000000046}",
+    "IPM.Schedule.Meeting.Custom",
+    "ipm.appointment",
+])
+def test_update_event_accepts_custom_and_modified_occurrence_item_classes(
+    tmp_path, monkeypatch, item_class,
+):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+
+    ev_silent = _updatable_event("RAW-CLS-SILENT", required=("colleague@example.com",))
+    ev_silent.item_class = item_class
+    account._by_id["RAW-CLS-SILENT"] = ev_silent
+    e_silent = ctx.aliaser.alias_for("RAW-CLS-SILENT", "e")
+    res_silent = call(ctx, "update_event", {
+        "event_id": e_silent,
+        "subject": "Silent update",
+        "notify_attendees": False,
+    })
+    assert res_silent["ok"] is True
+    assert res_silent["attendees_notified"] is False
+    ev_silent.save.assert_called_once_with(
+        update_fields=["subject"],
+        send_meeting_invitations=SEND_TO_NONE,
+    )
+
+    ev_notify = _updatable_event("RAW-CLS-NOTIFY", required=("colleague@example.com",))
+    ev_notify.item_class = item_class
+    account._by_id["RAW-CLS-NOTIFY"] = ev_notify
+    e_notify = ctx.aliaser.alias_for("RAW-CLS-NOTIFY", "e")
+    kw_notify = {
+        "event_id": e_notify,
+        "subject": "Notified update",
+        "notify_attendees": True,
+    }
+    p1 = call(ctx, "update_event", kw_notify)
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    p2 = call(ctx, "update_event", {**kw_notify, "confirm_token": p1["confirm_token"]})
+    assert p2["ok"] is True
+    assert p2["attendees_notified"] is True
+    ev_notify.save.assert_called_once_with(
+        update_fields=["subject"],
+        send_meeting_invitations=SEND_TO_CHANGED_AND_SAVE_COPY,
+    )
+
+    saved_non_cal: list[Dict[str, Any]] = []
+    monkeypatch.setattr(Message, "save", lambda self, **kw: saved_non_cal.append(kw))
+    non_cal = Message(id="RAW-NON-CAL-ITEM", subject="Original")
+    account._by_id["RAW-NON-CAL-ITEM"] = non_cal
+    e_non_cal = ctx.aliaser.alias_for("RAW-NON-CAL-ITEM", "e")
+    res_non_cal = call(ctx, "update_event", {
+        "event_id": e_non_cal,
+        "subject": "Updated non-CalendarItem",
+    })
+    assert res_non_cal["ok"] is True
+    assert non_cal.subject == "Updated non-CalendarItem"
+    assert saved_non_cal == [{
+        "update_fields": ["subject"],
+        "send_meeting_invitations": SEND_TO_NONE,
+    }]
+
+
+def test_update_event_token_minted_without_notify_rejected_when_notifying(tmp_path):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+    ev = _updatable_event("RAW-MINT-NO-NOTIFY", required=("colleague@example.com",))
+    account._by_id["RAW-MINT-NO-NOTIFY"] = ev
+    alias = ctx.aliaser.alias_for("RAW-MINT-NO-NOTIFY", "e")
+
+    tok_implicit = asyncio.run(
+        mint_token(ctx, SPEC["update_event"], {"event_id": alias, "subject": "Edited"})
+    )
+    res1 = call(ctx, "update_event", {
+        "event_id": alias,
+        "subject": "Edited",
+        "notify_attendees": True,
+        "confirm_token": tok_implicit,
+    })
+    assert res1["ok"] is False
+    assert res1["error"]["code"] == "confirm_invalid"
+    ev.save.assert_not_called()
+
+    tok_false = asyncio.run(
+        mint_token(
+            ctx,
+            SPEC["update_event"],
+            {"event_id": alias, "subject": "Edited", "notify_attendees": False},
+        )
+    )
+    res2 = call(ctx, "update_event", {
+        "event_id": alias,
+        "subject": "Edited",
+        "notify_attendees": True,
+        "confirm_token": tok_false,
+    })
+    assert res2["ok"] is False
+    assert res2["error"]["code"] == "confirm_invalid"
+    ev.save.assert_not_called()
+
+
+def test_event_name_only_attendees_shown_in_preview_and_blocked_with_list(tmp_path):
+    named_only = SimpleNamespace(
+        mailbox=SimpleNamespace(name="Personal List", email_address=None)
+    )
+    blank_only = SimpleNamespace(
+        mailbox=SimpleNamespace(name="   ", email_address="")
+    )
+
+    for mode, overrides in (
+        ("allow", {"ews_recipient_allowlist": "*@example.com"}),
+        ("deny", {"ews_recipient_denylist": "*@blocked.example.org"}),
+    ):
+        account = make_account()
+        ctx_list = make_ctx(
+            tmp_path / f"list-{mode}",
+            account,
+            ews_email="organizer@example.com",
+            send_enabled=True,
+            ews_capability_tier="full",
+            **overrides,
+        )
+        ev_upd = _updatable_event("RAW-UNV-UPD", required=("colleague@example.com",))
+        ev_upd.optional_attendees = [named_only]
+        account._by_id["RAW-UNV-UPD"] = ev_upd
+
+        mtg_can = _cal_standin(
+            id="RAW-UNV-CAN",
+            subject="Sync",
+            is_meeting=True,
+            my_response_type="Organizer",
+            organizer=SimpleNamespace(email_address="organizer@example.com"),
+            required_attendees=[_att_box("colleague@example.com"), named_only],
+        )
+        account._by_id["RAW-UNV-CAN"] = mtg_can
+
+        res_upd = call(ctx_list, "update_event", {
+            "event_id": ctx_list.aliaser.alias_for("RAW-UNV-UPD", "e"),
+            "subject": "Moved",
+            "notify_attendees": True,
+        })
+        res_can = call(ctx_list, "cancel_event", {
+            "event_id": ctx_list.aliaser.alias_for("RAW-UNV-CAN", "e"),
+        })
+
+        for res in (res_upd, res_can):
+            assert res["ok"] is False, mode
+            assert res["error"]["code"] == "recipient_blocked", mode
+            assert "no address" in res["error"]["message"], mode
+            assert "lists" in res["error"]["message"], mode
+            assert "confirm_token" not in res, mode
+        ev_upd.save.assert_not_called()
+        mtg_can.cancel.assert_not_called()
+
+    # With no list configured, preview names them in attendees_without_address and phase 2 runs.
+    account_open = make_account()
+    ctx_open = make_ctx(
+        tmp_path / "open",
+        account_open,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_capability_tier="full",
+    )
+    ev_open = _updatable_event("RAW-OPEN-UPD", required=("colleague@example.com",))
+    ev_open.optional_attendees = [named_only, blank_only]
+    account_open._by_id["RAW-OPEN-UPD"] = ev_open
+    e_open_upd = ctx_open.aliaser.alias_for("RAW-OPEN-UPD", "e")
+    p1_upd = call(ctx_open, "update_event", {
+        "event_id": e_open_upd,
+        "subject": "Moved",
+        "notify_attendees": True,
+    })
+    assert p1_upd["ok"] is True and p1_upd["requires_confirmation"] is True
+    assert p1_upd["preview"]["attendee_count"] == 3
+    assert p1_upd["preview"]["attendees"] == ["colleague@example.com"]
+    assert p1_upd["preview"]["attendees_without_address"] == [
+        "(no name)",
+        "Personal List",
+    ]
+    assert "_unverifiable_recipients" not in p1_upd["preview"]
+    p2_upd = call(ctx_open, "update_event", {
+        "event_id": e_open_upd,
+        "subject": "Moved",
+        "notify_attendees": True,
+        "confirm_token": p1_upd["confirm_token"],
+    })
+    assert p2_upd["ok"] is True
+    ev_open.save.assert_called_once()
+
+    mtg_open = _cal_standin(
+        id="RAW-OPEN-CAN",
+        subject="Sync",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[_att_box("colleague@example.com"), named_only, blank_only],
+    )
+    account_open._by_id["RAW-OPEN-CAN"] = mtg_open
+    e_open_can = ctx_open.aliaser.alias_for("RAW-OPEN-CAN", "e")
+    p1_can = call(ctx_open, "cancel_event", {"event_id": e_open_can})
+    assert p1_can["ok"] is True and p1_can["requires_confirmation"] is True
+    assert p1_can["preview"]["attendees"] == ["colleague@example.com"]
+    assert p1_can["preview"]["attendees_without_address"] == [
+        "(no name)",
+        "Personal List",
+    ]
+    assert "_unverifiable_recipients" not in p1_can["preview"]
+    p2_can = call(ctx_open, "cancel_event", {
+        "event_id": e_open_can,
+        "confirm_token": p1_can["confirm_token"],
+    })
+    assert p2_can["ok"] is True and p2_can["cancelled"] is True
+    mtg_open.cancel.assert_called_once()
+
+
+def test_event_legacy_dn_and_ex_routing_attendees_listed_and_fail_closed_with_list(
+    tmp_path,
+):
+    legacy_dn_addr = "/o=Org/ou=Group/cn=Recipients/cn=user"
+    ex_dn_addr = "/o=Org/ou=Group/cn=Recipients/cn=exuser"
+    legacy_att = SimpleNamespace(
+        mailbox=SimpleNamespace(name="Directory User", email_address=legacy_dn_addr)
+    )
+    ex_att = SimpleNamespace(
+        mailbox=SimpleNamespace(
+            name="Exchange User",
+            email_address=ex_dn_addr,
+            routing_type="EX",
+        )
+    )
+
+    for label, special_att, expected_addr in (
+        ("legacy", legacy_att, legacy_dn_addr),
+        ("ex", ex_att, ex_dn_addr),
+    ):
+        account_open = make_account()
+        ctx_open = make_ctx(
+            tmp_path / f"open-{label}",
+            account_open,
+            ews_email="organizer@example.com",
+            send_enabled=True,
+            ews_capability_tier="full",
+        )
+        ev_upd = _updatable_event("RAW-LDN-UPD", required=("colleague@example.com",))
+        ev_upd.optional_attendees = [special_att]
+        account_open._by_id["RAW-LDN-UPD"] = ev_upd
+        e_upd = ctx_open.aliaser.alias_for("RAW-LDN-UPD", "e")
+
+        p1_upd = call(ctx_open, "update_event", {
+            "event_id": e_upd,
+            "subject": "Moved",
+            "notify_attendees": True,
+        })
+        assert p1_upd["ok"] is True and p1_upd["requires_confirmation"] is True, label
+        assert p1_upd["preview"]["attendees"] == sorted(
+            ["colleague@example.com", expected_addr]
+        ), label
+        assert "attendees_without_address" not in p1_upd["preview"], label
+        p2_upd = call(ctx_open, "update_event", {
+            "event_id": e_upd,
+            "subject": "Moved",
+            "notify_attendees": True,
+            "confirm_token": p1_upd["confirm_token"],
+        })
+        assert p2_upd["ok"] is True, label
+        ev_upd.save.assert_called_once()
+
+        mtg_can = _cal_standin(
+            id="RAW-LDN-CAN",
+            subject="Sync",
+            is_meeting=True,
+            my_response_type="Organizer",
+            organizer=SimpleNamespace(email_address="organizer@example.com"),
+            required_attendees=[_att_box("colleague@example.com"), special_att],
+        )
+        account_open._by_id["RAW-LDN-CAN"] = mtg_can
+        e_can = ctx_open.aliaser.alias_for("RAW-LDN-CAN", "e")
+
+        p1_can = call(ctx_open, "cancel_event", {"event_id": e_can})
+        assert p1_can["ok"] is True and p1_can["requires_confirmation"] is True, label
+        assert p1_can["preview"]["attendees"] == sorted(
+            ["colleague@example.com", expected_addr]
+        ), label
+        assert "attendees_without_address" not in p1_can["preview"], label
+        p2_can = call(ctx_open, "cancel_event", {
+            "event_id": e_can,
+            "confirm_token": p1_can["confirm_token"],
+        })
+        assert p2_can["ok"] is True and p2_can["cancelled"] is True, label
+        mtg_can.cancel.assert_called_once()
+
+        # With a recipient list set, non-SMTP address strings fail closed with validation.
+        account_list = make_account()
+        ctx_list = make_ctx(
+            tmp_path / f"list-{label}",
+            account_list,
+            ews_email="organizer@example.com",
+            send_enabled=True,
+            ews_capability_tier="full",
+            ews_recipient_allowlist="*@example.com",
+        )
+        ev_upd_l = _updatable_event("RAW-LDN-UPD-L", required=("colleague@example.com",))
+        ev_upd_l.optional_attendees = [special_att]
+        account_list._by_id["RAW-LDN-UPD-L"] = ev_upd_l
+
+        mtg_can_l = _cal_standin(
+            id="RAW-LDN-CAN-L",
+            subject="Sync",
+            is_meeting=True,
+            my_response_type="Organizer",
+            organizer=SimpleNamespace(email_address="organizer@example.com"),
+            required_attendees=[_att_box("colleague@example.com"), special_att],
+        )
+        account_list._by_id["RAW-LDN-CAN-L"] = mtg_can_l
+
+        res_upd_l = call(ctx_list, "update_event", {
+            "event_id": ctx_list.aliaser.alias_for("RAW-LDN-UPD-L", "e"),
+            "subject": "Moved",
+            "notify_attendees": True,
+        })
+        res_can_l = call(ctx_list, "cancel_event", {
+            "event_id": ctx_list.aliaser.alias_for("RAW-LDN-CAN-L", "e"),
+        })
+        for res_l in (res_upd_l, res_can_l):
+            assert res_l["ok"] is False, label
+            assert res_l["error"]["code"] == "validation", label
+            assert "confirm_token" not in res_l, label
+        ev_upd_l.save.assert_not_called()
+        mtg_can_l.cancel.assert_not_called()
+
+
+def test_event_name_only_attendee_rename_between_phases_invalidates_token(tmp_path):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_capability_tier="full",
+    )
+
+    ev_upd = _updatable_event("RAW-RENAME-UPD", required=("colleague@example.com",))
+    ev_upd.optional_attendees = [
+        SimpleNamespace(mailbox=SimpleNamespace(name="Group Alpha", email_address=None))
+    ]
+    account._by_id["RAW-RENAME-UPD"] = ev_upd
+    e_upd = ctx.aliaser.alias_for("RAW-RENAME-UPD", "e")
+    kw_upd = {"event_id": e_upd, "subject": "Moved", "notify_attendees": True}
+    p1_upd = call(ctx, "update_event", kw_upd)
+    assert p1_upd["preview"]["attendees_without_address"] == ["Group Alpha"]
+    ev_upd.optional_attendees = [
+        SimpleNamespace(mailbox=SimpleNamespace(name="Group Beta", email_address=None))
+    ]
+    p2_upd = call(ctx, "update_event", {
+        **kw_upd,
+        "confirm_token": p1_upd["confirm_token"],
+    })
+    assert p2_upd["ok"] is False
+    assert p2_upd["error"]["code"] == "confirm_invalid"
+    ev_upd.save.assert_not_called()
+
+    mtg_can = _cal_standin(
+        id="RAW-RENAME-CAN",
+        subject="Sync",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[
+            _att_box("colleague@example.com"),
+            SimpleNamespace(
+                mailbox=SimpleNamespace(name="Group Alpha", email_address=None)
+            ),
+        ],
+    )
+    account._by_id["RAW-RENAME-CAN"] = mtg_can
+    e_can = ctx.aliaser.alias_for("RAW-RENAME-CAN", "e")
+    p1_can = call(ctx, "cancel_event", {"event_id": e_can})
+    assert p1_can["preview"]["attendees_without_address"] == ["Group Alpha"]
+    mtg_can.required_attendees[1] = SimpleNamespace(
+        mailbox=SimpleNamespace(name="Group Beta", email_address=None)
+    )
+    p2_can = call(ctx, "cancel_event", {
+        "event_id": e_can,
+        "confirm_token": p1_can["confirm_token"],
+    })
+    assert p2_can["ok"] is False
+    assert p2_can["error"]["code"] == "confirm_invalid"
+    mtg_can.cancel.assert_not_called()
+
+
+def test_send_draft_recipient_without_address_listed_as_str_and_fails_validation_with_list(
+    tmp_path,
+):
+    no_addr = SimpleNamespace(name="Personal List", email_address=None)
+
+    account_open = make_account()
+    ctx_open = make_ctx(
+        tmp_path / "open",
+        account_open,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_capability_tier="full",
+    )
+    draft_open = make_content_draft(
+        subject="Report",
+        to=("colleague@example.com",),
+        body="See attached",
+    )
+    draft_open.cc_recipients = [no_addr]
+    account_open._by_id["RAW-SD-NOADDR"] = draft_open
+    d_open = ctx_open.aliaser.alias_for("RAW-SD-NOADDR", "d")
+
+    assert set(writes._draft_base_content(draft_open).keys()) == {
+        "subject",
+        "to",
+        "cc",
+        "bcc",
+        "body_text",
+        "_body_html",
+        "attachment_count",
+        "attachments",
+        "_attachments",
+    }
+
+    p1 = call(ctx_open, "send_draft", {"draft_id": d_open})
+    assert p1["ok"] is True and p1["requires_confirmation"] is True
+    assert p1["preview"]["to"] == ["colleague@example.com"]
+    assert p1["preview"]["cc"] == [str(no_addr)]
+    p2 = call(ctx_open, "send_draft", {
+        "draft_id": d_open,
+        "confirm_token": p1["confirm_token"],
+    })
+    assert p2["ok"] is True and p2["sent"] is True
+    draft_open.send.assert_called_once_with(save_copy=True)
+
+    for mode, overrides in (
+        ("allow", {"ews_recipient_allowlist": "*@example.com"}),
+        ("deny", {"ews_recipient_denylist": "*@blocked.example.org"}),
+    ):
+        account_list = make_account()
+        ctx_list = make_ctx(
+            tmp_path / f"list-{mode}",
+            account_list,
+            ews_email="organizer@example.com",
+            send_enabled=True,
+            ews_capability_tier="full",
+            **overrides,
+        )
+        draft_list = make_content_draft(
+            subject="Report",
+            to=("colleague@example.com",),
+            body="See attached",
+        )
+        draft_list.cc_recipients = [no_addr]
+        account_list._by_id["RAW-SD-NOADDR-L"] = draft_list
+        d_list = ctx_list.aliaser.alias_for("RAW-SD-NOADDR-L", "d")
+        res = call(ctx_list, "send_draft", {"draft_id": d_list})
+        assert res["ok"] is False, mode
+        assert res["error"]["code"] == "validation", mode
+        assert "confirm_token" not in res, mode
+        draft_list.send.assert_not_called()
+
+
+def test_update_event_token_binds_stored_start_end_location_target_id_and_scope(
+    tmp_path,
+):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+    )
+
+    # 1. Stored start, end, and location each invalidate the token when changed.
+    for tag, attr, new_val in (
+        ("start", "start", datetime(2026, 11, 20, 9, 30, tzinfo=LOCAL_TZ)),
+        ("end", "end", datetime(2026, 11, 20, 10, 30, tzinfo=LOCAL_TZ)),
+        ("location", "location", "Room Z"),
+    ):
+        ev = _updatable_event(f"RAW-BND-{tag}", required=("colleague@example.com",))
+        account._by_id[ev.id] = ev
+        alias = ctx.aliaser.alias_for(ev.id, "e")
+        kw = {"event_id": alias, "subject": "Moved", "notify_attendees": True}
+        p1 = call(ctx, "update_event", kw)
+        assert p1["ok"] is True, tag
+        setattr(ev, attr, new_val)
+        p2 = call(ctx, "update_event", {**kw, "confirm_token": p1["confirm_token"]})
+        assert p2["ok"] is False, tag
+        assert p2["error"]["code"] == "confirm_invalid", tag
+        ev.save.assert_not_called()
+
+    # 2. Resolved target_id (e.g. recurring_master().id) is bound independently of event_id.
+    occ_target = _updatable_event("RAW-OCC-TID", required=("colleague@example.com",))
+    occ_target.type = "Occurrence"
+    master_target = _updatable_event(
+        "RAW-MASTER-TID-1", required=("colleague@example.com",)
+    )
+    master_target.type = "RecurringMaster"
+    master_target.refresh = MagicMock()
+    occ_target.recurring_master = MagicMock(return_value=master_target)
+    account._by_id["RAW-OCC-TID"] = occ_target
+    e_tid = ctx.aliaser.alias_for("RAW-OCC-TID", "e")
+    kw_tid = {
+        "event_id": e_tid,
+        "subject": "Series title",
+        "scope": "series",
+        "notify_attendees": True,
+    }
+    p1_tid = call(ctx, "update_event", kw_tid)
+    assert p1_tid["ok"] is True
+    master_target.id = "RAW-MASTER-TID-2"
+    p2_tid = call(
+        ctx, "update_event", {**kw_tid, "confirm_token": p1_tid["confirm_token"]}
+    )
+    assert p2_tid["ok"] is False
+    assert p2_tid["error"]["code"] == "confirm_invalid"
+    master_target.save.assert_not_called()
+    occ_target.save.assert_not_called()
+
+    # 3. Token previewed with scope='series' is confirm_invalid without scope
+    #    even when the master shares every other attribute with the occurrence.
+    occ_scope = _updatable_event("RAW-OCC-SCOPE", required=("colleague@example.com",))
+    occ_scope.type = "Occurrence"
+    master_same = _updatable_event("RAW-OCC-SCOPE", required=("colleague@example.com",))
+    master_same.type = "Occurrence"
+    master_same.refresh = MagicMock()
+    occ_scope.recurring_master = MagicMock(return_value=master_same)
+    account._by_id["RAW-OCC-SCOPE"] = occ_scope
+    e_scope = ctx.aliaser.alias_for("RAW-OCC-SCOPE", "e")
+    p1_scope = call(ctx, "update_event", {
+        "event_id": e_scope,
+        "subject": "Renamed",
+        "scope": "series",
+        "notify_attendees": True,
+    })
+    assert p1_scope["ok"] is True
+    p2_no_scope = call(ctx, "update_event", {
+        "event_id": e_scope,
+        "subject": "Renamed",
+        "notify_attendees": True,
+        "confirm_token": p1_scope["confirm_token"],
+    })
+    assert p2_no_scope["ok"] is False
+    assert p2_no_scope["error"]["code"] == "confirm_invalid"
+    occ_scope.save.assert_not_called()
+    master_same.save.assert_not_called()
 
 
 

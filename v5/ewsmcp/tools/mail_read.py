@@ -60,6 +60,7 @@ from ..extract import (
 from ..extract_worker import extract_bytes_in_worker, extract_item_in_worker
 from ..flag_property import ensure_registered as ensure_flag_status_registered
 from ..gateway.client import WELL_KNOWN, paginate
+from ..ids import NullAliaser
 from .base import Context, ToolSpec
 
 ensure_flag_status_registered()
@@ -183,6 +184,7 @@ _EML_MIME_FIELDS = ("id", "subject", "mime_content")
 _IMPORTANCE_TO_EWS = {"high": "High", "normal": "Normal", "low": "Low"}
 GET_MESSAGES_MAX_IDS = 20
 _ALIAS_SHAPE_RE = re.compile(r"^[a-z]{1,2}[0-9]+$")
+_ATT_ALIAS_RE = re.compile(r"^a[0-9]+$")
 _MAX_STEM_UTF8_BYTES = 200
 _WIN_RESERVED_STEMS = frozenset({
     "CON", "PRN", "AUX", "NUL",
@@ -454,8 +456,21 @@ def _from(item: Any) -> str:
     return f"{name} <{email}>" if name and name != email else email
 
 
+def _attachment_id(att: Any) -> Optional[str]:
+    raw = getattr(att, "attachment_id", None)
+    if isinstance(raw, str) and raw:
+        return raw
+    nested = getattr(raw, "id", None) if raw is not None else None
+    if isinstance(nested, str) and nested:
+        return nested
+    direct = getattr(att, "id", None)
+    if isinstance(direct, str) and direct:
+        return direct
+    return None
+
+
 def _pick_attachment_with_index(
-    atts: List[Any], selector: Optional[str]
+    atts: List[Any], selector: Optional[str], aliaser: Any = None
 ) -> Tuple[int, Any]:
     names = [getattr(a, "name", "") or f"attachment-{i}" for i, a in enumerate(atts)]
     safe_names = [_safe_snippet(n) for n in names[:20]]
@@ -471,12 +486,38 @@ def _pick_attachment_with_index(
                 f"The message has {len(atts)} attachments — pick one: {listed}.",
                 MAX_ERROR_MESSAGE_CHARS,
             ),
-            hint="Pass attachment=<name> or attachment=<zero-based index as a string>.",
+            hint=(
+                "Pass attachment=<name>, attachment=<zero-based index as a string>, "
+                "or attachment=<id>."
+            ),
         )
     sel = str(selector).strip()
     for idx, (att, name) in enumerate(zip(atts, names)):
         if name.lower() == sel.lower():
             return idx, att
+    if _ATT_ALIAS_RE.match(sel) and aliaser is not None and not isinstance(
+        aliaser, NullAliaser
+    ):
+        try:
+            resolved_id: Optional[str] = aliaser.resolve(sel)
+        except KeyError:
+            resolved_id = None
+        if resolved_id is not None and resolved_id != sel:
+            for idx, att in enumerate(atts):
+                if _attachment_id(att) == resolved_id:
+                    return idx, att
+            raise ToolError(
+                "not_found",
+                cap_message(
+                    f"Attachment id {_safe_snippet(sel)!r} belongs to another "
+                    f"message's attachment. Available here: {listed}.",
+                    MAX_ERROR_MESSAGE_CHARS,
+                ),
+            )
+    if sel:
+        for idx, att in enumerate(atts):
+            if _attachment_id(att) == sel:
+                return idx, att
     digits = sel[1:] if sel[:1] == "a" and sel[1:].isdigit() else sel
     if digits.isdigit() and int(digits) < len(atts):
         chosen_idx = int(digits)
@@ -490,8 +531,10 @@ def _pick_attachment_with_index(
     )
 
 
-def _pick_attachment(atts: List[Any], selector: Optional[str]) -> Any:
-    return _pick_attachment_with_index(atts, selector)[1]
+def _pick_attachment(
+    atts: List[Any], selector: Optional[str], aliaser: Any = None
+) -> Any:
+    return _pick_attachment_with_index(atts, selector, aliaser=aliaser)[1]
 
 
 def _is_texty(name: str, content_type: Optional[str]) -> bool:
@@ -545,15 +588,7 @@ def _text_cache(ctx: Context) -> AttachmentTextCache:
 def _attachment_cache_key(
     att: Any, raw_msg_id: str, att_idx: int, name: str, size: Any
 ) -> Tuple[Any, Optional[int]]:
-    att_id_obj = getattr(att, "attachment_id", None)
-    if isinstance(att_id_obj, str) and att_id_obj:
-        att_id: Optional[str] = att_id_obj
-    else:
-        att_id = getattr(att_id_obj, "id", None)
-    if not att_id:
-        direct_id = getattr(att, "id", None)
-        if isinstance(direct_id, str) and direct_id:
-            att_id = direct_id
+    att_id = _attachment_id(att)
     size_val = int(size) if isinstance(size, int) and not isinstance(size, bool) else None
     if att_id:
         return (("id", str(att_id)), size_val)
@@ -2333,7 +2368,9 @@ async def _get_attachment(ctx: Context, message_id: str,
         atts = list(getattr(item, "attachments", None) or [])
         if not atts:
             raise ToolError("not_found", "This message has no attachments.")
-        att_idx, att = _pick_attachment_with_index(atts, attachment)
+        att_idx, att = _pick_attachment_with_index(
+            atts, attachment, aliaser=ctx.aliaser
+        )
         name = getattr(att, "name", "") or "attachment"
         content_type = getattr(att, "content_type", None)
         size = getattr(att, "size", None)
@@ -2991,7 +3028,8 @@ TOOLS: List[ToolSpec] = [
             "as replacement chars); enveloped IS encrypted (auto stays info; "
             "content is unrecoverable without the recipient's private key). "
             "When the message has several attachments you MUST pick one via "
-            "`attachment` (a name, or a zero-based index as a string)."
+            "`attachment` (a file name, a zero-based index as a string, or the "
+            "`id` returned by the draft tools)."
         ),
         side_effect_class="read",
         requires_ews=True,
@@ -3000,9 +3038,10 @@ TOOLS: List[ToolSpec] = [
                            "description": "Message id (m-alias or raw)."},
             "attachment": {
                 "type": "string",
-                "description": "Attachment name or zero-based index as a string "
-                               "(e.g. '0'). Optional only when the message has "
-                               "exactly one attachment.",
+                "description": "Attachment file name, zero-based index as a "
+                               "string (e.g. '0'), or `id` returned by the "
+                               "draft tools (e.g. 'a1'). Optional only when "
+                               "the message has exactly one attachment.",
             },
             "mode": {"type": "string", "enum": ["auto", "info", "text", "save"],
                      "default": "auto"},

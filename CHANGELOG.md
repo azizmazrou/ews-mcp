@@ -18,10 +18,86 @@
 ### Changed
 - `cancel_event` in `v5/` now inspects the calendar entry on a single projected fetch per phase and fails closed via an explicit decision table: non-`CalendarItem` items fail with `validation`; `my_response_type="Organizer"` cancels when `is_meeting` is true or any attendee list is non-empty and moves to Deleted Items (`SEND_TO_NONE`, `deleted: true`) when `is_meeting` is false and all attendee lists are empty; `Accept`/`Decline`/`Tentative`/`NoResponseReceived` fail with `validation` pointing to `respond_to_event`; and `Unknown` or missing response types delete only when `is_meeting` is explicitly false and all attendee lists are empty, compare the organizer's SMTP address against the account's own addresses when `is_meeting` is true (ours → cancel, foreign → `validation` pointing to `respond_to_event`, missing/non-SMTP → `validation`), and fail with `validation` when `is_meeting` is missing. Cancellation `attendees` pass through the dispatcher's recipient guard and external-recipient warning; recurring series masters (`type="RecurringMaster"`) are flagged in the preview (`series: true`, `scope: "series"`, warning `note`); and `start`, `end`, `type`, `series`, `action`, `is_meeting`, `attendees`, `subject`, and `message` are bound into the confirmation token (tool count, class, tier, and two-phase confirmation unchanged).
 - Default `v5/` tool surface grows from 33 to **34** tools (**18** at `read`, **29** at `draft`, **34** at `full`; **35** when the semantic tier is enabled, keeping the ≤35 design cap).
+- **Notifying calendar calls in `v5/` now enforce `SEND_ENABLED` at phase one, preview stored
+  attendees on `update_event`, and count toward `EWS_MAX_SENDS_PER_HOUR`.**
+  - `create_event(send_invitations=true)`, `update_event(notify_attendees=true)`, and
+    `cancel_event` on a meeting with attendees are now refused with `kill_switch` at phase one
+    while `SEND_ENABLED=false`, before any token is issued. Silent calendar edits and appointment
+    deletions without attendees are not affected.
+  - `update_event(notify_attendees=true)` now returns a phase-one `preview` with `event_id`,
+    current `subject`, `start`, `end`, `type`, `scope` when given, `attendee_count`, stored
+    `attendees`, and `changes`, showing a new body as a 200-character `body_snippet`.
+  - Stored attendees on `update_event(notify_attendees=true)` are checked at phase one against
+    `EWS_RECIPIENT_ALLOWLIST` and `EWS_RECIPIENT_DENYLIST`, failing with `recipient_blocked` when
+    disallowed and listing external addresses under `warnings`.
+  - `update_event(notify_attendees=true)` binds the event's `subject`, `location`, `start`, `end`,
+    `type`, `attendees`, `notify_attendees`, and every requested change, full `body` included, into
+    `confirm_token`, failing with `confirm_invalid` at phase two if the event changed.
+  - Confirmed invitations, update notices, and meeting cancellations now count toward the
+    in-memory per-process `EWS_MAX_SENDS_PER_HOUR` cap alongside `send_draft`, `respond_to_event`,
+    and `set_oof`.
 
 ### Fixed
 - `v5/README.md`: the Docker example builds the image from `v5/` (run from the repository root as the quick start leaves you, `docker build .` built the legacy 4.0 image), and the development commands say they run from `v5/`. Reported in #164.
 - The HTML-to-text step that the server uses when Exchange returns no plain-text body (message and calendar bodies, out-of-office texts) and for HTML attachments no longer depends on the interpreter's `html.parser`. On Python older than 3.11.14 / 3.12.12 (before that module's fix of October 2025) a body made of thousands of unterminated tags took seconds to minutes to convert; the conversion is now linear and returns the same text on every build. Mail without malformed markup converts as before (900 recorded cases). Outlook-written mail, whose head Exchange returns with a comment that ends inside a `<style>`, no longer gets a stray `<![endif]-->` or its title printed at the top of the text. In general the new converter ends hidden regions where a browser ends them, so text is no longer lost after an unclosed `<head>`, a `<![CDATA[` wrapper, a raw-text element such as `<textarea>` or `<iframe>`, a script containing `<!--<script>`, or style and script elements inside `<svg>` / `<math>`; markup left unterminated at the very end of a body is dropped instead of being shown as text; and the content of `<title>` is never shown. It is a reading aid, not a renderer: the limits are listed in `v5/DESIGN.md`. For HTML attachments a cut is reported only when text was really cut.
+- **`SEND_ENABLED=false` now stops `cancel_event` from sending meeting cancellation notices.**
+  - In the released 4.5 alphas, `SEND_ENABLED` did not stop a confirmed `cancel_event` from
+    sending cancellation notices with the caller's `message` to attendees.
+  - `ToolSpec.sends_mail` via `notifies` now refuses `cancel_event` with `kill_switch` at phase
+    one when the previewed `action` is `"cancel"`, backed by a second check in `_cancel_event`.
+    Appointments without attendees where `action` is `"delete"` still move to Deleted Items.
+- **`update_event(notify_attendees=true)` now checks stored attendees against the recipient allow
+  and deny lists.**
+  - In the released 4.5 alphas, update notices went to the attendees stored on the event without
+    checking `EWS_RECIPIENT_ALLOWLIST` or `EWS_RECIPIENT_DENYLIST` and without external-recipient
+    `warnings`.
+  - Phase one now fetches required, optional, and resource attendees from the event, refuses
+    disallowed addresses with `recipient_blocked` before saving, and lists external recipients in
+    `warnings`.
+- **Invitations, update notices, and meeting cancellations are now counted by
+  `EWS_MAX_SENDS_PER_HOUR`.**
+  - In the released 4.5 alphas, invitations from `create_event`, update notices from
+    `update_event`, and cancellations from `cancel_event` were not counted by the hourly cap.
+  - Every confirmed call that sends mail now shares the per-process hourly window and fails with
+    `rate_capped` and `retry_after_s` of at least `1` when the hour is full.
+- **A confirmed sending call refused with `rate_capped` now keeps its `confirm_token`.**
+  - In the released 4.5 alphas, phase two consumed `confirm_token` before checking
+    `EWS_MAX_SENDS_PER_HOUR`, spending the token of the refused call.
+  - Phase two now verifies the token, rejects spent tokens with `confirm_invalid`, reserves the
+    send-cap slot, and consumes the token last, releasing the slot if a concurrent call spent the
+    token first. The same `confirm_token` works once the hour has room if it has not expired.
+  - Spent-token records are kept `5` s past expiry via `CONSUMED_GRACE_SECONDS` so a used token
+    stays refused through the end of its lifetime.
+- **`get_server_status`, `waiting_on`, and `find_similar` now answer while the circuit breaker is
+  open.**
+  - In the released 4.5 alphas, an open circuit breaker refused every tool with
+    `upstream_unavailable`, `get_server_status` included.
+  - The breaker gate now refuses only tools with `requires_ews=true`. While open,
+    `get_server_status.connection` adds `circuit_open: true` and `retry_after_s`, and omits both
+    keys otherwise.
+- **Attachment `a`-alias ids from the draft tools now select the right attachment in
+  `get_attachment`.**
+  - The released 4.5 alphas read `a<digits>` as a zero-based index, and their draft tools
+    returned no attachment ids. With the `a` ids the draft tools return on `main`,
+    `get_attachment` resolves the id to the attachment it was issued for.
+  - `get_attachment` now resolves `attachment` in order: case-insensitive file name, minted
+    `a<digits>` alias resolved to the attachment it was issued for, raw Exchange attachment `id`,
+    and zero-based digit index. A minted `a<digits>` alias from another message fails with
+    `not_found` instead of being read as an index, while unminted `a<digits>` still reads as a
+    zero-based index.
+- **Stored attendees without an address on `update_event(notify_attendees=true)` and
+  `cancel_event` are now shown in `attendees_without_address` and refused with
+  `recipient_blocked` when a recipient list is configured.**
+  - In the released 4.5 alphas neither tool listed or checked the attendees stored on the event.
+  - Phase-one previews on meetings with attendees now list stored attendees that have only a
+    display name, such as personal distribution lists, under `attendees_without_address` next to
+    `attendees`.
+  - When `EWS_RECIPIENT_ALLOWLIST` or `EWS_RECIPIENT_DENYLIST` is set, phase one refuses the call
+    with `recipient_blocked`; with neither list set, the call proceeds.
+- **A recipient argument (`to`, `cc`, `bcc`, `attendees`) that is neither a string nor a list of
+  strings is refused with `validation`.**
+  - Checked by the dispatcher before any Exchange call, whether or not a recipient allow or deny
+    list is set.
 
 ## [4.5.0a3] - 2026-11-16
 

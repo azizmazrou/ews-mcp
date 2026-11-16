@@ -6,12 +6,15 @@ run *before* any handler here executes. Specs below only DECLARE
 ``side_effect_class`` and ``confirm``; handlers receive raw EWS ids and
 never see ``confirm_token``.
 
-The single exception (documented inline): ``create_event``/``update_event``
-are class "write" for *tier* purposes (a no-invite event is a reversible
-calendar write), but invitations/notifications LEAVE the org. The
-dispatcher's kill-switch only covers class "send", so those two handlers
-re-check ``settings.send_enabled`` themselves when (and only when) the call
-would notify attendees.
+``create_event`` and ``update_event`` are class "write" for *tier* purposes
+(a no-invite event is a reversible calendar write) and ``cancel_event`` is
+class "destructive" (a plain appointment without attendees only moves to
+Deleted Items), while invitations, update notifications and meeting
+cancellations LEAVE the mailbox. Those three specs declare ``notifies`` so
+the dispatcher enforces the kill-switch, recipient guards, two-phase
+confirmation and hourly send cap on their notifying paths; the three
+handlers also keep a direct ``settings.send_enabled`` check as a second
+line of defence.
 
 exchangelib 5.0.3 pins honoured here (verified against the installed lib):
 - ``Item.delete()`` takes NO disposal kwarg — it IS HardDelete. Reversible
@@ -82,7 +85,13 @@ from ..dto import fmt_dt
 from ..errors import ToolError, map_exception
 from ..flag_property import ensure_registered as ensure_flag_status_registered
 from ..htmlsafe import HTMLValidationError, inspect_draft_links, sanitise_html
-from .base import Context, ToolSpec, _normalise_recipient, preview_content_hash
+from .base import (
+    UNVERIFIABLE_RECIPIENTS_KEY,
+    Context,
+    ToolSpec,
+    _normalise_recipient,
+    preview_content_hash,
+)
 
 ensure_flag_status_registered()
 
@@ -1504,11 +1513,8 @@ async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
                         reminder_minutes: Optional[int] = None,
                         recurrence: Optional[Dict[str, Any]] = None,
                         send_invitations: bool = False) -> Dict[str, Any]:
-    # The ONE handler-side safety check in this pack, by design: this tool is
-    # class "write" so a no-invite event stays available at draft tier, but
-    # the dispatcher kill-switch only covers class "send". Invitations leave
-    # the org, so the same switch must hold here. (Confirm is already gated
-    # by the dispatcher via confirm=lambda kw: send_invitations.)
+    # Second line of defence: the dispatcher already enforces SEND_ENABLED
+    # via spec.notifies before reaching this handler.
     if send_invitations and not ctx.settings.send_enabled:
         raise ToolError(
             "kill_switch",
@@ -1565,17 +1571,250 @@ async def _create_event(ctx: Context, *, subject: str, start: str, end: str,
     return result
 
 
-async def _update_event(ctx: Context, *, event_id: str,
-                        subject: Optional[str] = None,
-                        start: Optional[str] = None,
-                        end: Optional[str] = None,
-                        location: Optional[str] = None,
-                        body: Optional[str] = None,
-                        reminder_minutes: Optional[int] = None,
-                        scope: Optional[str] = None,
-                        notify_attendees: bool = False) -> Dict[str, Any]:
-    # Same documented exception as create_event: write-class for tier, but
-    # notifications leave the org → the send kill-switch applies.
+_UPDATE_EVENT_TOP_KEYS = frozenset({
+    "event_id", "subject", "start", "end", "location",
+    "body", "reminder_minutes", "scope", "notify_attendees",
+})
+
+
+def _fetch_update_target(
+    ctx: Context,
+    account: Any,
+    raw_id: str,
+    *,
+    scope: Optional[str],
+    start_dt: Optional[datetime],
+    end_dt: Optional[datetime],
+) -> Any:
+    item = _fetch_one(account, raw_id)
+    kind = getattr(item, "type", None)
+    if scope == "series":
+        if kind in _OCCURRENCE_TYPES:
+            item = item.recurring_master()
+            item.refresh()
+        elif kind != _SERIES_TYPE:
+            raise ToolError(
+                "validation",
+                "this event is not part of a series",
+                hint="Omit scope to update a single event.",
+            )
+        # A master's start and end are those of its first occurrence.
+        if isinstance(item.start, datetime):
+            first_day: Optional[date] = item.start.astimezone(
+                ZoneInfo(ctx.settings.ews_tz)
+            ).date()
+        elif isinstance(item.start, date):
+            first_day = date(item.start.year, item.start.month, item.start.day)
+        else:
+            first_day = None
+        for value, field in ((start_dt, "start"), (end_dt, "end")):
+            if (
+                first_day is not None
+                and value is not None
+                and value.date() != first_day
+            ):
+                raise ToolError(
+                    "validation",
+                    f"{field} must be on the series' first date, "
+                    f"{first_day.isoformat()}, to change the time of all "
+                    "occurrences",
+                    hint="get_event shows it as recurrence.first_date.",
+                )
+    elif kind == _SERIES_TYPE:
+        raise ToolError(
+            "validation",
+            "this id is the whole series",
+            hint="Pass scope='series', or an occurrence id from list_events "
+                 "to change a single occurrence.",
+        )
+    return item
+
+
+def _build_update_event_content(
+    ctx: Context,
+    item: Any,
+    *,
+    event_handle: str,
+    raw_id: str,
+    subject: Optional[str],
+    start_dt: Optional[datetime],
+    end_dt: Optional[datetime],
+    location: Optional[str],
+    body: Optional[str],
+    reminder_minutes: Optional[int],
+    scope: Optional[str],
+    notify_attendees: bool,
+) -> Dict[str, Any]:
+    attendee_objs: List[Any] = []
+    for attr in ("required_attendees", "optional_attendees", "resources"):
+        raw_list = getattr(item, attr, None)
+        if isinstance(raw_list, (list, tuple)):
+            attendee_objs.extend(raw_list)
+    attendees, without_address = _extract_attendees(attendee_objs)
+    tz = ctx.settings.ews_tz
+
+    changes: Dict[str, Any] = {}
+    if subject is not None:
+        changes["subject"] = subject
+    if start_dt is not None:
+        changes["start"] = fmt_dt(start_dt, tz)
+    if end_dt is not None:
+        changes["end"] = fmt_dt(end_dt, tz)
+    if location is not None:
+        changes["location"] = location
+    if body is not None:
+        changes["body_snippet"] = body[:200]
+    if reminder_minutes is not None:
+        changes["reminder_minutes"] = reminder_minutes
+
+    raw_subject = getattr(item, "subject", None)
+    cur_subject = raw_subject if isinstance(raw_subject, str) else ""
+    raw_loc = getattr(item, "location", None)
+    cur_location = raw_loc if isinstance(raw_loc, str) else ""
+    raw_type = getattr(item, "type", None)
+    item_type = (
+        raw_type.strip()
+        if isinstance(raw_type, str) and raw_type.strip()
+        else None
+    )
+    raw_start = getattr(item, "start", None)
+    raw_end = getattr(item, "end", None)
+    raw_target_id = getattr(item, "id", None)
+    target_id = (
+        raw_target_id
+        if isinstance(raw_target_id, str) and raw_target_id
+        else raw_id
+    )
+
+    content: Dict[str, Any] = {
+        "event_id": event_handle,
+        "subject": cur_subject,
+        "attendee_count": len(attendee_objs),
+        "attendees": attendees,
+        "changes": changes,
+    }
+    if without_address:
+        content["attendees_without_address"] = without_address
+        content[UNVERIFIABLE_RECIPIENTS_KEY] = len(without_address)
+    for dt_key, raw_dt in (("start", raw_start), ("end", raw_end)):
+        if isinstance(raw_dt, (datetime, date)):
+            formatted = fmt_dt(raw_dt, tz)
+            if formatted is not None:
+                content[dt_key] = formatted
+    if item_type is not None:
+        content["type"] = item_type
+    if scope is not None:
+        content["scope"] = scope
+    content["_attachments"] = [{
+        "op": "update_event",
+        "event_id": raw_id,
+        "target_id": target_id,
+        "scope": scope or "",
+        "notify_attendees": bool(notify_attendees),
+        "type": item_type,
+        "subject": cur_subject,
+        "location": cur_location,
+        "start": _bound_dt(raw_start),
+        "end": _bound_dt(raw_end),
+        "attendee_count": len(attendee_objs),
+        "attendees": sorted(_attendee_key(a) for a in attendee_objs),
+        "changes": {
+            "subject": subject,
+            "start": _bound_dt(start_dt),
+            "end": _bound_dt(end_dt),
+            "location": location,
+            "body": body,
+            "reminder_minutes": reminder_minutes,
+        },
+    }]
+    return content
+
+
+async def _update_event_preview(
+    ctx: Context, kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
+    unknown = sorted(str(k) for k in kwargs if k not in _UPDATE_EVENT_TOP_KEYS)
+    if unknown:
+        raise ToolError(
+            "validation",
+            f"update_event: unknown argument(s): {', '.join(unknown)}",
+            hint="Check the argument names and types against the tool schema.",
+        )
+    event_id = kwargs.get("event_id")
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise ToolError("validation", "event_id is required")
+    for str_key in ("subject", "start", "end", "location", "body"):
+        val = kwargs.get(str_key)
+        if val is not None and not isinstance(val, str):
+            raise ToolError("validation", f"{str_key} must be a string")
+    raw_notify = kwargs.get("notify_attendees", False)
+    if raw_notify is not None and not isinstance(raw_notify, bool):
+        raise ToolError("validation", "notify_attendees must be a boolean")
+    notify_attendees = bool(raw_notify)
+    subject = kwargs.get("subject")
+    start = kwargs.get("start")
+    end = kwargs.get("end")
+    location = kwargs.get("location")
+    body = kwargs.get("body")
+    reminder_minutes = kwargs.get("reminder_minutes")
+    scope = kwargs.get("scope")
+    if all(v is None for v in (subject, start, end, location, body, reminder_minutes)):
+        raise ToolError(
+            "validation",
+            "nothing to update: pass subject/start/end/location/body/reminder_minutes",
+        )
+    if reminder_minutes is not None:
+        _check_reminder(reminder_minutes, -1)
+    if scope not in (None, "occurrence", "series"):
+        raise ToolError("validation", "scope must be 'occurrence' or 'series'")
+    start_dt = parse_when(start, "start", ctx.settings.ews_tz) if start else None
+    end_dt = parse_when(end, "end", ctx.settings.ews_tz) if end else None
+    if scope == "series":
+        start_dt = _series_time(start_dt, ctx.settings.ews_tz) if start_dt else None
+        end_dt = _series_time(end_dt, ctx.settings.ews_tz) if end_dt else None
+    try:
+        raw_id = ctx.aliaser.resolve(event_id)
+    except KeyError as exc:
+        raise ToolError("validation", str(exc.args[0] if exc.args else exc)) from None
+
+    def work(account: Any) -> Dict[str, Any]:
+        item = _fetch_update_target(
+            ctx, account, raw_id, scope=scope, start_dt=start_dt, end_dt=end_dt
+        )
+        return _build_update_event_content(
+            ctx,
+            item,
+            event_handle=event_id,
+            raw_id=raw_id,
+            subject=subject,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            location=location,
+            body=body,
+            reminder_minutes=reminder_minutes,
+            scope=scope,
+            notify_attendees=notify_attendees,
+        )
+
+    return await ctx.gateway.call(work)
+
+
+async def _update_event(
+    ctx: Context,
+    *,
+    event_id: str,
+    subject: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    location: Optional[str] = None,
+    body: Optional[str] = None,
+    reminder_minutes: Optional[int] = None,
+    scope: Optional[str] = None,
+    notify_attendees: bool = False,
+    _verified_content_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    # Second line of defence: the dispatcher already enforces SEND_ENABLED
+    # via spec.notifies before reaching this handler.
     if notify_attendees and not ctx.settings.send_enabled:
         raise ToolError(
             "kill_switch",
@@ -1595,38 +1834,41 @@ async def _update_event(ctx: Context, *, event_id: str,
     if scope == "series":
         start_dt = _series_time(start_dt, ctx.settings.ews_tz) if start_dt else None
         end_dt = _series_time(end_dt, ctx.settings.ews_tz) if end_dt else None
+    if notify_attendees and (
+        not isinstance(_verified_content_hash, str) or not _verified_content_hash
+    ):
+        raise ToolError(
+            "confirm_invalid",
+            "confirm_token rejected (stale): the calendar entry changed after preview",
+            hint=_STALE_EVENT_HINT,
+        )
 
     def work(account: Any) -> Dict[str, Any]:
-        item = _fetch_one(account, event_id)
-        kind = getattr(item, "type", None)
-        if scope == "series":
-            if kind in _OCCURRENCE_TYPES:
-                item = item.recurring_master()
-                item.refresh()
-            elif kind != _SERIES_TYPE:
-                raise ToolError("validation", "this event is not part of a series",
-                                hint="Omit scope to update a single event.")
-            # A master's start and end are those of its first occurrence.
-            if isinstance(item.start, datetime):
-                first_day: Optional[date] = item.start.astimezone(
-                    ZoneInfo(ctx.settings.ews_tz)
-                ).date()
-            elif isinstance(item.start, date):
-                first_day = date(item.start.year, item.start.month, item.start.day)
-            else:
-                first_day = None
-            for value, field in ((start_dt, "start"), (end_dt, "end")):
-                if first_day is not None and value is not None and value.date() != first_day:
-                    raise ToolError(
-                        "validation",
-                        f"{field} must be on the series' first date, {first_day.isoformat()}, "
-                        "to change the time of all occurrences",
-                        hint="get_event shows it as recurrence.first_date.",
-                    )
-        elif kind == _SERIES_TYPE:
-            raise ToolError("validation", "this id is the whole series",
-                            hint="Pass scope='series', or an occurrence id from list_events "
-                                 "to change a single occurrence.")
+        item = _fetch_update_target(
+            ctx, account, event_id, scope=scope, start_dt=start_dt, end_dt=end_dt
+        )
+        if notify_attendees:
+            current = _build_update_event_content(
+                ctx,
+                item,
+                event_handle=event_id,
+                raw_id=event_id,
+                subject=subject,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                location=location,
+                body=body,
+                reminder_minutes=reminder_minutes,
+                scope=scope,
+                notify_attendees=bool(notify_attendees),
+            )
+            if preview_content_hash(current) != _verified_content_hash:
+                raise ToolError(
+                    "confirm_invalid",
+                    "confirm_token rejected (stale): the calendar entry changed "
+                    "after preview",
+                    hint=_STALE_EVENT_HINT,
+                )
         changed: List[str] = []
         for value, field in ((subject, "subject"), (start_dt, "start"),
                              (end_dt, "end"), (location, "location")):
@@ -2036,12 +2278,15 @@ def _organizer_smtp(organizer: Any) -> Optional[str]:
     return _normalise_recipient(raw_addr)
 
 
-def _attendee_addresses(attendees: List[Any]) -> List[str]:
+def _extract_attendees(attendees: List[Any]) -> tuple[List[str], List[str]]:
     out: List[str] = []
+    without_address: List[str] = []
     for att in attendees:
         if isinstance(att, str):
             if att.strip():
                 out.append(att.strip())
+            else:
+                without_address.append("(no name)")
             continue
         mb = getattr(att, "mailbox", None)
         addr = getattr(mb, "email_address", None) if mb is not None else None
@@ -2049,25 +2294,35 @@ def _attendee_addresses(attendees: List[Any]) -> List[str]:
             addr = getattr(att, "email_address", None)
         if isinstance(addr, str) and addr.strip():
             out.append(addr.strip())
-    return sorted(out)
+            continue
+        name = getattr(mb, "name", None) if mb is not None else None
+        if not isinstance(name, str) or not name.strip():
+            name = getattr(att, "name", None)
+        label = (
+            name.strip()
+            if isinstance(name, str) and name.strip()
+            else "(no name)"
+        )
+        without_address.append(label)
+    return sorted(out), sorted(without_address)
+
+
+def _attendee_addresses(attendees: List[Any]) -> List[str]:
+    return _extract_attendees(attendees)[0]
 
 
 def _attendee_key(att: Any) -> str:
     if isinstance(att, str):
         return att.strip().lower()
     mb = getattr(att, "mailbox", None)
-    addr = (
-        getattr(mb, "email_address", None)
-        if mb is not None
-        else getattr(att, "email_address", None)
-    )
+    addr = getattr(mb, "email_address", None) if mb is not None else None
+    if not isinstance(addr, str) or not addr.strip():
+        addr = getattr(att, "email_address", None)
     if isinstance(addr, str) and addr.strip():
         return addr.strip().lower()
-    name = (
-        getattr(mb, "name", None)
-        if mb is not None
-        else getattr(att, "name", None)
-    )
+    name = getattr(mb, "name", None) if mb is not None else None
+    if not isinstance(name, str) or not name.strip():
+        name = getattr(att, "name", None)
     return name.strip().lower() if isinstance(name, str) and name.strip() else ""
 
 
@@ -2181,7 +2436,11 @@ def _inspect_cancel_target(
         "attendee_count": attendee_count,
     }
     if action == "cancel":
-        content["attendees"] = _attendee_addresses(attendee_objs)
+        attendees, without_address = _extract_attendees(attendee_objs)
+        content["attendees"] = attendees
+        if without_address:
+            content["attendees_without_address"] = without_address
+            content[UNVERIFIABLE_RECIPIENTS_KEY] = len(without_address)
     tz = ctx.settings.ews_tz
     for dt_key, raw_dt in (("start", raw_start), ("end", raw_end)):
         if isinstance(raw_dt, (datetime, date)):
@@ -2216,6 +2475,21 @@ def _inspect_cancel_target(
         "message": message or "",
     }]
     return action, content
+
+
+_CANCEL_KILL_SWITCH_HINT = (
+    "Cancel the meeting from Outlook, or have the operator flip SEND_ENABLED."
+)
+
+
+def _require_cancel_send_enabled(ctx: Context) -> None:
+    if not ctx.settings.send_enabled:
+        raise ToolError(
+            "kill_switch",
+            "cancel_event is blocked: cancelling this meeting notifies its "
+            "attendees and SEND_ENABLED=false on this server.",
+            hint=_CANCEL_KILL_SWITCH_HINT,
+        )
 
 
 async def _cancel_event_preview(
@@ -2302,6 +2576,7 @@ async def _cancel_event(
         if action == "delete":
             item.move_to_trash(send_meeting_cancellations=SEND_TO_NONE)
             return {"deleted": True}
+        _require_cancel_send_enabled(ctx)
         kwargs = {"new_body": message} if message else {}
         item.cancel(**kwargs)
         return {"cancelled": True}
@@ -2569,8 +2844,9 @@ TOOLS: List[ToolSpec] = [
             "Default send_invitations=false saves it like a draft WITHOUT emailing "
             "attendees (no confirm needed): they stay on the event, and the organizer "
             "can send it from Outlook. With send_invitations=true, invitations leave "
-            "the org: two-phase confirm + send kill-switch apply. Without "
-            "reminder_minutes the event has no reminder."
+            "the mailbox: SEND_ENABLED=true (checked at phase one), recipient "
+            "allow/denylists, two-phase confirm, and the hourly send cap apply. "
+            "Without reminder_minutes the event has no reminder."
         ),
         side_effect_class="write",  # tier: draft; invite path confirm-gated below
         input_schema=_obj({
@@ -2584,6 +2860,7 @@ TOOLS: List[ToolSpec] = [
         }, required=["subject", "start", "end"]),
         handler=_create_event,
         confirm=lambda kw: bool(kw.get("send_invitations")),
+        notifies=lambda kw, _content: bool(kw.get("send_invitations")),
     ),
     ToolSpec(
         name="update_event",
@@ -2592,8 +2869,9 @@ TOOLS: List[ToolSpec] = [
             "from list_events changes that occurrence only; scope='series' changes "
             "the whole series and overwrites those fields on occurrences changed "
             "individually before. Default notify_attendees=false is a silent metadata "
-            "edit; true notifies changed attendees → two-phase confirm + send "
-            "kill-switch apply."
+            "edit. With notify_attendees=true, SEND_ENABLED=true, recipient "
+            "allow/denylists on the event's stored attendees, a content-bound "
+            "two-phase preview, and the hourly send cap apply."
         ),
         side_effect_class="write",
         input_schema=_obj({
@@ -2609,6 +2887,8 @@ TOOLS: List[ToolSpec] = [
         }, required=["event_id"]),
         handler=_update_event,
         confirm=lambda kw: bool(kw.get("notify_attendees")),
+        preview=_update_event_preview,
+        notifies=lambda kw, _content: bool(kw.get("notify_attendees")),
     ),
     ToolSpec(
         name="send_draft",
@@ -2649,12 +2929,14 @@ TOOLS: List[ToolSpec] = [
             "Cancel a meeting you organize (sends cancellations to attendees, "
             "checked by the recipient guard and external-recipient warning) "
             "or move a plain non-meeting appointment without attendees to "
-            "Deleted Items (nothing sent). Fails closed on non-calendar items "
-            "and meetings organized by someone else or with an unverified "
-            "organizer — use respond_to_event instead. Destructive, two-phase "
-            "confirmed; the preview states action ('cancel' or 'delete'), "
-            "attendee_count, start, end, and whole-series status, and binds "
-            "them into the token."
+            "Deleted Items (nothing sent). A cancellation that notifies "
+            "attendees requires SEND_ENABLED=true and counts toward the "
+            "hourly send cap. Fails closed on non-calendar items and "
+            "meetings organized by someone else or with an unverified "
+            "organizer — use respond_to_event instead. Destructive, "
+            "two-phase confirmed; the preview states action ('cancel' or "
+            "'delete'), attendee_count, start, end, and whole-series "
+            "status, and binds them into the token."
         ),
         side_effect_class="destructive",
         input_schema=_obj({"event_id": _STR, "message": _STR},
@@ -2662,6 +2944,10 @@ TOOLS: List[ToolSpec] = [
         handler=_cancel_event,
         confirm=True,
         preview=_cancel_event_preview,
+        notifies=lambda _kw, content: (
+            content is not None and content.get("action") == "cancel"
+        ),
+        kill_switch_hint=_CANCEL_KILL_SWITCH_HINT,
     ),
     ToolSpec(
         name="delete_messages",

@@ -140,12 +140,12 @@ Rebuild the conversation containing the given message id: Inbox and Sent are mer
 
 #### `get_attachment` — read (min tier: read)
 
-Read one attachment of a message. mode='info' → metadata only; 'text' → extracted text in memory (up to 20000 chars from `offset`, with `total_chars`, `next_offset` when more follows, `extracted_from`, and `pages`/`slides`/`sheets` count) for PDF (.pdf, requires ews-mcp[extract]), Word (.docx/.docm), Excel (.xlsx/.xlsm), PowerPoint (.pptx/.pptm), RFC-822 (.eml), attached Exchange messages, HTML (.html/.htm), and plain text (.txt/.csv/.md/.log/.json or text/*; .msg is not supported); 'save' → write the bytes exclusively under DATA_DIR/attachments (adding -2, -3, … rather than overwriting) and return saved_path; 'auto' (default) → text for every supported document/text type, otherwise info plus a hint. An smime.p7m attachment (application/pkcs7-mime) is sniffed and reported as `smime_type: signed|enveloped` — signed is NOT encrypted (auto decodes as text, cert/signature bytes show as replacement chars); enveloped IS encrypted (auto stays info; content is unrecoverable without the recipient's private key). When the message has several attachments you MUST pick one via `attachment` (a name, or a zero-based index as a string).
+Read one attachment of a message. mode='info' → metadata only; 'text' → extracted text in memory (up to 20000 chars from `offset`, with `total_chars`, `next_offset` when more follows, `extracted_from`, and `pages`/`slides`/`sheets` count) for PDF (.pdf, requires ews-mcp[extract]), Word (.docx/.docm), Excel (.xlsx/.xlsm), PowerPoint (.pptx/.pptm), RFC-822 (.eml), attached Exchange messages, HTML (.html/.htm), and plain text (.txt/.csv/.md/.log/.json or text/*; .msg is not supported); 'save' → write the bytes exclusively under DATA_DIR/attachments (adding -2, -3, … rather than overwriting) and return saved_path; 'auto' (default) → text for every supported document/text type, otherwise info plus a hint. An smime.p7m attachment (application/pkcs7-mime) is sniffed and reported as `smime_type: signed|enveloped` — signed is NOT encrypted (auto decodes as text, cert/signature bytes show as replacement chars); enveloped IS encrypted (auto stays info; content is unrecoverable without the recipient's private key). When the message has several attachments you MUST pick one via `attachment` (a file name, a zero-based index as a string, or the `id` returned by the draft tools).
 
 | parameter | type | required | description |
 |---|---|---|---|
 | `message_id` | string | yes | Message id (m-alias or raw). |
-| `attachment` | string | no | Attachment name or zero-based index as a string (e.g. '0'). Optional only when the message has exactly one attachment. |
+| `attachment` | string | no | Attachment file name, zero-based index as a string (e.g. '0'), or `id` returned by the draft tools (e.g. 'a1'). Optional only when the message has exactly one attachment. |
 | `mode` | string | no | (one of: `auto`, `info`, `text`, `save`; default `auto`) |
 | `offset` | integer | no | Character offset for reading extracted text in parts (pass the returned next_offset for the next chunk). (default `0`) |
 
@@ -331,7 +331,7 @@ Move up to 50 messages to a folder (id, f:alias or path). Message ids are re-bou
 
 #### `create_event` — write (min tier: draft)
 
-Create a calendar event or, with recurrence, a recurring series. Default send_invitations=false saves it like a draft WITHOUT emailing attendees (no confirm needed): they stay on the event, and the organizer can send it from Outlook. With send_invitations=true, invitations leave the org: two-phase confirm + send kill-switch apply. Without reminder_minutes the event has no reminder.
+Create a calendar event or, with recurrence, a recurring series. Default send_invitations=false saves it like a draft WITHOUT emailing attendees (no confirm needed): they stay on the event, and the organizer can send it from Outlook. With send_invitations=true, invitations leave the mailbox: SEND_ENABLED=true (checked at phase one), recipient allow/denylists, two-phase confirm, and the hourly send cap apply. Without reminder_minutes the event has no reminder.
 
 > Two-phase confirm for some argument combinations: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 
@@ -349,7 +349,7 @@ Create a calendar event or, with recurrence, a recurring series. Default send_in
 
 #### `update_event` — write (min tier: draft)
 
-Update event fields (subject/start/end/location/body/reminder). An occurrence id from list_events changes that occurrence only; scope='series' changes the whole series and overwrites those fields on occurrences changed individually before. Default notify_attendees=false is a silent metadata edit; true notifies changed attendees → two-phase confirm + send kill-switch apply.
+Update event fields (subject/start/end/location/body/reminder). An occurrence id from list_events changes that occurrence only; scope='series' changes the whole series and overwrites those fields on occurrences changed individually before. Default notify_attendees=false is a silent metadata edit. With notify_attendees=true, SEND_ENABLED=true, recipient allow/denylists on the event's stored attendees, a content-bound two-phase preview, and the hourly send cap apply.
 
 > Two-phase confirm for some argument combinations: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 
@@ -390,7 +390,7 @@ Accept/tentative/decline a meeting — this SENDS a response to the organizer, s
 
 #### `cancel_event` — destructive (min tier: full)
 
-Cancel a meeting you organize (sends cancellations to attendees, checked by the recipient guard and external-recipient warning) or move a plain non-meeting appointment without attendees to Deleted Items (nothing sent). Fails closed on non-calendar items and meetings organized by someone else or with an unverified organizer — use respond_to_event instead. Destructive, two-phase confirmed; the preview states action ('cancel' or 'delete'), attendee_count, start, end, and whole-series status, and binds them into the token.
+Cancel a meeting you organize (sends cancellations to attendees, checked by the recipient guard and external-recipient warning) or move a plain non-meeting appointment without attendees to Deleted Items (nothing sent). A cancellation that notifies attendees requires SEND_ENABLED=true and counts toward the hourly send cap. Fails closed on non-calendar items and meetings organized by someone else or with an unverified organizer — use respond_to_event instead. Destructive, two-phase confirmed; the preview states action ('cancel' or 'delete'), attendee_count, start, end, and whole-series status, and binds them into the token.
 
 > Two-phase confirm: the first call returns a preview + `confirm_token`; repeat the call with the token to execute.
 

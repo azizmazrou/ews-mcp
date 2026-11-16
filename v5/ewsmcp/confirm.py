@@ -32,10 +32,20 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 DEFAULT_TTL_SECONDS = 600
+# verify_token checks integer seconds (exp < int(now)), so keep spent-token
+# records for a few seconds past integer expiry before pruning.
+CONSUMED_GRACE_SECONDS = 5
 
 # sig -> expiry_ts of tokens already spent on a successful phase-2.
 _CONSUMED: Dict[str, float] = {}
 _CONSUMED_LOCK = threading.Lock()
+
+
+def token_consumed(token: str) -> bool:
+    """Return True when ``token`` has already been spent (read-only)."""
+    sig = token.rsplit(".", 1)[-1]
+    with _CONSUMED_LOCK:
+        return sig in _CONSUMED
 
 
 def consume_token(token: str) -> bool:
@@ -53,7 +63,9 @@ def consume_token(token: str) -> bool:
         pass
     now = time.time()
     with _CONSUMED_LOCK:
-        for stale in [s for s, exp in _CONSUMED.items() if exp < now]:
+        for stale in [
+            s for s, exp in _CONSUMED.items() if exp + CONSUMED_GRACE_SECONDS < now
+        ]:
             del _CONSUMED[stale]
         if sig in _CONSUMED:
             return False

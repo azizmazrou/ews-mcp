@@ -17,7 +17,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
-from ..confirm import consume_token, content_hash, make_token, verify_token
+from ..confirm import (
+    consume_token,
+    content_hash,
+    make_token,
+    token_consumed,
+    verify_token,
+)
 from ..errors import AUTH_FAILED_HINT, ToolError, map_exception
 
 TIER_RANK = {"read": 0, "draft": 1, "full": 2}
@@ -27,6 +33,7 @@ ID_KEYS = frozenset({
 })
 ID_LIST_KEYS = frozenset({"ids"})
 RECIPIENT_KEYS = ("to", "cc", "bcc", "attendees")
+UNVERIFIABLE_RECIPIENTS_KEY = "_unverifiable_recipients"
 
 CONFIRM_TOKEN_PROPERTY = {
     "type": "string",
@@ -65,10 +72,23 @@ class ToolSpec:
     # guard. Reserved key "body_text" is hashed in full but previewed as a
     # snippet.
     preview: Optional[Callable[[Any, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None
+    # Optional predicate ``notifies(kwargs, content) -> bool`` for non-send
+    # tools whose calls send mail to other people on certain paths.
+    notifies: Optional[
+        Callable[[Dict[str, Any], Optional[Dict[str, Any]]], bool]
+    ] = None
+    kill_switch_hint: Optional[str] = None
     resolve_ids: bool = True
 
     def confirm_needed(self, kwargs: Dict[str, Any]) -> bool:
         return self.confirm(kwargs) if callable(self.confirm) else bool(self.confirm)
+
+    def sends_mail(
+        self, kwargs: Dict[str, Any], content: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        if self.side_effect_class == "send":
+            return True
+        return bool(self.notifies(kwargs, content)) if callable(self.notifies) else False
 
     def public_schema(self) -> Dict[str, Any]:
         schema = {
@@ -126,57 +146,123 @@ def _recipients(kwargs: Dict[str, Any], *, strict: bool = False) -> List[str]:
     out: List[str] = []
     for key in RECIPIENT_KEYS:
         value = kwargs.get(key)
+        if value is None:
+            continue
         if isinstance(value, str):
-            value = [value]
-        if isinstance(value, list):
-            for item in value:
-                if not isinstance(item, str):
-                    if strict:
-                        raise ToolError(
-                            "validation",
-                            f"invalid recipient in {key!r}: expected string",
-                        )
-                    continue
-                addr = _normalise_recipient(item)
-                if addr is None:
-                    if strict:
-                        raise ToolError(
-                            "validation",
-                            f"invalid recipient in {key!r}: {item!r}",
-                        )
-                    continue
-                out.append(addr)
+            items = [value]
+        elif isinstance(value, list):
+            items = value
+        else:
+            raise ToolError(
+                "validation",
+                f"invalid {key!r}: expected string or list of strings",
+            )
+        for item in items:
+            if not isinstance(item, str):
+                raise ToolError(
+                    "validation",
+                    f"invalid recipient in {key!r}: expected string",
+                )
+            addr = _normalise_recipient(item)
+            if addr is None:
+                if strict:
+                    raise ToolError(
+                        "validation",
+                        f"invalid recipient in {key!r}: {item!r}",
+                    )
+                continue
+            out.append(addr)
     return out
 
 
 def _recipient_guard(ctx: Context, kwargs: Dict[str, Any]) -> None:
     deny = _split(ctx.settings.ews_recipient_denylist)
     allow = _split(ctx.settings.ews_recipient_allowlist)
-    if not deny and not allow:
+    has_lists = bool(deny or allow)
+    addrs = _recipients(kwargs, strict=has_lists)
+    if not has_lists:
         return
-    for r in _recipients(kwargs, strict=True):
+    for r in addrs:
         if any(fnmatch.fnmatch(r, p) for p in deny):
             raise ToolError("recipient_blocked",
                             f"recipient '{r}' is denylisted (EWS_RECIPIENT_DENYLIST)")
         if allow and not any(fnmatch.fnmatch(r, p) for p in allow):
             raise ToolError("recipient_blocked",
                             f"recipient '{r}' is not allowlisted (EWS_RECIPIENT_ALLOWLIST)")
+    unverifiable = kwargs.get(UNVERIFIABLE_RECIPIENTS_KEY, 0)
+    if (
+        isinstance(unverifiable, int)
+        and not isinstance(unverifiable, bool)
+        and unverifiable > 0
+    ):
+        who = (
+            "one recipient has"
+            if unverifiable == 1
+            else f"{unverifiable} recipients have"
+        )
+        raise ToolError(
+            "recipient_blocked",
+            f"cannot verify recipients: {who} no address that can be checked "
+            "against the recipient lists",
+        )
 
 
-def _rate_guard(ctx: Context) -> None:
+def _kill_switch_guard(ctx: Context, spec: ToolSpec) -> None:
+    if ctx.settings.send_enabled:
+        return
+    if spec.side_effect_class == "send":
+        raise ToolError(
+            "kill_switch",
+            f"{spec.name} is blocked: SEND_ENABLED=false on this server.",
+            hint=(
+                spec.kill_switch_hint
+                or "Create a draft instead; sending requires the operator "
+                "to flip SEND_ENABLED."
+            ),
+        )
+    raise ToolError(
+        "kill_switch",
+        f"{spec.name} is blocked: notifying attendees sends mail and "
+        "SEND_ENABLED=false on this server.",
+        hint=(
+            spec.kill_switch_hint
+            or "Run without notifying attendees, or have the operator flip "
+            "SEND_ENABLED."
+        ),
+    )
+
+
+def _reserve_send_slot(ctx: Context) -> Optional[float]:
     cap = int(ctx.settings.ews_max_sends_per_hour or 0)
     if cap <= 0:
-        return
+        return None
     now = time.time()
     with _SEND_LOCK:
         while _SEND_TIMES and now - _SEND_TIMES[0] > 3600:
             _SEND_TIMES.popleft()
         if len(_SEND_TIMES) >= cap:
-            retry = int(3600 - (now - _SEND_TIMES[0]))
-            raise ToolError("rate_capped",
-                            f"send rate cap reached ({cap}/hour)",
-                            retry_after_s=retry)
+            retry = max(1, int(3600 - (now - _SEND_TIMES[0])))
+            raise ToolError(
+                "rate_capped",
+                f"send rate cap reached ({cap}/hour)",
+                retry_after_s=retry,
+            )
         _SEND_TIMES.append(now)
+        return now
+
+
+def _release_send_slot(slot_ts: Optional[float]) -> None:
+    if slot_ts is None:
+        return
+    with _SEND_LOCK:
+        for idx in range(len(_SEND_TIMES) - 1, -1, -1):
+            if _SEND_TIMES[idx] == slot_ts:
+                del _SEND_TIMES[idx]
+                return
+
+
+def _rate_guard(ctx: Context) -> None:
+    _reserve_send_slot(ctx)
 
 
 def _external_recipients(ctx: Context, source: Dict[str, Any]) -> List[str]:
@@ -236,7 +322,9 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
     content: Optional[Dict[str, Any]] = None
     if spec.preview is not None:
         content = await spec.preview(ctx, dict(kwargs))
-        _recipient_guard(ctx, content)  # the draft's REAL recipients
+        if spec.sends_mail(kwargs, content):
+            _kill_switch_guard(ctx, spec)
+        _recipient_guard(ctx, content)  # the draft/event's REAL recipients
         chash = preview_content_hash(content)
         target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
                         or kwargs.get("id") or "-")
@@ -277,8 +365,6 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
         token, mailbox=ctx.settings.ews_email, action=spec.name,
         target_id=target_id, chash=chash, secret=secret,
     )
-    if ok and not consume_token(token):
-        ok, reason = False, "consumed"
     if not ok:
         raise ToolError(
             "confirm_invalid",
@@ -286,6 +372,22 @@ async def _confirm_gate(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             hint=_CONFIRM_HINTS.get(
                 reason,
                 f"Call {spec.name} again WITHOUT confirm_token for a fresh preview."),
+        )
+    if token_consumed(token):
+        raise ToolError(
+            "confirm_invalid",
+            "confirm_token rejected (consumed)",
+            hint=_CONFIRM_HINTS["consumed"],
+        )
+    reserved_slot: Optional[float] = None
+    if spec.sends_mail(kwargs, content):
+        reserved_slot = _reserve_send_slot(ctx)
+    if not consume_token(token):
+        _release_send_slot(reserved_slot)
+        raise ToolError(
+            "confirm_invalid",
+            "confirm_token rejected (consumed)",
+            hint=_CONFIRM_HINTS["consumed"],
         )
     if spec.preview is not None and _accepts_kwarg(spec.handler, VERIFIED_CONTENT_HASH_ARG):
         kwargs[VERIFIED_CONTENT_HASH_ARG] = chash
@@ -298,13 +400,17 @@ async def mint_token(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any]) -> st
     Mirrors ``_confirm_gate``'s binding exactly: preview-hook specs get a
     token bound to the resolved content, others to the literal arguments.
     """
+    clean = {
+        k: v for k, v in kwargs.items()
+        if k not in ("confirm_token", VERIFIED_CONTENT_HASH_ARG)
+    }
     if spec.preview is not None:
-        content = await spec.preview(ctx, dict(kwargs))
+        content = await spec.preview(ctx, dict(clean))
         chash = preview_content_hash(content)
-        target_id = str(kwargs.get("draft_id") or kwargs.get("event_id")
-                        or kwargs.get("id") or "-")
+        target_id = str(clean.get("draft_id") or clean.get("event_id")
+                        or clean.get("id") or "-")
     else:
-        chash = content_hash(dict(kwargs))
+        chash = content_hash(dict(clean))
         target_id = "-"
     return make_token(
         mailbox=ctx.settings.ews_email, action=spec.name, target_id=target_id,
@@ -341,13 +447,8 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
     kwargs.pop(VERIFIED_CONTENT_HASH_ARG, None)
     try:
         # Kill-switch (policy precedes connectivity)
-        if spec.side_effect_class == "send" and not ctx.settings.send_enabled:
-            raise ToolError(
-                "kill_switch",
-                f"{spec.name} is blocked: SEND_ENABLED=false on this server.",
-                hint="Create a draft instead; sending requires the operator "
-                     "to flip SEND_ENABLED.",
-            )
+        if spec.sends_mail(kwargs):
+            _kill_switch_guard(ctx, spec)
         # Tier
         tier = ctx.settings.ews_capability_tier
         need = CLASS_TIER.get(spec.side_effect_class, "draft")
@@ -358,7 +459,7 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             )
         # Circuit breaker
         now = time.time()
-        if ctx._circuit_open_until > now:
+        if spec.requires_ews and ctx._circuit_open_until > now:
             raise ToolError(
                 "upstream_unavailable",
                 "circuit open after repeated upstream failures",
@@ -405,8 +506,9 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
             if phase1 is not None:
                 outcome = "phase1"
                 return phase1
-        # Send rate cap — this call WILL execute
-        if spec.side_effect_class == "send":
+        # Send rate cap — unconfirmed sends (confirmed sends already reserved
+        # their slot inside _confirm_gate before consume_token)
+        elif spec.sends_mail(kwargs):
             _rate_guard(ctx)
         # Alias → raw ids
         if spec.resolve_ids:
