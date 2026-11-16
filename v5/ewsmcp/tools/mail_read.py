@@ -18,11 +18,16 @@ import asyncio
 import json
 import logging
 import re
+import threading
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from exchangelib.attachments import FileAttachment, ItemAttachment
 from exchangelib.errors import UnauthorizedError
 
 from ..bodyclean import clean_body
@@ -37,6 +42,22 @@ from ..dto import (
     sniff_smime_type,
 )
 from ..errors import ToolError, map_exception
+from ..extract import (
+    MAX_ERROR_MESSAGE_CHARS,
+    MAX_NOTE_CHARS,
+    ExtractionResult,
+    _PYPDF_MISSING_HINT,
+    _safe_snippet,
+    cap_message,
+    detect_kind,
+    extract_plain_text,
+    fold_and_prioritize_notes,
+    is_msg_attachment,
+    pypdf_available,
+    serialize_message_item_fields,
+    unsupported_type_error,
+)
+from ..extract_worker import extract_bytes_in_worker, extract_item_in_worker
 from ..flag_property import ensure_registered as ensure_flag_status_registered
 from ..gateway.client import WELL_KNOWN, paginate
 from .base import Context, ToolSpec
@@ -110,8 +131,9 @@ def _row_card(ctx: Context, row: Any) -> Dict[str, Any]:
         card["unread"] = True
     if row["has_attachments"]:
         card["attach"] = True
-    if (row["importance"] or "").lower() == "high":
-        card["importance"] = "high"
+    imp = (row["importance"] or "").strip().lower()
+    if imp in ("high", "low"):
+        card["importance"] = imp
     return card
 
 
@@ -149,6 +171,25 @@ _PROJECTION = (
     "message_id", "importance", "attachments",
 )
 
+# Full-message projection for get_messages(format="full"): everything msg_full
+# reads, without pulling base64 mime_content across a multi-message batch.
+_FULL_PROJECTION = (
+    *_PROJECTION, "changekey", "cc_recipients", "body", "categories",
+    "flag_status",
+)
+
+_EML_SIZE_FIELDS = ("id", "subject", "size")
+_EML_MIME_FIELDS = ("id", "subject", "mime_content")
+_IMPORTANCE_TO_EWS = {"high": "High", "normal": "Normal", "low": "Low"}
+GET_MESSAGES_MAX_IDS = 20
+_ALIAS_SHAPE_RE = re.compile(r"^[a-z]{1,2}[0-9]+$")
+_MAX_STEM_UTF8_BYTES = 200
+_WIN_RESERVED_STEMS = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
 # Slim FindItem-only projection for check_messages (avoids per-item GetItem
 # for text_body / attachments when only four summary fields are returned).
 _CHECK_PROJECTION = ("id", "subject", "sender", "datetime_received")
@@ -156,6 +197,185 @@ _CHECK_PROJECTION = ("id", "subject", "sender", "datetime_received")
 _TEXT_EXTS = (".txt", ".csv", ".md", ".log", ".json")
 _TEXT_CAP = 20_000
 _SMIME_SNIFF_MAX_BYTES = 5 * 1024 * 1024
+
+TEXT_CACHE_MAX_DOCS = 4
+TEXT_CACHE_MAX_CHARS = 8_000_000
+TEXT_CACHE_TTL_SECONDS = 600
+_MAX_SELECTOR_BINDINGS = 64
+_UNSET_SELECTOR = object()
+
+
+@dataclass
+class _CachedAttachmentText:
+    doc: ExtractionResult
+    smime_type: Optional[str]
+    char_len: int
+    created_at: float
+    raw_msg_id: Optional[str] = None
+    att_idx: Optional[int] = None
+    att_count: Optional[int] = None
+    name: Optional[str] = None
+    size_bytes: Optional[Any] = None
+    content_type: Optional[str] = None
+
+
+class AttachmentTextCache:
+    """In-memory-only LRU+TTL cache of extracted document text (character-counted)."""
+
+    def __init__(
+        self,
+        *,
+        max_docs: int = TEXT_CACHE_MAX_DOCS,
+        max_chars: int = TEXT_CACHE_MAX_CHARS,
+        ttl_seconds: float = TEXT_CACHE_TTL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.max_docs = max_docs
+        self.max_chars = max_chars
+        self.ttl_seconds = ttl_seconds
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[Tuple[Any, ...], _CachedAttachmentText]" = (
+            OrderedDict()
+        )
+        self._selector_keys: "OrderedDict[Tuple[str, Optional[str]], Tuple[Any, ...]]" = (
+            OrderedDict()
+        )
+        self._total_chars = 0
+
+    def _drop_selectors_for(self, target_key: Tuple[Any, ...]) -> None:
+        for sel_pair, mapped_key in list(self._selector_keys.items()):
+            if mapped_key == target_key:
+                del self._selector_keys[sel_pair]
+
+    def _bind_selector_unlocked(
+        self,
+        raw_msg_id: str,
+        selector: Optional[str],
+        key: Tuple[Any, ...],
+    ) -> None:
+        sel_pair = (str(raw_msg_id), None if selector is None else str(selector))
+        self._selector_keys.pop(sel_pair, None)
+        while len(self._selector_keys) >= _MAX_SELECTOR_BINDINGS:
+            self._selector_keys.popitem(last=False)
+        self._selector_keys[sel_pair] = key
+
+    def _prune_expired(self, now: float) -> None:
+        for key, entry in list(self._entries.items()):
+            if now - entry.created_at >= self.ttl_seconds:
+                self._total_chars -= entry.char_len
+                del self._entries[key]
+                self._drop_selectors_for(key)
+
+    @property
+    def total_chars(self) -> int:
+        with self._lock:
+            self._prune_expired(self._clock())
+            return self._total_chars
+
+    def __len__(self) -> int:
+        with self._lock:
+            self._prune_expired(self._clock())
+            return len(self._entries)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._selector_keys.clear()
+            self._total_chars = 0
+
+    def get(self, key: Tuple[Any, ...]) -> Optional[_CachedAttachmentText]:
+        with self._lock:
+            self._prune_expired(self._clock())
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)
+            return entry
+
+    def bind_selector(
+        self,
+        raw_msg_id: Optional[str],
+        selector: Optional[str],
+        key: Tuple[Any, ...],
+    ) -> None:
+        """Record the exact ``(message_id, selector) -> cache_key`` binding."""
+        if raw_msg_id is None:
+            return
+        with self._lock:
+            self._prune_expired(self._clock())
+            if key in self._entries:
+                self._bind_selector_unlocked(raw_msg_id, selector, key)
+
+    def get_for_paging(
+        self, raw_msg_id: str, selector: Optional[str]
+    ) -> Optional[_CachedAttachmentText]:
+        """Return a cached document for ``offset > 0`` via exact selector identity."""
+        with self._lock:
+            self._prune_expired(self._clock())
+            sel_pair = (
+                str(raw_msg_id),
+                None if selector is None else str(selector),
+            )
+            key = self._selector_keys.get(sel_pair)
+            if key is None:
+                return None
+            entry = self._entries.get(key)
+            if entry is None:
+                self._selector_keys.pop(sel_pair, None)
+                return None
+            if entry.name is None:
+                return None
+            self._entries.move_to_end(key)
+            self._selector_keys.move_to_end(sel_pair)
+            return entry
+
+    def put(
+        self,
+        key: Tuple[Any, ...],
+        doc: ExtractionResult,
+        *,
+        smime_type: Optional[str] = None,
+        raw_msg_id: Optional[str] = None,
+        selector: Any = _UNSET_SELECTOR,
+        att_idx: Optional[int] = None,
+        att_count: Optional[int] = None,
+        name: Optional[str] = None,
+        size_bytes: Optional[Any] = None,
+        content_type: Optional[str] = None,
+    ) -> None:
+        char_len = len(doc.text)
+        with self._lock:
+            now = self._clock()
+            self._prune_expired(now)
+            old = self._entries.pop(key, None)
+            if old is not None:
+                self._total_chars -= old.char_len
+            if self.max_docs <= 0 or char_len > self.max_chars:
+                self._drop_selectors_for(key)
+                return
+            while self._entries and (
+                len(self._entries) >= self.max_docs
+                or self._total_chars + char_len > self.max_chars
+            ):
+                evicted_key, evicted = self._entries.popitem(last=False)
+                self._total_chars -= evicted.char_len
+                self._drop_selectors_for(evicted_key)
+            self._entries[key] = _CachedAttachmentText(
+                doc=doc,
+                smime_type=smime_type,
+                char_len=char_len,
+                created_at=now,
+                raw_msg_id=raw_msg_id,
+                att_idx=att_idx,
+                att_count=att_count,
+                name=name,
+                size_bytes=size_bytes,
+                content_type=content_type,
+            )
+            self._total_chars += char_len
+            if raw_msg_id is not None and selector is not _UNSET_SELECTOR:
+                self._bind_selector_unlocked(raw_msg_id, selector, key)
 
 
 # --------------------------------------------------------------------------
@@ -200,6 +420,17 @@ def _fetch_one(account: Any, raw_id: str, only: Optional[List[str]] = None) -> A
     return first
 
 
+def _fetch_many(
+    account: Any, raw_ids: List[str], only: Optional[List[str]] = None
+) -> List[Any]:
+    """Bulk fetch items in input order via account.fetch with a projection."""
+    return list(
+        account.fetch(
+            ids=[(raw_id, None) for raw_id in raw_ids], only_fields=only
+        )
+    )
+
+
 async def _cards_off_loop(ctx: Context, items: List[Any], tz: str) -> List[Dict[str, Any]]:
     """Build msg cards on a worker thread: alias mints are SQLite write
     transactions and body cleaning is regex-heavy — neither belongs on the
@@ -223,32 +454,70 @@ def _from(item: Any) -> str:
     return f"{name} <{email}>" if name and name != email else email
 
 
-def _pick_attachment(atts: List[Any], selector: Optional[str]) -> Any:
+def _pick_attachment_with_index(
+    atts: List[Any], selector: Optional[str]
+) -> Tuple[int, Any]:
     names = [getattr(a, "name", "") or f"attachment-{i}" for i, a in enumerate(atts)]
+    safe_names = [_safe_snippet(n) for n in names[:20]]
+    listed = ", ".join(safe_names)
+    if len(names) > 20:
+        listed += f" (+{len(names) - 20} more)"
     if selector is None:
         if len(atts) == 1:
-            return atts[0]
+            return 0, atts[0]
         raise ToolError(
             "validation",
-            f"The message has {len(atts)} attachments — pick one: {', '.join(names)}.",
+            cap_message(
+                f"The message has {len(atts)} attachments — pick one: {listed}.",
+                MAX_ERROR_MESSAGE_CHARS,
+            ),
             hint="Pass attachment=<name> or attachment=<zero-based index as a string>.",
         )
     sel = str(selector).strip()
-    for att, name in zip(atts, names):
+    for idx, (att, name) in enumerate(zip(atts, names)):
         if name.lower() == sel.lower():
-            return att
+            return idx, att
     digits = sel[1:] if sel[:1] == "a" and sel[1:].isdigit() else sel
     if digits.isdigit() and int(digits) < len(atts):
-        return atts[int(digits)]
+        chosen_idx = int(digits)
+        return chosen_idx, atts[chosen_idx]
     raise ToolError(
         "not_found",
-        f"No attachment matches {selector!r}. Available: {', '.join(names)}.",
+        cap_message(
+            f"No attachment matches {_safe_snippet(selector)!r}. Available: {listed}.",
+            MAX_ERROR_MESSAGE_CHARS,
+        ),
     )
+
+
+def _pick_attachment(atts: List[Any], selector: Optional[str]) -> Any:
+    return _pick_attachment_with_index(atts, selector)[1]
 
 
 def _is_texty(name: str, content_type: Optional[str]) -> bool:
     return ((content_type or "").lower().startswith("text/")
             or (name or "").lower().endswith(_TEXT_EXTS))
+
+
+def _is_item_attachment(att: Any) -> bool:
+    """Detect an Exchange item attachment without evaluating lazy EWS properties."""
+    if isinstance(att, ItemAttachment):
+        return True
+    if isinstance(att, FileAttachment):
+        return False
+    inst_dict = getattr(att, "__dict__", None) or {}
+    cls = type(att)
+    has_content = (
+        "content" in inst_dict
+        or "_content" in inst_dict
+        or isinstance(getattr(cls, "content", None), property)
+    )
+    has_item = (
+        "item" in inst_dict
+        or "_item" in inst_dict
+        or isinstance(getattr(cls, "item", None), property)
+    )
+    return has_item and not has_content
 
 
 def _read_attachment_bytes(att: Any) -> Optional[bytes]:
@@ -260,6 +529,85 @@ def _read_attachment_bytes(att: Any) -> Optional[bytes]:
     return bytes(raw) if isinstance(raw, (bytes, bytearray)) else None
 
 
+def _read_attachment_item(att: Any) -> Any:
+    """Single site that touches ``att.item`` (triggers GetAttachment on items)."""
+    return getattr(att, "item", None)
+
+
+def _text_cache(ctx: Context) -> AttachmentTextCache:
+    cache = getattr(ctx, "_attachment_text_cache", None)
+    if not isinstance(cache, AttachmentTextCache):
+        cache = AttachmentTextCache()
+        setattr(ctx, "_attachment_text_cache", cache)
+    return cache
+
+
+def _attachment_cache_key(
+    att: Any, raw_msg_id: str, att_idx: int, name: str, size: Any
+) -> Tuple[Any, Optional[int]]:
+    att_id_obj = getattr(att, "attachment_id", None)
+    if isinstance(att_id_obj, str) and att_id_obj:
+        att_id: Optional[str] = att_id_obj
+    else:
+        att_id = getattr(att_id_obj, "id", None)
+    if not att_id:
+        direct_id = getattr(att, "id", None)
+        if isinstance(direct_id, str) and direct_id:
+            att_id = direct_id
+    size_val = int(size) if isinstance(size, int) and not isinstance(size, bool) else None
+    if att_id:
+        return (("id", str(att_id)), size_val)
+    return (("fallback", str(raw_msg_id), int(att_idx), str(name)), size_val)
+
+
+def _render_text_response(
+    out: Dict[str, Any],
+    doc: ExtractionResult,
+    *,
+    offset: int,
+    smime_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    full_text = doc.text
+    total_chars = len(full_text)
+    chunk = full_text[offset : offset + _TEXT_CAP]
+    end = offset + len(chunk)
+    out["mode"] = "text"
+    out["extracted_from"] = doc.extracted_from
+    if doc.pages is not None:
+        out["pages"] = doc.pages
+    if doc.pages_read is not None:
+        out["pages_read"] = doc.pages_read
+    if doc.slides is not None:
+        out["slides"] = doc.slides
+    if doc.slides_read is not None:
+        out["slides_read"] = doc.slides_read
+    if doc.sheets is not None:
+        out["sheets"] = doc.sheets
+    if doc.sheets_read is not None:
+        out["sheets_read"] = doc.sheets_read
+    if doc.partial:
+        out["partial"] = True
+    out["text"] = chunk
+    out["offset"] = offset
+    out["total_chars"] = total_chars
+    if end < total_chars:
+        out["next_offset"] = end
+        out["truncated"] = True
+    folded_notes = fold_and_prioritize_notes(doc.notes)
+    if folded_notes:
+        out["notes"] = list(folded_notes)
+        out["note"] = cap_message("; ".join(folded_notes), MAX_NOTE_CHARS)
+    if smime_type == "signed":
+        out["hint"] = (
+            "Signed, not encrypted (PKCS#7 SignedData) — this "
+            "is the raw DER wrapper decoded as text, so the "
+            "certificate/signature bytes around the readable "
+            "message content appear as \ufffd replacement "
+            "characters."
+        )
+    return out
+
+
 # --------------------------------------------------------------------------
 # 1. list_folders
 # --------------------------------------------------------------------------
@@ -267,8 +615,18 @@ def _read_attachment_bytes(att: Any) -> Optional[bytes]:
 
 async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int = 2,
                         include_empty: bool = True,
+                        query: Optional[str] = None,
                         fresh: bool = False) -> Dict[str, Any]:
     depth = max(1, min(int(depth), 5))
+    needle = ""
+    if query is not None:
+        if not isinstance(query, str):
+            raise ToolError("validation", "`query` must be a string.")
+        needle = query.strip().lower()
+        if not needle:
+            raise ToolError(
+                "validation", "`query` must not be empty or whitespace."
+            )
 
     # ---- mirror (the hierarchy lane refreshes counts every ~10 min) --------
     if not fresh and parent is None and ctx.cache is not None:
@@ -280,9 +638,17 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
         if folder_rows:
             rows = []
             for r in folder_rows:
-                if (r["path"] or "").count("/") + 1 > depth:
+                r_name = r["name"] or ""
+                r_path = r["path"] or ""
+                if not needle and r_path.count("/") + 1 > depth:
                     continue
                 if not include_empty and not r["total"]:
+                    continue
+                if (
+                    needle
+                    and needle not in r_name.lower()
+                    and needle not in r_path.lower()
+                ):
                     continue
                 row: Dict[str, Any] = {
                     "id": ctx.aliaser.alias_for(r["ews_id"], "f"),
@@ -313,19 +679,42 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
             except Exception:
                 continue
         rows: List[Dict[str, Any]] = []
+        start_prefix = ""
+        if needle and parent:
+            parts = _folder_parts(root)
+            if parts:
+                start_prefix = (
+                    "/".join(str(getattr(p, "name", "") or "") for p in parts[2:])
+                    or str(getattr(root, "name", "") or "")
+                )
+            else:
+                start_prefix = str(getattr(root, "name", "") or "")
 
-        def walk(folder: Any, level: int, prefix: str) -> None:
-            if level > depth:
+        def walk(
+            folder: Any, level: int, prefix: str, ancestors: frozenset
+        ) -> None:
+            if not needle and level > depth:
                 return
             for child in list(getattr(folder, "children", None) or []):
+                if id(child) in ancestors:
+                    continue
                 name = getattr(child, "name", "") or ""
                 path = f"{prefix}/{name}" if prefix else name
                 total = getattr(child, "total_count", None) or 0
                 raw_id = getattr(child, "id", None)
                 grandchildren = list(getattr(child, "children", None) or [])
-                if include_empty or total:
+                matched = (
+                    not needle
+                    or needle in name.lower()
+                    or needle in path.lower()
+                )
+                if matched and (include_empty or total):
                     row: Dict[str, Any] = {
-                        "id": ctx.aliaser.alias_for(str(raw_id), "f") if raw_id else None,
+                        "id": (
+                            ctx.aliaser.alias_for(str(raw_id), "f")
+                            if raw_id
+                            else None
+                        ),
                         "name": name,
                         "path": path,
                         "total": total,
@@ -340,9 +729,9 @@ async def _list_folders(ctx: Context, parent: Optional[str] = None, depth: int =
                     if folder_class:
                         row["folder_class"] = folder_class
                     rows.append(row)
-                walk(child, level + 1, path)
+                walk(child, level + 1, path, ancestors | {id(child)})
 
-        walk(root, 1, "")
+        walk(root, 1, start_prefix, frozenset({id(root)}))
         return rows
 
     rows = await ctx.gateway.call(work)
@@ -408,6 +797,7 @@ def _build_queryset(
     is_unread: Optional[bool] = None,
     has_attachments: Optional[bool] = None,
     flag_complete: Optional[bool] = None,
+    importance: Optional[str] = None,
 ) -> Any:
     """Build the unprojected EWS QuerySet for one folder.
 
@@ -431,6 +821,8 @@ def _build_queryset(
         filters["has_attachments"] = bool(has_attachments)
     if flag_complete is True:
         filters["flag_status"] = 1
+    if importance is not None:
+        filters["importance"] = _IMPORTANCE_TO_EWS[importance]
     qs = target.filter(**filters)
     if flag_complete is False:
         # Incomplete covers both unflagged (None) and open-flagged (2);
@@ -659,6 +1051,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                            until: Optional[str] = None, is_unread: Optional[bool] = None,
                            has_attachments: Optional[bool] = None,
                            categories: Optional[List[str]] = None,
+                           importance: Optional[str] = None,
                            recursive: bool = False,
                            flag_complete: Optional[bool] = None,
                            offset: int = 0, limit: int = 20,
@@ -687,17 +1080,24 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
         raise ToolError("validation",
                         "pass `sender` only — `from_` is its deprecated alias.")
     sender = sender or from_
+    if importance is not None and (
+        not isinstance(importance, str) or importance not in _IMPORTANCE_TO_EWS
+    ):
+        raise ToolError(
+            "validation",
+            "importance must be 'high', 'normal', or 'low'.",
+        )
     structured_given = any(
         v is not None for v in
         (sender, subject, since, until, is_unread, has_attachments, categories,
-         flag_complete)
+         flag_complete, importance)
     )
     if query and structured_given:
         raise ToolError(
             "validation",
             "`query` (AQS) cannot be combined with the structured filters "
             "(sender/subject/since/until/is_unread/has_attachments/categories/"
-            "flag_complete) — "
+            "flag_complete/importance) — "
             "Exchange runs them on different engines.",
             hint="Either fold everything into the AQS string "
                  "(e.g. 'from:alice@example.com subject:rfp received>=2026-06-01') or drop "
@@ -732,7 +1132,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                     since_ts=int(since_dt.timestamp()) if since_dt else None,
                     until_ts=int(until_dt.timestamp()) if until_dt else None,
                     is_unread=is_unread, has_attachments=has_attachments,
-                    categories=categories,
+                    categories=categories, importance=importance,
                     offset=offset, limit=limit,
                 )
                 cards = await asyncio.to_thread(
@@ -749,7 +1149,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
         not query and not sender and not subject and not categories
         and since_dt is None and until_dt is None
         and is_unread is None and has_attachments is None
-        and flag_complete is None
+        and flag_complete is None and importance is None
     )
 
     def build_qs(target: Any) -> Any:
@@ -763,6 +1163,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
             is_unread=is_unread,
             has_attachments=has_attachments,
             flag_complete=flag_complete,
+            importance=importance,
         )
 
     def work(account: Any) -> Tuple[List[Any], Optional[int], Optional[int]]:
@@ -1155,15 +1556,180 @@ async def _check_messages(ctx: Context, values: Any, field: str = "subject",
 
 
 # --------------------------------------------------------------------------
-# 3. get_message
+# 3. get_message / 3b. get_messages
 # --------------------------------------------------------------------------
 
 
-async def _get_message(ctx: Context, id: str, format: str = "full",
+def _sniff_item_smime(fetched: Any) -> Dict[int, str]:
+    """Sniff PKCS#7 candidates <= 5 MiB inside the gateway worker without
+    downloading ordinary or oversized attachments."""
+    smime_by_idx: Dict[int, str] = {}
+    for idx, att in enumerate(getattr(fetched, "attachments", None) or []):
+        name = getattr(att, "name", f"attachment-{idx}")
+        content_type = getattr(att, "content_type", None)
+        if not is_pkcs7_candidate(name, content_type):
+            continue
+        size = getattr(att, "size", None)
+        if isinstance(size, (int, float)) and size > _SMIME_SNIFF_MAX_BYTES:
+            continue
+        try:
+            raw = _read_attachment_bytes(att)
+        except Exception:
+            raw = None
+        kind = sniff_smime_type(name, content_type, raw)
+        if kind:
+            smime_by_idx[idx] = kind
+    return smime_by_idx
+
+
+def _smime_candidates_by_metadata(fetched: Any) -> Dict[int, str]:
+    """Mark PKCS#7 S/MIME attachments as candidates from name and MIME type
+    only, without reading ``att.content`` (zero attachment byte downloads)."""
+    smime_by_idx: Dict[int, str] = {}
+    for idx, att in enumerate(getattr(fetched, "attachments", None) or []):
+        if _is_item_attachment(att):
+            continue
+        name = getattr(att, "name", f"attachment-{idx}")
+        content_type = getattr(att, "content_type", None)
+        if is_pkcs7_candidate(name, content_type):
+            smime_by_idx[idx] = "candidate"
+    return smime_by_idx
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _eml_ceiling_error(ctx: Context, byte_count: int) -> ToolError:
+    return ToolError(
+        "validation",
+        f"Message ({byte_count} bytes) exceeds the "
+        f"{ctx.settings.ews_max_attachment_mb} MB ceiling "
+        "(EWS_MAX_ATTACHMENT_MB).",
+        hint="Ask the operator to raise EWS_MAX_ATTACHMENT_MB.",
+    )
+
+
+def _build_eml_filename(alias: str, subject: Optional[str]) -> str:
+    safe_alias = (
+        re.sub(r"[^\w\-]+", "_", alias or "").strip("_-")[:32] or "message"
+    )
+    subj = str(subject or "").strip()
+    while subj.lower().endswith(".eml"):
+        subj = subj[:-4].rstrip(" ._-")
+    stem = re.sub(r"[^\w\-]+", "_", subj).strip("_-")
+    combined = f"{safe_alias}-{stem}" if stem else safe_alias
+    combined = _truncate_utf8(combined, _MAX_STEM_UTF8_BYTES).rstrip("_-")
+    if not combined:
+        combined = safe_alias
+    return f"{combined}.eml"
+
+
+def _is_fatal_batch_exception(exc: Exception) -> bool:
+    if isinstance(exc, UnauthorizedError) or (
+        isinstance(exc, ToolError) and exc.code == "auth_failed"
+    ):
+        return True
+    mapped = map_exception(exc)
+    return mapped.code in ("auth_failed", "throttled", "upstream_unavailable")
+
+
+def _failed_message_entry(
+    caller_id: str, idx: int, raw_id: str, exc: Exception
+) -> Dict[str, Any]:
+    if isinstance(exc, (TypeError, ValueError)):
+        code = "validation"
+        msg = f"{type(exc).__name__}: {exc}"
+    else:
+        mapped = map_exception(exc)
+        code = mapped.code
+        msg = mapped.message
+    if raw_id and raw_id != caller_id and raw_id in msg:
+        msg = msg.replace(raw_id, caller_id.strip())
+    return {
+        "id": caller_id,
+        "index": idx,
+        "code": code,
+        "error": cap_message(msg, MAX_ERROR_MESSAGE_CHARS),
+    }
+
+
+async def _get_message(ctx: Context, id: str, format: Optional[str] = "full",
                        include_html: bool = False,
                        fresh: bool = False) -> Dict[str, Any]:
+    if format is None:
+        format = "full"
+    if not isinstance(format, str) or format not in ("full", "concise", "eml"):
+        raise ToolError(
+            "validation",
+            cap_message(
+                f"Invalid format {_safe_snippet(str(format))!r}; expected "
+                "one of full, concise, eml.",
+                MAX_ERROR_MESSAGE_CHARS,
+            ),
+        )
     raw_id = id
     tz = ctx.settings.ews_tz
+    if format == "eml":
+        max_bytes = int(ctx.settings.ews_max_attachment_mb) * 1024 * 1024
+
+        def eml_work(account: Any) -> Tuple[str, Optional[str], bytes]:
+            meta = _fetch_one(account, raw_id, only=list(_EML_SIZE_FIELDS))
+            declared_size = getattr(meta, "size", None)
+            if (
+                isinstance(declared_size, (int, float))
+                and not isinstance(declared_size, bool)
+                and declared_size > max_bytes
+            ):
+                raise _eml_ceiling_error(ctx, int(declared_size))
+            fetched = _fetch_one(account, raw_id, only=list(_EML_MIME_FIELDS))
+            raw_mime = getattr(fetched, "mime_content", None)
+            if isinstance(raw_mime, (bytes, bytearray)):
+                data = bytes(raw_mime)
+            elif isinstance(raw_mime, str):
+                data = raw_mime.encode("utf-8")
+            else:
+                data = b""
+            if not data:
+                raise ToolError(
+                    "validation",
+                    "Message has no retrievable MIME content.",
+                )
+            if len(data) > max_bytes:
+                raise _eml_ceiling_error(ctx, len(data))
+            resolved_raw = str(
+                getattr(fetched, "id", None)
+                or getattr(meta, "id", None)
+                or raw_id
+            )
+            subj = (
+                getattr(fetched, "subject", None)
+                or getattr(meta, "subject", None)
+            )
+            return resolved_raw, subj, data
+
+        resolved_raw, subj, mime_bytes = await ctx.gateway.call(eml_work)
+
+        def save_eml() -> str:
+            alias = ctx.aliaser.alias_for(resolved_raw, "m")
+            eml_name = _build_eml_filename(alias, subj)
+            return _save_attachment_file(ctx, eml_name, mime_bytes)
+
+        saved_path = await asyncio.to_thread(save_eml)
+        return _stamp(
+            {
+                "ok": True,
+                "saved_path": saved_path,
+                "size_bytes": len(mime_bytes),
+            },
+            "live",
+        )
+
     # Mirror unless the caller needs live data: fresh=true, raw HTML, or an
     # attachment inventory (the mirror stores the flag, not the parts).
     if not fresh and not include_html and ctx.cache is not None:
@@ -1186,23 +1752,7 @@ async def _get_message(ctx: Context, id: str, format: str = "full",
 
     def work(account: Any) -> Tuple[Any, Dict[int, str]]:
         fetched = _fetch_one(account, raw_id)
-        smime_by_idx: Dict[int, str] = {}
-        for idx, att in enumerate(getattr(fetched, "attachments", None) or []):
-            name = getattr(att, "name", f"attachment-{idx}")
-            content_type = getattr(att, "content_type", None)
-            if not is_pkcs7_candidate(name, content_type):
-                continue
-            size = getattr(att, "size", None)
-            if isinstance(size, (int, float)) and size > _SMIME_SNIFF_MAX_BYTES:
-                continue
-            try:
-                raw = _read_attachment_bytes(att)
-            except Exception:
-                raw = None
-            kind = sniff_smime_type(name, content_type, raw)
-            if kind:
-                smime_by_idx[idx] = kind
-        return fetched, smime_by_idx
+        return fetched, _sniff_item_smime(fetched)
 
     item, smime_by_idx = await ctx.gateway.call(work)
     return _stamp({"ok": True, "message": msg_full(
@@ -1210,6 +1760,288 @@ async def _get_message(ctx: Context, id: str, format: str = "full",
         include_html=bool(include_html),
         smime_types=smime_by_idx,
     )}, "live")
+
+
+async def _get_messages(
+    ctx: Context,
+    ids: List[str],
+    format: Optional[str] = "full",
+    fresh: bool = False,
+) -> Dict[str, Any]:
+    if not isinstance(ids, list) or not ids:
+        raise ToolError(
+            "validation", "`ids` must contain at least one message id."
+        )
+    if len(ids) > GET_MESSAGES_MAX_IDS:
+        raise ToolError(
+            "validation",
+            f"at most {GET_MESSAGES_MAX_IDS} ids per call (got {len(ids)}).",
+        )
+    if not all(isinstance(i, str) and i.strip() for i in ids):
+        raise ToolError(
+            "validation", "`ids` entries must be non-empty strings."
+        )
+    if format is None:
+        format = "full"
+    if not isinstance(format, str) or format not in ("concise", "full"):
+        raise ToolError(
+            "validation",
+            cap_message(
+                f"Invalid format {_safe_snippet(str(format))!r}; expected "
+                "'concise' or 'full'.",
+                MAX_ERROR_MESSAGE_CHARS,
+            ),
+        )
+
+    tz = ctx.settings.ews_tz
+
+    def resolve_inputs() -> Tuple[
+        List[Tuple[int, str, str]], List[Dict[str, Any]]
+    ]:
+        resolved: List[Tuple[int, str, str]] = []
+        bad: List[Dict[str, Any]] = []
+        for idx, caller_id in enumerate(ids):
+            trimmed = caller_id.strip()
+            if _ALIAS_SHAPE_RE.match(trimmed):
+                prefix = trimmed.rstrip("0123456789")
+                if prefix != "m":
+                    bad.append({
+                        "id": caller_id,
+                        "index": idx,
+                        "code": "validation",
+                        "error": cap_message(
+                            f"{trimmed!r} is not a message id "
+                            "(expected an m-alias or raw EWS id).",
+                            MAX_ERROR_MESSAGE_CHARS,
+                        ),
+                    })
+                    continue
+            try:
+                raw_id = ctx.aliaser.resolve(trimmed)
+            except KeyError as exc:
+                msg = str(exc.args[0] if exc.args else exc)
+                bad.append({
+                    "id": caller_id,
+                    "index": idx,
+                    "code": "not_found",
+                    "error": cap_message(msg, MAX_ERROR_MESSAGE_CHARS),
+                })
+                continue
+            resolved.append((idx, caller_id, raw_id))
+        return resolved, bad
+
+    resolved_inputs, failed_entries = await asyncio.to_thread(resolve_inputs)
+    if not resolved_inputs:
+        failed_entries.sort(key=lambda entry: entry["index"])
+        out = envelope([], total_available=0, offset=0)
+        out["failed"] = failed_entries
+        return _stamp(out, "live")
+
+    by_index: Dict[int, Tuple[Dict[str, Any], str, Optional[int]]] = {}
+    live_needed: List[Tuple[int, str, str]] = []
+
+    if not fresh and ctx.cache is not None:
+        try:
+            def read_cached() -> Tuple[
+                Dict[int, Tuple[Dict[str, Any], str, Optional[int]]],
+                List[Tuple[int, str, str]],
+            ]:
+                cached_out: Dict[
+                    int, Tuple[Dict[str, Any], str, Optional[int]]
+                ] = {}
+                misses: List[Tuple[int, str, str]] = []
+                found_rows: List[Tuple[int, Any, Optional[int]]] = []
+                for idx, caller_id, raw_id in resolved_inputs:
+                    row = ctx.cache.get_message(raw_id)
+                    if row is None:
+                        misses.append((idx, caller_id, raw_id))
+                    else:
+                        wm = _cache_watermark(ctx, row["folder"])
+                        found_rows.append((idx, row, wm))
+                if found_rows:
+                    ctx.aliaser.alias_many([
+                        (
+                            r["ews_id"],
+                            "m",
+                            r["changekey"],
+                            r["internet_message_id"],
+                        )
+                        for _idx, r, _wm in found_rows
+                        if r["ews_id"]
+                    ])
+                    for idx, row, wm in found_rows:
+                        dto = (
+                            _row_card(ctx, row)
+                            if format == "concise"
+                            else _row_full(ctx, row)
+                        )
+                        cached_out[idx] = (dto, "cache", wm)
+                return cached_out, misses
+
+            by_index, live_needed = await asyncio.to_thread(read_cached)
+        except Exception as exc:
+            logger.warning("cache get_messages failed (%s) — live", exc)
+            by_index = {}
+            live_needed = list(resolved_inputs)
+    else:
+        live_needed = list(resolved_inputs)
+
+    if live_needed:
+        only_fields = (
+            list(_PROJECTION)
+            if format == "concise"
+            else list(_FULL_PROJECTION)
+        )
+
+        def _missing_err() -> ToolError:
+            return ToolError(
+                "not_found",
+                "Message not found — the id may be stale.",
+                hint=(
+                    "Ids change when items move; re-run search_messages "
+                    "for a fresh id."
+                ),
+            )
+
+        def live_work(
+            account: Any,
+        ) -> List[Tuple[int, str, str, Any, Dict[int, str]]]:
+            unique_raw: List[str] = []
+            seen_raw: set = set()
+            for _idx, _caller_id, raw_id in live_needed:
+                if raw_id not in seen_raw:
+                    seen_raw.add(raw_id)
+                    unique_raw.append(raw_id)
+
+            raw_results: Dict[str, Any] = {}
+            try:
+                fetched = _fetch_many(account, unique_raw, only=only_fields)
+                for pos, raw_id in enumerate(unique_raw):
+                    if pos >= len(fetched) or fetched[pos] is None:
+                        raw_results[raw_id] = _missing_err()
+                    else:
+                        raw_results[raw_id] = fetched[pos]
+            except Exception as batch_exc:
+                if _is_fatal_batch_exception(batch_exc):
+                    raise
+                if len(unique_raw) == 1:
+                    raw_results[unique_raw[0]] = batch_exc
+                else:
+                    for raw_id in unique_raw:
+                        try:
+                            single = _fetch_many(
+                                account, [raw_id], only=only_fields
+                            )
+                            if not single or single[0] is None:
+                                raw_results[raw_id] = _missing_err()
+                            else:
+                                raw_results[raw_id] = single[0]
+                        except Exception as single_exc:
+                            if _is_fatal_batch_exception(single_exc):
+                                raise
+                            raw_results[raw_id] = single_exc
+
+            for item in raw_results.values():
+                if isinstance(item, Exception) and _is_fatal_batch_exception(
+                    item
+                ):
+                    raise item
+
+            smime_by_raw: Dict[str, Dict[int, str]] = {}
+            if format == "full":
+                for raw_id, item in raw_results.items():
+                    if not isinstance(item, Exception):
+                        smime_by_raw[raw_id] = _smime_candidates_by_metadata(
+                            item
+                        )
+
+            return [
+                (
+                    orig_idx,
+                    caller_id,
+                    raw_id,
+                    raw_results[raw_id],
+                    smime_by_raw.get(raw_id, {}),
+                )
+                for orig_idx, caller_id, raw_id in live_needed
+            ]
+
+        live_outcomes = await ctx.gateway.call(live_work)
+
+        def build_live_dtos() -> Tuple[
+            Dict[int, Tuple[Dict[str, Any], str, Optional[int]]],
+            List[Dict[str, Any]],
+        ]:
+            good_items = [
+                item
+                for _idx, _cid, _raw, item, _sm in live_outcomes
+                if not isinstance(item, Exception)
+            ]
+            if good_items:
+                ctx.aliaser.alias_many([
+                    (
+                        str(it.id),
+                        "m",
+                        getattr(it, "changekey", None),
+                        getattr(it, "message_id", None),
+                    )
+                    for it in good_items
+                    if getattr(it, "id", None)
+                ])
+            built: Dict[int, Tuple[Dict[str, Any], str, Optional[int]]] = {}
+            live_failed: List[Dict[str, Any]] = []
+            for orig_idx, caller_id, raw_id, item, smime_by_idx in live_outcomes:
+                if isinstance(item, Exception):
+                    live_failed.append(
+                        _failed_message_entry(
+                            caller_id, orig_idx, raw_id, item
+                        )
+                    )
+                elif format == "concise":
+                    built[orig_idx] = (
+                        msg_card(item, ctx.aliaser, tz),
+                        "live",
+                        None,
+                    )
+                else:
+                    built[orig_idx] = (
+                        msg_full(
+                            item,
+                            ctx.aliaser,
+                            tz,
+                            ctx.settings.body_max_chars,
+                            include_html=False,
+                            smime_types=smime_by_idx,
+                        ),
+                        "live",
+                        None,
+                    )
+            return built, live_failed
+
+        live_built, live_failed = await asyncio.to_thread(build_live_dtos)
+        by_index.update(live_built)
+        failed_entries.extend(live_failed)
+
+    failed_entries.sort(key=lambda entry: entry["index"])
+    ordered = [by_index[idx] for idx in range(len(ids)) if idx in by_index]
+    has_cache = any(src == "cache" for _dto, src, _wm in ordered)
+    has_live = any(src == "live" for _dto, src, _wm in ordered)
+
+    if has_cache and has_live:
+        items = [_stamp(dict(dto), src, wm) for dto, src, wm in ordered]
+        out = envelope(items, total_available=len(items), offset=0)
+        out["failed"] = failed_entries
+        out["source"] = "mixed"
+        return out
+
+    items = [dict(dto) for dto, _src, _wm in ordered]
+    out = envelope(items, total_available=len(items), offset=0)
+    out["failed"] = failed_entries
+    if has_cache:
+        watermarks = [wm for _dto, src, wm in ordered if src == "cache" and wm]
+        as_of = min(watermarks) if watermarks else None
+        return _stamp(out, "cache", as_of)
+    return _stamp(out, "live")
 
 
 # --------------------------------------------------------------------------
@@ -1372,17 +2204,136 @@ async def _get_thread(ctx: Context, id: str, limit: int = 20,
 # --------------------------------------------------------------------------
 
 
+def _is_pkcs7_signature(name: Optional[str], content_type: Optional[str]) -> bool:
+    ct = (content_type or "").lower()
+    nm = (name or "").strip().lower()
+    return "pkcs7-signature" in ct or nm.endswith(".p7s")
+
+
+def _save_attachment_file(ctx: Context, name: str, data: bytes) -> str:
+    cleaned = re.sub(r"[^\w.\-]+", "_", name or "")
+    cleaned = re.sub(r"\.{2,}", "_", cleaned).strip("._-")
+    if not cleaned:
+        cleaned = "attachment.bin"
+    dot = cleaned.rfind(".")
+    if dot > 0:
+        raw_stem, raw_ext = cleaned[:dot], cleaned[dot:]
+        if len(raw_ext) <= 1 or len(raw_ext.encode("utf-8")) > 24:
+            raw_stem, raw_ext = cleaned, ""
+    else:
+        raw_stem, raw_ext = cleaned, ""
+    stem = raw_stem.strip("._-") or "attachment"
+    ext = raw_ext
+    if stem.upper() in _WIN_RESERVED_STEMS:
+        stem = f"_{stem}"
+    stem = (
+        _truncate_utf8(stem, _MAX_STEM_UTF8_BYTES).rstrip("._-")
+        or "attachment"
+    )
+    dest = Path(ctx.settings.data_dir) / "attachments"
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        for counter in range(1, 10_001):
+            if counter == 1:
+                suffix = ""
+                cand_stem = stem
+            else:
+                suffix = f"-{counter}"
+                cand_stem = (
+                    _truncate_utf8(
+                        stem, _MAX_STEM_UTF8_BYTES - len(suffix)
+                    ).rstrip("._-")
+                    or "attachment"
+                )
+            candidate = dest / f"{cand_stem}{suffix}{ext}"
+            try:
+                with candidate.open("xb") as fh:
+                    fh.write(data)
+                return str(candidate)
+            except FileExistsError:
+                if not dest.is_dir():
+                    raise
+                continue
+            except PermissionError:
+                if dest.is_dir() and candidate.exists():
+                    continue
+                raise
+        raise OSError("attachment filename collision limit reached")
+    except OSError:
+        raise ToolError(
+            "internal",
+            "The server attachment folder cannot be written.",
+            hint=(
+                "Ask the operator to check DATA_DIR/attachments permissions "
+                "and available disk space."
+            ),
+        ) from None
+
+
 async def _get_attachment(ctx: Context, message_id: str,
                           attachment: Optional[str] = None,
-                          mode: str = "auto") -> Dict[str, Any]:
+                          mode: str = "auto",
+                          offset: int = 0) -> Dict[str, Any]:
+    if mode not in ("auto", "info", "text", "save"):
+        raise ToolError(
+            "validation",
+            cap_message(
+                f"Invalid mode {_safe_snippet(mode)!r}; expected one of "
+                "auto, info, text, save.",
+                MAX_ERROR_MESSAGE_CHARS,
+            ),
+        )
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ToolError("validation", "`offset` must be a non-negative integer.")
     raw_id = message_id
+    max_bytes = int(ctx.settings.ews_max_attachment_mb) * 1024 * 1024
+    cache = _text_cache(ctx)
 
-    def work(account: Any) -> Dict[str, Any]:
+    # Reading subsequent parts of an already-cached document starts no worker
+    # process and makes zero EWS calls.
+    if offset > 0 and mode in ("auto", "text"):
+        paged_hit = cache.get_for_paging(raw_id, attachment)
+        if paged_hit is not None:
+            paged_out: Dict[str, Any] = {
+                "ok": True,
+                "name": paged_hit.name,
+                "size_bytes": paged_hit.size_bytes,
+                "content_type": paged_hit.content_type,
+            }
+            return _render_text_response(
+                paged_out,
+                paged_hit.doc,
+                offset=offset,
+                smime_type=paged_hit.smime_type,
+            )
+
+    def _ceiling_error(name: str, byte_count: int) -> ToolError:
+        return ToolError(
+            "validation",
+            cap_message(
+                f"Attachment {_safe_snippet(name)!r} ({byte_count} bytes) exceeds "
+                f"the {ctx.settings.ews_max_attachment_mb} MB ceiling "
+                "(EWS_MAX_ATTACHMENT_MB).",
+                MAX_ERROR_MESSAGE_CHARS,
+            ),
+            hint="Use mode='info' for metadata, or ask the operator to "
+                 "raise EWS_MAX_ATTACHMENT_MB.",
+        )
+
+    def _check_declared_ceiling(name: str, size: Any) -> None:
+        if (
+            isinstance(size, (int, float))
+            and not isinstance(size, bool)
+            and size > max_bytes
+        ):
+            raise _ceiling_error(name, int(size))
+
+    def fetch_work(account: Any) -> Tuple[str, ...]:
         item = _fetch_one(account, raw_id, only=["attachments"])
         atts = list(getattr(item, "attachments", None) or [])
         if not atts:
             raise ToolError("not_found", "This message has no attachments.")
-        att = _pick_attachment(atts, attachment)
+        att_idx, att = _pick_attachment_with_index(atts, attachment)
         name = getattr(att, "name", "") or "attachment"
         content_type = getattr(att, "content_type", None)
         size = getattr(att, "size", None)
@@ -1392,77 +2343,247 @@ async def _get_attachment(ctx: Context, message_id: str,
             "size_bytes": size,
             "content_type": content_type,
         }
-        pkcs7 = is_pkcs7_candidate(name, content_type)
-        oversized_sniff = (
-            isinstance(size, (int, float))
-            and not isinstance(size, bool)
-            and size > _SMIME_SNIFF_MAX_BYTES
+        is_item = _is_item_attachment(att)
+        pkcs7_mime = (not is_item) and is_pkcs7_candidate(name, content_type)
+        pkcs7_sig = (not is_item) and (not pkcs7_mime) and _is_pkcs7_signature(
+            name, content_type
         )
-        if pkcs7 and oversized_sniff and mode in ("info", "auto"):
-            out["mode"] = "info"
-            out["hint"] = (
-                "PKCS#7 attachment exceeds the 5 MiB S/MIME sniff limit — "
-                "metadata only. Call again with mode='save' or mode='text' "
-                "to download the bytes."
+
+        # S/MIME (.p7m, .p7s): preserve exact `main` behaviour in every mode.
+        if pkcs7_mime:
+            oversized_sniff = (
+                isinstance(size, (int, float))
+                and not isinstance(size, bool)
+                and size > _SMIME_SNIFF_MAX_BYTES
             )
-            return out
-        data: Optional[bytes] = None
-        bytes_loaded = False
-        smime_type: Optional[str] = None
-        if pkcs7:
+            if oversized_sniff and mode in ("info", "auto"):
+                out["mode"] = "info"
+                out["hint"] = (
+                    "PKCS#7 attachment exceeds the 5 MiB S/MIME sniff limit — "
+                    "metadata only. Call again with mode='save' or mode='text' "
+                    "to download the bytes."
+                )
+                return ("done", out)
             data = _read_attachment_bytes(att)
-            bytes_loaded = True
             smime_type = sniff_smime_type(name, content_type, data)
             if smime_type:
                 out["smime_type"] = smime_type
-        chosen = mode
-        if mode == "auto":
-            if smime_type == "enveloped":
-                chosen = "info"
-                out["hint"] = ("S/MIME encrypted (PKCS#7 EnvelopedData) — the "
-                               "content is not readable without the recipient's "
-                               "private key.")
-            elif smime_type == "signed":
-                chosen = "text"
-            else:
-                chosen = "text" if _is_texty(name, content_type) else "info"
-                if chosen == "info":
-                    out["hint"] = ("Binary attachment — metadata only. Call again "
-                                   "with mode='save' to write it to disk.")
-        if chosen == "info":
-            out["mode"] = "info"
-            return out
-        if not bytes_loaded:
+            if mode == "info":
+                out["mode"] = "info"
+                return ("done", out)
+            if mode == "auto":
+                if smime_type == "enveloped":
+                    out["mode"] = "info"
+                    out["hint"] = (
+                        "S/MIME encrypted (PKCS#7 EnvelopedData) — the "
+                        "content is not readable without the recipient's "
+                        "private key."
+                    )
+                    return ("done", out)
+                if smime_type != "signed":
+                    out["mode"] = "info"
+                    out["hint"] = (
+                        "Binary attachment — metadata only. Call again "
+                        "with mode='save' to write it to disk."
+                    )
+                    return ("done", out)
+            if data is None:
+                out["mode"] = "info"
+                out["hint"] = "Attachment bytes were not returned by Exchange."
+                return ("done", out)
+            if mode in ("text", "auto"):
+                text = data.decode("utf-8", errors="replace")
+                out["mode"] = "text"
+                out["text"] = text[:_TEXT_CAP]
+                if len(text) > _TEXT_CAP:
+                    out["truncated"] = True
+                    out["total_chars"] = len(text)
+                if smime_type == "signed":
+                    out["hint"] = (
+                        "Signed, not encrypted (PKCS#7 SignedData) — this "
+                        "is the raw DER wrapper decoded as text, so the "
+                        "certificate/signature bytes around the readable "
+                        "message content appear as \ufffd replacement "
+                        "characters."
+                    )
+                return ("done", out)
+            out["mode"] = "save"
+            out["saved_path"] = _save_attachment_file(ctx, name, data)
+            return ("done", out)
+
+        if pkcs7_sig:
+            if mode == "info":
+                out["mode"] = "info"
+                return ("done", out)
+            if mode == "auto":
+                out["mode"] = "info"
+                out["hint"] = (
+                    "Binary attachment — metadata only. Call again "
+                    "with mode='save' to write it to disk."
+                )
+                return ("done", out)
             data = _read_attachment_bytes(att)
+            if data is None:
+                out["mode"] = "info"
+                out["hint"] = "Attachment bytes were not returned by Exchange."
+                return ("done", out)
+            if mode == "text":
+                text = data.decode("utf-8", errors="replace")
+                out["mode"] = "text"
+                out["text"] = text[:_TEXT_CAP]
+                if len(text) > _TEXT_CAP:
+                    out["truncated"] = True
+                    out["total_chars"] = len(text)
+                return ("done", out)
+            out["mode"] = "save"
+            out["saved_path"] = _save_attachment_file(ctx, name, data)
+            return ("done", out)
+
+        if mode == "info":
+            out["mode"] = "info"
+            return ("done", out)
+
+        if mode == "save":
+            if is_item:
+                raise ToolError(
+                    "validation",
+                    cap_message(
+                        f"Attachment {_safe_snippet(name)!r} is an attached "
+                        "Exchange message and cannot be saved as raw file bytes.",
+                        MAX_ERROR_MESSAGE_CHARS,
+                    ),
+                    hint="Use mode='auto' or mode='text' to read the attached message.",
+                )
+            data = _read_attachment_bytes(att)
+            if data is None:
+                raise ToolError(
+                    "validation",
+                    cap_message(
+                        f"Attachment {_safe_snippet(name)!r} has no retrievable bytes.",
+                        MAX_ERROR_MESSAGE_CHARS,
+                    ),
+                    hint="Use mode='info'.",
+                )
+            out["mode"] = "save"
+            out["saved_path"] = _save_attachment_file(ctx, name, data)
+            return ("done", out)
+
+        doc_kind = "message" if is_item else detect_kind(name, content_type)
+        if doc_kind is None:
+            if is_msg_attachment(name, content_type):
+                msg_note = (
+                    "Outlook .msg message file — metadata only. "
+                    "Call again with mode='save' to save it to disk and open it externally."
+                )
+                out["mode"] = "info"
+                out["hint"] = msg_note
+                out["note"] = msg_note
+                return ("done", out)
+            if mode == "auto":
+                out["mode"] = "info"
+                out["hint"] = (
+                    "Binary attachment — metadata only. Call again "
+                    "with mode='save' to write it to disk."
+                )
+                return ("done", out)
+            raise unsupported_type_error(name, content_type)
+
+        _check_declared_ceiling(name, size)
+        cache_key = _attachment_cache_key(att, raw_id, att_idx, name, size)
+        paging_info = {
+            "raw_msg_id": raw_id,
+            "selector": attachment,
+            "att_idx": att_idx,
+            "att_count": len(atts),
+            "name": name,
+            "size_bytes": size,
+            "content_type": content_type,
+        }
+
+        cached = cache.get(cache_key)
+        if cached is not None:
+            if cached.name is None:
+                cached.name = name
+                cached.size_bytes = size
+                cached.content_type = content_type
+            cache.bind_selector(raw_id, attachment, cache_key)
+            return ("done", _render_text_response(out, cached.doc, offset=offset))
+
+        if is_item:
+            attached_item = _read_attachment_item(att)
+            if attached_item is None:
+                raise ToolError(
+                    "validation",
+                    cap_message(
+                        f"Attachment {_safe_snippet(name)!r} has no retrievable "
+                        "message item.",
+                        MAX_ERROR_MESSAGE_CHARS,
+                    ),
+                    hint="Use mode='info'.",
+                )
+            item_fields = serialize_message_item_fields(
+                attached_item, tz=ctx.settings.ews_tz
+            )
+            return ("extract_item", out, cache_key, item_fields, paging_info)
+
+        if doc_kind == "pdf" and not pypdf_available():
+            raise ToolError(
+                "validation",
+                "PDF text extraction requires the optional 'pypdf' dependency, "
+                "which is not installed.",
+                hint=_PYPDF_MISSING_HINT,
+            )
+
+        data = _read_attachment_bytes(att)
         if data is None:
             raise ToolError(
                 "validation",
-                f"Attachment {name!r} has no retrievable bytes (item attachment?).",
-                hint="Only file attachments can be read; use mode='info'.",
+                cap_message(
+                    f"Attachment {_safe_snippet(name)!r} has no retrievable bytes.",
+                    MAX_ERROR_MESSAGE_CHARS,
+                ),
+                hint="Use mode='info'.",
             )
-        if chosen == "text":
-            text = data.decode("utf-8", errors="replace")
-            out["mode"] = "text"
-            out["text"] = text[:_TEXT_CAP]
-            if len(text) > _TEXT_CAP:
-                out["truncated"] = True
-            if smime_type == "signed":
-                out["hint"] = ("Signed, not encrypted (PKCS#7 SignedData) — this "
-                               "is the raw DER wrapper decoded as text, so the "
-                               "certificate/signature bytes around the readable "
-                               "message content appear as � replacement "
-                               "characters.")
-            return out
-        safe = re.sub(r"[^\w.\-]+", "_", name).strip("._") or "attachment.bin"
-        dest = Path(ctx.settings.data_dir) / "attachments"
-        dest.mkdir(parents=True, exist_ok=True)
-        path = dest / safe
-        path.write_bytes(data)
-        out["mode"] = "save"
-        out["saved_path"] = str(path)
-        return out
+        if len(data) > max_bytes:
+            raise _ceiling_error(name, len(data))
 
-    return await ctx.gateway.call(work)
+        if doc_kind == "text":
+            return ("extract_plain_text", out, cache_key, data, paging_info)
+
+        return ("extract_bytes", out, cache_key, data, name, content_type, paging_info)
+
+    fetched: Tuple[Any, ...] = await ctx.gateway.call(fetch_work)
+    action = fetched[0]
+    if action == "done":
+        return fetched[1]
+
+    if action == "extract_plain_text":
+        _, out_dict, cache_key, raw_bytes, paging_info = fetched
+        doc = await asyncio.to_thread(
+            extract_plain_text, raw_bytes, max_bytes=max_bytes
+        )
+        cache.put(cache_key, doc, **paging_info)
+        return _render_text_response(out_dict, doc, offset=offset)
+
+    keep_dumpable = bool(getattr(ctx.settings, "ews_keep_dumpable", False))
+    if action == "extract_item":
+        _, out_dict, cache_key, item_fields, paging_info = fetched
+        doc = await extract_item_in_worker(
+            item_fields, max_bytes=max_bytes, keep_dumpable=keep_dumpable
+        )
+        cache.put(cache_key, doc, **paging_info)
+        return _render_text_response(out_dict, doc, offset=offset)
+
+    _, out_dict, cache_key, raw_bytes, att_name, att_ct, paging_info = fetched
+    doc = await extract_bytes_in_worker(
+        raw_bytes,
+        name=att_name,
+        content_type=att_ct,
+        max_bytes=max_bytes,
+        keep_dumpable=keep_dumpable,
+    )
+    cache.put(cache_key, doc, **paging_info)
+    return _render_text_response(out_dict, doc, offset=offset)
 
 
 # --------------------------------------------------------------------------
@@ -1592,7 +2713,8 @@ TOOLS: List[ToolSpec] = [
     ToolSpec(
         name="list_folders",
         description=(
-            "List mail folders as a depth-limited tree walk. Each row is "
+            "List mail folders as a depth-limited tree walk, or search the "
+            "entire folder tree when `query` is given. Each row is "
             "{id, name, path, total, unread, children}; `id` is a short folder "
             "alias (f7) reusable as a `folder`/`parent` argument anywhere. "
             "Well-known folders also carry `wk` (e.g. 'f:inbox') — prefer "
@@ -1612,6 +2734,12 @@ TOOLS: List[ToolSpec] = [
             },
             "depth": {"type": "integer", "minimum": 1, "maximum": 5, "default": 2},
             "include_empty": {"type": "boolean", "default": True},
+            "query": {
+                "type": "string",
+                "description": "Non-empty case-insensitive substring match on "
+                               "folder name or full path across the whole tree "
+                               "(`depth` is ignored when `query` is set).",
+            },
             "fresh": dict(_FRESH_PROPERTY),
         }),
         handler=_list_folders,
@@ -1622,14 +2750,14 @@ TOOLS: List[ToolSpec] = [
             "Search mail. TWO ENGINES, mutually exclusive: pass `query` (an "
             "Exchange AQS string, e.g. 'from:alice@example.com subject:rfp hasattachment:yes') "
             "OR the structured filters (sender/subject/since/until/is_unread/"
-            "has_attachments/categories/flag_complete) — combining `query` with any "
-            "structured filter is "
+            "has_attachments/categories/importance/flag_complete) — combining "
+            "`query` with any structured filter is "
             "a validation error. `sender` is matched client-side against the "
             "fetched page's sender email/name, so total_available is unknown "
             "when it is used. Results are compact cards, newest first; their "
-            "`id` values are short aliases (m12) for get_message / get_thread / "
-            "get_attachment. If an id later goes stale (items move), re-run "
-            "this search for fresh ids."
+            "`id` values are short aliases (m12) for get_message / get_messages / "
+            "get_thread / get_attachment. If an id later goes stale (items move), "
+            "re-run this search for fresh ids."
         ),
         side_effect_class="read",
         requires_ews=True,
@@ -1679,6 +2807,13 @@ TOOLS: List[ToolSpec] = [
                                "categories; live search uses contains matching "
                                "whereas the local mirror matches exact category "
                                "elements. Cannot combine with `query`.",
+            },
+            "importance": {
+                "type": "string",
+                "enum": ["high", "normal", "low"],
+                "description": "Match messages by importance (high, normal, or "
+                               "low) on both the mirror and live lanes. Cannot "
+                               "combine with `query`.",
             },
             "recursive": {
                 "type": "boolean", "default": False,
@@ -1748,16 +2883,21 @@ TOOLS: List[ToolSpec] = [
             "m12; raw EWS ids also work). format='full' (default) returns "
             "recipients, the cleaned body (quoted history stripped — use "
             "get_thread for the conversation) and the attachment inventory; "
-            "format='concise' returns the compact card. `flag_complete` is "
-            "only reported when read live, i.e. with fresh=true. A not_found "
-            "means the id went stale (items move) — re-run search_messages "
-            "and retry with a fresh id."
+            "format='concise' returns the compact card; format='eml' writes "
+            "the message MIME content exclusively under DATA_DIR/attachments "
+            "(adding -2, -3, … rather than overwriting, and refusing above "
+            "EWS_MAX_ATTACHMENT_MB) and returns only saved_path and "
+            "size_bytes — a message exported from Sent Items may contain its "
+            "Bcc header because the file is the message as the mailbox holds "
+            "it. `flag_complete` is only reported when read live, i.e. with "
+            "fresh=true. A not_found means the id went stale (items move) — "
+            "re-run search_messages and retry with a fresh id."
         ),
         side_effect_class="read",
         requires_ews=True,
         input_schema=_schema({
             "id": {"type": "string", "description": "Message id (m-alias or raw)."},
-            "format": {"type": "string", "enum": ["full", "concise"],
+            "format": {"type": "string", "enum": ["full", "concise", "eml"],
                        "default": "full"},
             "include_html": {
                 "type": "boolean", "default": False,
@@ -1767,6 +2907,44 @@ TOOLS: List[ToolSpec] = [
             "fresh": dict(_FRESH_PROPERTY),
         }, required=["id"]),
         handler=_get_message,
+    ),
+    ToolSpec(
+        name="get_messages",
+        description=(
+            "Fetch up to 20 messages by id in one call, preserving the "
+            "requested order. Returns the canonical envelope {items, count, "
+            "total_available, next_offset} plus `failed` ({id, index, code, "
+            "error}) for per-message failures without aborting the remaining "
+            "ids; when some items come from the local mirror and some live, "
+            "top-level `source` is 'mixed' and each item carries its own "
+            "`source` (plus `as_of` on mirror items). format='full' (default) "
+            "returns the same cleaned message shape as get_message without "
+            "downloading attachment bytes: PKCS#7 S/MIME attachments are "
+            "reported as smime_type='candidate' from name and MIME type only, "
+            "whereas get_message gives the confirmed 'signed'/'enveloped' "
+            "classification for one message. format='concise' returns compact "
+            "cards."
+        ),
+        side_effect_class="read",
+        requires_ews=True,
+        resolve_ids=False,
+        input_schema=_schema({
+            "ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": GET_MESSAGES_MAX_IDS,
+                "description": "Message ids (m-aliases or raw EWS ids), 1 to 20 "
+                               "per call.",
+            },
+            "format": {
+                "type": "string",
+                "enum": ["concise", "full"],
+                "default": "full",
+            },
+            "fresh": dict(_FRESH_PROPERTY),
+        }, required=["ids"]),
+        handler=_get_messages,
     ),
     ToolSpec(
         name="get_thread",
@@ -1797,18 +2975,23 @@ TOOLS: List[ToolSpec] = [
         name="get_attachment",
         description=(
             "Read one attachment of a message. mode='info' → metadata only; "
-            "'text' → decoded UTF-8 text (capped at 20000 chars, `truncated` "
-            "flagged) for text-like attachments (text/* content type or "
-            ".txt/.csv/.md/.log/.json name); 'save' → write the bytes under "
-            "the server data dir and return saved_path; 'auto' (default) → "
-            "text when text-like, otherwise info plus a hint. An smime.p7m "
-            "attachment (application/pkcs7-mime) is sniffed and reported as "
-            "`smime_type: signed|enveloped` — signed is NOT encrypted (auto "
-            "decodes as text, cert/signature bytes show as replacement chars); "
-            "enveloped IS encrypted (auto stays info; content is unrecoverable "
-            "without the recipient's private key). When the message has "
-            "several attachments you MUST pick one via `attachment` (a name, "
-            "or a zero-based index as a string)."
+            "'text' → extracted text in memory (up to 20000 chars from `offset`, "
+            "with `total_chars`, `next_offset` when more follows, "
+            "`extracted_from`, and `pages`/`slides`/`sheets` count) for PDF "
+            "(.pdf, requires ews-mcp[extract]), Word (.docx/.docm), Excel "
+            "(.xlsx/.xlsm), PowerPoint (.pptx/.pptm), RFC-822 (.eml), attached "
+            "Exchange messages, HTML (.html/.htm), and plain text (.txt/.csv/"
+            ".md/.log/.json or text/*; .msg is not supported); 'save' → write "
+            "the bytes exclusively under DATA_DIR/attachments (adding -2, -3, "
+            "… rather than overwriting) and return saved_path; 'auto' "
+            "(default) → text for every supported document/text type, otherwise "
+            "info plus a hint. An smime.p7m attachment (application/pkcs7-mime) "
+            "is sniffed and reported as `smime_type: signed|enveloped` — signed "
+            "is NOT encrypted (auto decodes as text, cert/signature bytes show "
+            "as replacement chars); enveloped IS encrypted (auto stays info; "
+            "content is unrecoverable without the recipient's private key). "
+            "When the message has several attachments you MUST pick one via "
+            "`attachment` (a name, or a zero-based index as a string)."
         ),
         side_effect_class="read",
         requires_ews=True,
@@ -1823,6 +3006,15 @@ TOOLS: List[ToolSpec] = [
             },
             "mode": {"type": "string", "enum": ["auto", "info", "text", "save"],
                      "default": "auto"},
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": (
+                    "Character offset for reading extracted text in parts "
+                    "(pass the returned next_offset for the next chunk)."
+                ),
+            },
         }, required=["message_id"]),
         handler=_get_attachment,
     ),

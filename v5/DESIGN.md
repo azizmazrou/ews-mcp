@@ -44,8 +44,9 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
 
 Five packs (see the generated table in `docs/API.md`):
 
-- **mail-read** (7): `list_folders`, `search_messages`, `check_messages`,
-  `get_message`, `get_thread`, `get_attachment`, `get_mailbox_overview`.
+- **mail-read** (8): `list_folders`, `search_messages`, `check_messages`,
+  `get_message`, `get_messages`, `get_thread`, `get_attachment`,
+  `get_mailbox_overview`.
 - **calendar / people / status** (7): `list_events`, `get_event`,
   `check_availability`, `find_people`, `get_contact`, `get_oof_settings`,
   `get_server_status`.
@@ -210,6 +211,69 @@ transaction and run off the event loop.
 signature stripping) + attachment inventory. Raw HTML only on explicit
 `include_html=true`. Full HTML bodies routinely exceed 100 kB for a short
 message.
+
+`AttachmentText` (`toolerror.py`, `extract.py`, `extract_child.py`, `extract_worker.py`, `pdftext.py` + `get_attachment`):
+isolated per-document subprocess extraction (`python -m ewsmcp.extract_child`,
+loading only stdlib, `defusedxml`, and extraction modules — `pypdf` imported
+only when a PDF arrives, never `exchangelib`/`mcp`/`requests`; 20 s hard
+wall-clock limit with a 75% soft deadline between units of work returning
+`partial: true` + `notes`; 1,024 MB memory ceiling self-applied by the child to
+its own process before reading `stdin` via Win32 Job Object on Windows or
+`RLIMIT_AS` on Linux, reported on `get_server_status.document_memory_ceiling`
+when un-enforced on other platforms, plus parent Win32 kill-on-close Job Object
+and POSIX `start_new_session` + process-group `SIGKILL` so no child or
+grandchild process outlives the call; child JSON validated by the parent as
+untrusted hostile input; cancellation kills the child at once and holds the
+concurrency slot until cleanup finishes; server temp-folder or launch faults
+report `internal` without tripping the circuit breaker; scrubbed env without
+`USERNAME`; reduced `PATH`; empty temporary `cwd` removed with retry after child
+exit; ≤2 concurrent workers off the mail gateway pool) for document formats
+(`pdf`, `docx`, `xlsx`, `pptx`, `eml`, `message`, `html`), while plain `text`
+(`.txt`, `.csv`, `.md`, `.log`, `.json`, `text/*`) decodes and slices in-process
+(reading only as many bytes as the character limit can require, with no per-line
+work or line-end normalisation).
+**Boundary (plain words):** the worker protects the server against documents
+that consume unbounded time or memory and against parsers that crash; it is
+**not** an OS user or filesystem sandbox — code running inside a compromised
+parser runs under the server's OS account and could read files accessible to
+that account. On Linux, the server marks itself non-dumpable
+(`prctl(PR_SET_DUMPABLE, 0)`) before starting its first child so same-user
+processes cannot read `/proc/<pid>/environ` or server memory; setting
+`EWS_KEEP_DUMPABLE=true` leaves dumpability on for debugging.
+Supports `pdf` (optional `ews-mcp[extract]` / `pypdf>=6.21,<7` layout mode via
+`pdftext.py`: in-memory `/ToUnicode` RTL ligature reversal including single
+start-string `bfrange` expansion up to 256 codes, unpatched plain-mode text for
+linear RTL split-word repair up to 12 pieces and for pages with rotated text or
+Form XObjects invisible to layout mode, non-RTL layout-visible pages returned
+unchanged, whole-word `Word` vs Unicode reading-order recovery up to 5,000
+chars/line with single-space separation and no column-tab guessing, Arabic
+presentation-form and Persian-twin folding, and `"no text layer"` only when both
+layout and plain passes are empty, ≤500 pages), `docx`/`xlsx`/`pptx` (stdlib
+`zipfile` stored/deflated only + `defusedxml` iterative walking up to depth 256,
+macros untouched, ≤2,000 members checked up front, ≤30 MiB/member read,
+≤20 MiB/XML part for non-streamed parts, ≤100 MiB total read, Word
+`mc:Choice`-only alternate content, Excel worksheets streamed up to 5,000 rows ×
+50 columns with ISO dates/times and percentages formatted from `xl/styles.xml`,
+≤2,000 chars/cell, and ≤10-char cell refs), `eml` (`compat32` policy, raw 8-bit
+header bytes recovered as UTF-8 falling back to `Windows-1256` before the
+≤4,000-char header cut, ≤50 addresses/header), `message` (`ItemAttachment`
+fields), `html`, and `text` (lone surrogates replaced with U+FFFD, assembly cap
+of 5,000,000 chars; `.msg` files return `mode: "info"` with a save-and-open
+note/hint in both `auto` and `text` modes).
+Served in 20,000-char slices from `offset` with `total_chars`, `next_offset`
+(when more follows), `extracted_from`, `partial: true` whenever the returned
+document was cut, `notes` (a list of ≤8 notes ≤300 chars each, cut notes first
+and repeated notes folded with a count, repeated on every part alongside
+`note`), `pages`/`slides`/`sheets`, and `pages_read`/`slides_read`/`sheets_read`.
+An in-memory-only LRU+TTL cache (≤4 documents, ≤8,000,000 characters total,
+10 min TTL, keyed by `(attachment_id, size)` or an unambiguous fallback tuple,
+with `offset > 0` resolved only through the exact `(message_id, attachment)`
+selector binding or a fresh metadata-only picker lookup) serves subsequent parts
+without re-downloading or re-extracting and without writing mail to disk.
+
+`Person` (`find_people`, `get_contact`): `p`-alias `id`, `name`, `email`,
+`source` (`gal|contacts|mirror`), plus `title`, `department`, `office`,
+`company`, `phone`, and mirror `history` when present (omitted when absent).
 
 ## §Cache — the mirror (see `cache/`)
 

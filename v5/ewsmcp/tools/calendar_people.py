@@ -38,14 +38,22 @@ from ..bodyclean import clean_body, html_to_text
 from ..dates import parse_when
 from ..dto import envelope, event_card, fmt_dt
 from ..errors import ToolError
+from ..extract_worker import EXTRACT_MEMORY_LIMIT_MB, memory_ceiling_supported
 from .base import Context, ToolSpec
 
 GRID_MINUTES = 30  # free/busy slot granularity
 WORKING_HOURS = (dtime(9, 0), dtime(17, 0))
 MAX_WINDOW_DAYS = 366  # reject absurd windows like '+9999d' before EWS does
 MAX_CONTACT_SCAN = 1000  # cap the personal-contacts substring scan
-_CONTACT_FIELDS = ("display_name", "email_addresses", "job_title",
-                   "company_name", "phone_numbers")
+_CONTACT_FIELDS = (
+    "display_name",
+    "email_addresses",
+    "job_title",
+    "department",
+    "office",
+    "company_name",
+    "phone_numbers",
+)
 
 
 def _window(start: str, end: str, tz: str) -> Tuple[datetime, datetime]:
@@ -346,6 +354,12 @@ def _enrich_from_contact(person: Dict[str, Any], contact: Any) -> None:
     title = getattr(contact, "job_title", None)
     if title:
         person["title"] = str(title)
+    department = str(getattr(contact, "department", None) or "").strip()
+    if department:
+        person["department"] = department
+    office = str(getattr(contact, "office", None) or "").strip()
+    if office:
+        person["office"] = office
     company = getattr(contact, "company_name", None)
     if company:
         person["company"] = str(company)
@@ -543,6 +557,15 @@ async def _get_server_status(ctx: Context) -> Dict[str, Any]:
         cache_block["sync"] = {**ctx.sync.status(), "role": "leader"}
     elif ctx.lease is not None:
         cache_block["sync"] = {"role": "leader" if ctx.lease.held else "follower"}
+    ceiling_enforced = memory_ceiling_supported()
+    document_memory_ceiling: Dict[str, Any] = {
+        "enforced": ceiling_enforced,
+        "limit_mb": EXTRACT_MEMORY_LIMIT_MB,
+    }
+    if not ceiling_enforced:
+        document_memory_ceiling["note"] = (
+            "The memory ceiling for documents is not enforced on this platform."
+        )
     return {
         "ok": True,
         "version": __version__,
@@ -554,6 +577,7 @@ async def _get_server_status(ctx: Context) -> Dict[str, Any]:
         "counters": dict(ctx.counters),
         "alias_stats": ctx.aliaser.stats(),
         "cache": cache_block,
+        "document_memory_ceiling": document_memory_ceiling,
     }
 
 
@@ -676,9 +700,9 @@ TOOLS: List[ToolSpec] = [
         description=(
             "Fetch one person in full by id — a p-alias from find_people, a "
             "raw contact id, or a plain email address. Returns name/email/"
-            "title/company/phone where known, plus mirror-derived history "
-            "(first/last contact, sent/received counts) when the local "
-            "mirror is warm."
+            "title/department/office/company/phone where known, plus "
+            "mirror-derived history (first/last contact, sent/received "
+            "counts) when the local mirror is warm."
         ),
         side_effect_class="read",
         input_schema={

@@ -676,3 +676,146 @@ def test_get_event_returns_occurrence_when_master_cannot_be_loaded(
     assert event["type"] == kind
     assert "recurrence" not in event
 
+
+def test_people_results_include_department_and_office_when_present_and_omit_when_absent(
+    tmp_path,
+):
+    gal_with_fields = (
+        SimpleNamespace(name="Operations Lead", email_address="lead@example.com"),
+        SimpleNamespace(
+            display_name="Operations Lead",
+            job_title="Lead",
+            department="Operations",
+            office="Building 2",
+            company_name="Example Org",
+            phone_numbers=[SimpleNamespace(phone_number="+15550190")],
+        ),
+    )
+    gal_without_fields = (
+        SimpleNamespace(name="Support Desk", email_address="desk@example.com"),
+        SimpleNamespace(
+            display_name="Support Desk",
+            job_title=None,
+            department="   ",
+            office=None,
+            company_name=None,
+            phone_numbers=[],
+        ),
+    )
+    contact_with_fields = SimpleNamespace(
+        id="C-DEPT-1",
+        display_name="Finance Contact",
+        email_addresses=[SimpleNamespace(email="finance@example.com")],
+        job_title="Controller",
+        department="Finance",
+        office="Floor 4",
+        company_name="Example Org",
+        phone_numbers=[],
+    )
+    contact_without_fields = SimpleNamespace(
+        id="C-NODEPT-2",
+        display_name="External Contact",
+        email_addresses=[SimpleNamespace(email="external@example.com")],
+        job_title=None,
+        department=None,
+        office="",
+        company_name=None,
+        phone_numbers=[],
+    )
+
+    class _ContactsQS(list):
+        def __init__(self, items):
+            super().__init__(items)
+            self.only_fields = None
+
+        def only(self, *fields):
+            self.only_fields = fields
+            return self
+
+    contacts_qs = _ContactsQS([contact_with_fields, contact_without_fields])
+    account = MagicMock()
+    account.protocol.resolve_names.return_value = [gal_with_fields, gal_without_fields]
+    account.contacts.all.return_value = contacts_qs
+    ctx = _ctx(tmp_path, account)
+
+    found = _run(ctx, "find_people", {"query": "example.com"})
+    assert found["ok"] is True
+    assert "department" in contacts_qs.only_fields
+    assert "office" in contacts_qs.only_fields
+    by_email = {p["email"]: p for p in found["items"]}
+
+    assert by_email["lead@example.com"]["department"] == "Operations"
+    assert by_email["lead@example.com"]["office"] == "Building 2"
+    assert "department" not in by_email["desk@example.com"]
+    assert "office" not in by_email["desk@example.com"]
+
+    assert by_email["finance@example.com"]["department"] == "Finance"
+    assert by_email["finance@example.com"]["office"] == "Floor 4"
+    assert "department" not in by_email["external@example.com"]
+    assert "office" not in by_email["external@example.com"]
+
+    # get_contact via GAL p-alias (present and omitted) and Contact p-alias.
+    account.protocol.resolve_names.side_effect = (
+        lambda names, **_kw: [gal_with_fields]
+        if names == ["lead@example.com"]
+        else [gal_without_fields]
+    )
+    got_gal = _run(ctx, "get_contact", {"id": by_email["lead@example.com"]["id"]})
+    assert got_gal["ok"] is True
+    assert got_gal["person"]["department"] == "Operations"
+    assert got_gal["person"]["office"] == "Building 2"
+
+    got_gal_empty = _run(ctx, "get_contact", {"id": by_email["desk@example.com"]["id"]})
+    assert got_gal_empty["ok"] is True
+    assert "department" not in got_gal_empty["person"]
+    assert "office" not in got_gal_empty["person"]
+
+    account.fetch.side_effect = (
+        lambda ids, **_kw: [contact_with_fields]
+        if ids == [("C-DEPT-1", None)]
+        else [contact_without_fields]
+    )
+    got_contact = _run(
+        ctx, "get_contact", {"id": by_email["finance@example.com"]["id"]}
+    )
+    assert got_contact["ok"] is True
+    assert got_contact["person"]["department"] == "Finance"
+    assert got_contact["person"]["office"] == "Floor 4"
+
+    got_contact_empty = _run(
+        ctx, "get_contact", {"id": by_email["external@example.com"]["id"]}
+    )
+    assert got_contact_empty["ok"] is True
+    assert "department" not in got_contact_empty["person"]
+    assert "office" not in got_contact_empty["person"]
+
+
+def test_get_server_status_reports_document_memory_ceiling_enforcement(
+    tmp_path, monkeypatch
+):
+    import sys
+
+    from ewsmcp.tools import calendar_people as cp_mod
+
+    account = MagicMock()
+    ctx = _ctx(tmp_path, account)
+    ctx.registry = dict(SPEC)
+
+    res_real = _run(ctx, "get_server_status", {})
+    assert res_real["ok"] is True
+    dmc = res_real["document_memory_ceiling"]
+    assert dmc["limit_mb"] == 1024
+    expected_enforced = sys.platform == "win32" or sys.platform.startswith("linux")
+    assert dmc["enforced"] is expected_enforced
+    if not expected_enforced:
+        assert "not enforced on this platform" in dmc["note"]
+
+    # Simulate a platform where OS memory ceiling is not enforced (e.g. darwin).
+    monkeypatch.setattr(cp_mod, "memory_ceiling_supported", lambda: False)
+    res_other = _run(ctx, "get_server_status", {})
+    dmc_other = res_other["document_memory_ceiling"]
+    assert dmc_other["enforced"] is False
+    assert "not enforced on this platform" in dmc_other["note"]
+
+
+

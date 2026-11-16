@@ -36,7 +36,11 @@ from exchangelib import (
     Message,
     OofSettings,
 )
-from exchangelib.attachments import Attachment, AttachmentId
+from exchangelib.attachments import (
+    Attachment,
+    AttachmentId,
+    ItemAttachment,
+)
 from exchangelib.errors import (
     ErrorFolderNotFound,
     ErrorItemNotFound,
@@ -60,7 +64,7 @@ from exchangelib.folders import (
     SingleFolderQuerySet,
 )
 from exchangelib.folders.collections import FolderCollection
-from exchangelib.items import SEND_TO_NONE, Item, ReplyToItem
+from exchangelib.items import SEND_TO_NONE, Contact, Item, ReplyToItem
 from exchangelib.properties import (
     Actions,
     Address,
@@ -90,7 +94,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from ewsmcp.gateway.client import RejectingFaultTolerance
 from ewsmcp.gateway.rules import GetInboxRulesWithBlob
-from ewsmcp.tools import writes
+from ewsmcp.tools import calendar_people, mail_read, writes
 
 
 def _params(func):
@@ -691,5 +695,82 @@ def test_calendar_item_move_to_trash_and_meeting_fields_pins():
         "Tentative",
         "Unknown",
     }
+def test_contact_fields_and_person_enrichment_pins():
+    """Pin Contact field names relied on by find_people and get_contact."""
+    contact_fields = {f.name for f in Contact.FIELDS}
+    assert "department" in calendar_people._CONTACT_FIELDS
+    assert "office" in calendar_people._CONTACT_FIELDS
+    assert set(calendar_people._CONTACT_FIELDS).issubset(contact_fields)
+
+    sample = Contact(
+        display_name="Operations Lead",
+        job_title="Lead",
+        department="Operations",
+        office="Building 2",
+        company_name="Example Org",
+    )
+    assert sample.department == "Operations"
+    assert sample.office == "Building 2"
+
+
+def test_attachment_and_item_attachment_model_pins():
+    """Pin Attachment, FileAttachment, ItemAttachment, and AttachmentId fields
+    relied on by mail_read._get_attachment."""
+    assert issubclass(FileAttachment, Attachment)
+    assert issubclass(ItemAttachment, Attachment)
+    att_fields = {f.name for f in Attachment.FIELDS}
+    assert {"attachment_id", "name", "content_type", "size"}.issubset(att_fields)
+    assert "id" in {f.name for f in AttachmentId.FIELDS}
+    assert "_content" in {f.name for f in FileAttachment.FIELDS}
+    assert isinstance(FileAttachment.content, property)
+    assert "_item" in {f.name for f in ItemAttachment.FIELDS}
+    assert isinstance(ItemAttachment.item, property)
+
+    embedded = Message(subject="Embedded item")
+    item_att = ItemAttachment(name="Embedded item", item=embedded)
+    assert item_att.attachment_id is None
+    assert item_att.item is embedded
+
+
+def test_mail_read_importance_and_mime_content_field_pins():
+    """Pin Item/Message importance, mime_content, size, and mail_read field
+    projections against exchangelib 5.6.0."""
+    assert isinstance(Item.importance, ChoiceField)
+    assert Item.importance.field_uri == "item:Importance"
+    importance_values = sorted(c.value for c in Item.importance.choices)
+    assert importance_values == ["High", "Low", "Normal"]
+    assert set(mail_read._IMPORTANCE_TO_EWS.values()) == set(importance_values)
+
+    assert isinstance(Item.mime_content, MimeContentField)
+    assert Item.mime_content.field_uri == "item:MimeContent"
+    assert isinstance(Item.size, IntegerField)
+
+    msg_fields = {f.name for f in Message.FIELDS}
+    assert {"importance", "mime_content", "size"}.issubset(msg_fields)
+
+    validator = Folder()
+    version = Version(build=EXCHANGE_2016)
+    for projection in (
+        mail_read._PROJECTION,
+        mail_read._CHECK_PROJECTION,
+        mail_read._FULL_PROJECTION,
+        mail_read._EML_SIZE_FIELDS,
+    ):
+        assert projection
+        assert "mime_content" not in projection
+        for name in projection:
+            validator.validate_item_field(field=name, version=version)
+
+    assert "mime_content" in mail_read._EML_MIME_FIELDS
+    for name in mail_read._EML_MIME_FIELDS:
+        validator.validate_item_field(field=name, version=version)
+
+    for ews_val in mail_read._IMPORTANCE_TO_EWS.values():
+        Q(importance=ews_val).clean(version=version)
+
+    raw_eml = b"From: ops@example.com\r\nSubject: Pin\r\n\r\nBody.\r\n"
+    sample = Message(subject="Pin", importance="High", mime_content=raw_eml)
+    assert sample.importance == "High"
+    assert sample.mime_content == raw_eml
 
 

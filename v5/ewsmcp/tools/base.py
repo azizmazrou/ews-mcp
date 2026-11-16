@@ -65,6 +65,7 @@ class ToolSpec:
     # guard. Reserved key "body_text" is hashed in full but previewed as a
     # snippet.
     preview: Optional[Callable[[Any, Dict[str, Any]], Awaitable[Dict[str, Any]]]] = None
+    resolve_ids: bool = True
 
     def confirm_needed(self, kwargs: Dict[str, Any]) -> bool:
         return self.confirm(kwargs) if callable(self.confirm) else bool(self.confirm)
@@ -408,7 +409,8 @@ async def dispatch(ctx: Context, spec: ToolSpec, kwargs: Dict[str, Any],
         if spec.side_effect_class == "send":
             _rate_guard(ctx)
         # Alias → raw ids
-        kwargs = _resolve_ids(ctx, kwargs)
+        if spec.resolve_ids:
+            kwargs = _resolve_ids(ctx, kwargs)
         result = await spec.handler(ctx, **kwargs)
         ctx._circuit_failures = 0
         if isinstance(result, dict):

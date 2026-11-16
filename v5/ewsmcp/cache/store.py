@@ -450,6 +450,7 @@ class CacheStore:
         is_unread: Optional[bool] = None,
         has_attachments: Optional[bool] = None,
         categories: Optional[List[str]] = None,
+        importance: Optional[str] = None,
         offset: int = 0,
         limit: int = 20,
     ) -> Tuple[List[sqlite3.Row], int]:
@@ -498,6 +499,16 @@ class CacheStore:
                     "EXISTS (SELECT 1 FROM json_each(m.categories_json) "
                     "WHERE value = ?)")
                 params.append(cat)
+        if importance is not None:
+            imp = importance.strip().lower()
+            if imp == "normal":
+                where.append(
+                    "(m.importance IS NULL OR trim(m.importance) = '' "
+                    "OR lower(trim(m.importance)) = 'normal')"
+                )
+            else:
+                where.append("lower(trim(m.importance)) = ?")
+                params.append(imp)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         base = f"FROM messages m {joins}{clause}"
         with self._read() as conn:

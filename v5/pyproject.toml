@@ -18,8 +18,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+extract = [
+    "pypdf>=6.21,<7",
+]
 dev = [
     "html5lib>=1.1",
+    "pypdf>=6.21,<7",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",

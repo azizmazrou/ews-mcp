@@ -1,0 +1,2884 @@
+{
+ "what": "Synthetic lines drawn by real programs (a browser, and a word processor in six fonts), read back with pypdf. 'visual' is the layout-mode text of one page after the ligature map fix, line by line; 'plain' is the plain-mode text of the same page from an untouched reader (used only to repair words split by stray spaces); 'expected' is the reading-order text. 'match' says how strictly a line must agree: 'exact' (equal after collapsing whitespace) or 'letters' (same characters in the same order, whitespace ignored).",
+ "files": [
+  {
+   "name": "ltr",
+   "laid_out_by_word": false,
+   "pages": [
+    {
+     "plain": "The term اﻟﻤﯿﺰاﻧﯿﺔ means budget.\nSee section 4.2 (اﻟﺒﻨﺪ اﻟﺮاﺑﻊ )for details.\nContact: اﻟﻤﺪﻳﺮ at ext. 1234\nWhat is this؟\nPlain English line with 42 items.\nThe budget (اﻟﻤﯿﺰاﻧﯿﺔ )was approved on 2026-03-15.\nNorth (اﻟﺸﻤﺎل )and South (اﻟﺠﻨﻮب )offices\nThe clause ﻧﻄﺎق اﻟﻌﻤﻞ واﻟﺘﺴﻠﯿﻢ covers delivery.\nDates: 2025-2020 ﻣﻦ as agreed\nFee: 15 رﺳﻮم %of total\nThis paragraph is plain English and makes Latin letters the majority on the page.\nA second plain line, with numbers 2026-03-15 and 85.5% in it.\nReference: 5 اﻟﻤﺎدة of the policy",
+     "lines": [
+      {
+       "visual": "The term ﺔﯿﻧاﺰﯿﻤﻟا     means budget.",
+       "expected": "The term الميزانية means budget.",
+       "match": "exact"
+      },
+      {
+       "visual": "See section 4.2 (ﻊﺑ  اﺮﻟا  ﺪﻨﺒﻟا ) for details.",
+       "expected": "See section 4.2 (البند الرابع) for details.",
+       "match": "letters"
+      },
+      {
+       "visual": "Contact: ﺮﻳﺪﻤﻟا    at ext. 1234",
+       "expected": "Contact: المدير at ext. 1234",
+       "match": "exact"
+      },
+      {
+       "visual": "What is this؟",
+       "expected": "What is this؟",
+       "match": "exact"
+      },
+      {
+       "visual": "Plain English line with 42 items.",
+       "expected": "Plain English line with 42 items.",
+       "match": "exact"
+      },
+      {
+       "visual": "The budget (ﺔﯿﻧاﺰﯿﻤﻟا     ) was approved on 2026-03-15.",
+       "expected": "The budget (الميزانية) was approved on 2026-03-15.",
+       "match": "letters"
+      },
+      {
+       "visual": "North (لﺎ  ﻤﺸﻟا   ) and South (بﻮﻨﺠﻟا     ) offices",
+       "expected": "North (الشمال) and South (الجنوب) offices",
+       "match": "letters"
+      },
+      {
+       "visual": "The clause ﻢﯿﻠﺴﺘﻟا و ﻞﻤﻌﻟا  قﺎﻄﻧ covers delivery.",
+       "expected": "The clause نطاق العمل والتسليم covers delivery.",
+       "match": "exact"
+      },
+      {
+       "visual": "Dates: 2025-2020 ﻦﻣ as agreed",
+       "expected": "Dates: 2025-2020 من as agreed",
+       "match": "exact"
+      },
+      {
+       "visual": "Fee: 15 مﻮﺳر% of total",
+       "expected": "Fee: 15 رسوم% of total",
+       "match": "exact"
+      },
+      {
+       "visual": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "expected": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "match": "exact"
+      },
+      {
+       "visual": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "expected": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "match": "exact"
+      },
+      {
+       "visual": "Reference: 5 ةدﺎﻤﻟا     of the policy",
+       "expected": "Reference: 5 المادة of the policy",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "rtl",
+   "laid_out_by_word": false,
+   "pages": [
+    {
+     "plain": "ﺗﻘﺮﻳﺮ اﻟﻤﺮاﺟﻌﺔ اﻟﺴﻨﻮي\n ﻓﻲ اﻟﺘﻘﺎرﻳﺮPower BI ﻧﺴﺘﺨﺪم\n اﻟﻤﻌﺘﻤﺪISO 27001 وﻓﻖ ﻣﻌﯿﺎر\n ﺟﺎھﺰةQ3 2026 ﻧﺘﺎﺋﺞ اﻟﺮﺑﻊ\n( ﻣﻄﻠﻮﺑﺔData Governance) ﺣﻮﻛﻤﺔ اﻟﺒﯿﺎﻧﺎت\n ﻣﻦ اﻟﺨﻄﺔ2025-2020 اﻟﻔﺘﺮة\n ﺧﻼل اﻟﺪوام7890-456-100 ﻟﻠﺘﻮاﺻﻞ\n ﺗﻢ اﻟﺘﺴﻠﯿﻢ15-03-2026 ﺑﺘﺎرﻳﺦ\n ﺗﻢ اﻟﺘﺴﻠﯿﻢ15/03/2026 ﺑﺘﺎرﻳﺦ\n ﻣﺘﺎحhttps://www.example.com/page?id=5&lang=ar اﻟﺮاﺑﻂ\n ﻟﻼﺳﺘﻔﺴﺎرinfo@example.com اﻟﺒﺮﻳﺪ\n% ﺣﺘﻰ اﻵن85.5 ﻧﺴﺒﺔ اﻹﻧﺠﺎز\n ﷼1,250,000.50 اﻟﻤﺒﻠﻎ\n{أ}  ﻣﻦ اﻟﻨﻈﺎم[3] اﻟﻤﺎدة\nﻣﺎ ھﻮ اﻟﻤﻄﻠﻮب؟\nأوﻻ؛ ﺛﺎﻧﯿﺎ؛ ﺛﺎﻟﺜﺎ.\n ﻣﺴﺘﻘﺮv2.4.1 إﺻﺪار اﻟﻨﻈﺎم\n أﻋﻤﺪة4  ﺻﻔﺎ و12 :اﻟﺠﺪول\nاﻟﺴﻼم ﻋﻠﯿﻜﻢ ورﺣﻤﺔ ﷲ\nﻻ إﻟﻪ إﻻ ﷲ\n12345\n(2026)\nA-B-C 1-2-3\n15-03-2026 :اﻟﺘﺎرﻳﺦ\n2025-2020 :اﻟﻔﺘﺮة\n7890-456-100 :ھﺎﺗﻒ\n%85.5 ﻧﺴﺒﺔ اﻹﻧﺠﺎز\n%15 اﻟﻀﺮﻳﺒﺔ\nv2.4.1 :اﻹﺻﺪار\n1,250,000.50 :اﻟﻤﺒﻠﻎ\n2026/014 :رﻗﻢ اﻟﻤﺮﺟﻊ\n15/03/2026 :اﻟﺘﺎرﻳﺦ\n10:30 :اﻟﻮﻗﺖ\n%(.15 )ﺷﺎﻣﻠﺔ اﻟﻀﺮﻳﺒﺔ\n%(.15  ﷼ )ﺷﺎﻣﻠﺔ اﻟﻀﺮﻳﺒﺔ1,250,000.50",
+     "lines": [
+      {
+       "visual": "يﻮﻨﺴﻟا  ﺔﻌﺟا  ﺮﻤﻟا  ﺮﻳﺮﻘﺗ",
+       "expected": "تقرير المراجعة السنوي",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺮﻳرﺎﻘﺘﻟا  ﻲﻓ    Power BI مﺪﺨﺘﺴﻧ",
+       "expected": "نستخدم Power BI في التقارير",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺪﻤﺘﻌﻤﻟا  ISO 27001 رﺎﯿﻌﻣ ﻖﻓو",
+       "expected": "وفق معيار ISO 27001 المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ةﺰھﺎﺟ   Q3 2026 ﻊﺑ  ﺮﻟا  ﺞﺋﺎﺘﻧ",
+       "expected": "نتائج الربع Q3 2026 جاهزة",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺔﺑﻮﻠﻄﻣ (Data Governance) تﺎﻧﺎﯿﺒﻟا  ﺔﻤﻛﻮﺣ",
+       "expected": "حوكمة البيانات (Data Governance) مطلوبة",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺔﻄﺨﻟا  ﻦﻣ 2025-2020 ةﺮﺘﻔﻟا",
+       "expected": "الفترة 2020-2025 من الخطة",
+       "match": "exact"
+      },
+      {
+       "visual": "ماوﺪﻟا  لﻼ  ﺧ 7890-456-100 ﻞﺻاﻮﺘﻠﻟ",
+       "expected": "للتواصل 100-456-7890 خلال الدوام",
+       "match": "exact"
+      },
+      {
+       "visual": "ﻢﯿﻠﺴﺘﻟا  ﻢﺗ 15-03-2026 ﺦﻳرﺎﺘﺑ",
+       "expected": "بتاريخ 2026-03-15 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "ﻢﯿﻠﺴﺘﻟا  ﻢﺗ 15/03/2026 ﺦﻳرﺎﺘﺑ",
+       "expected": "بتاريخ 15/03/2026 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "حﺎﺘﻣ https://www.example.com/page?id=5&lang=ar ﻂﺑاﺮﻟا",
+       "expected": "الرابط https://www.example.com/page?id=5&lang=ar متاح",
+       "match": "exact"
+      },
+      {
+       "visual": "رﺎﺴﻔﺘﺳﻼﻟ      info@example.com ﺪﻳﺮﺒﻟا",
+       "expected": "البريد info@example.com للاستفسار",
+       "match": "exact"
+      },
+      {
+       "visual": "نﻵا ﻰﺘ   ﺣ   %85.5 زﺎﺠﻧﻹا ﺔﺒﺴﻧ",
+       "expected": "نسبة الإنجاز 85.5% حتى الآن",
+       "match": "exact"
+      },
+      {
+       "visual": "﷼ 1,250,000.50 ﻎﻠ  ﺒﻤﻟا",
+       "expected": "المبلغ 1,250,000.50 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "{أ} مﺎﻈﻨﻟا  ﻦﻣ [3] ةدﺎﻤﻟا",
+       "expected": "المادة [3] من النظام {أ}",
+       "match": "exact"
+      },
+      {
+       "visual": "؟بﻮﻠﻄﻤﻟا  ﻮھ ﺎﻣ",
+       "expected": "ما هو المطلوب؟",
+       "match": "exact"
+      },
+      {
+       "visual": ".ﺎﺜﻟﺎ ﺛ ؛ﺎ ﯿﻧﺎﺛ ؛ﻻ وأ",
+       "expected": "أولا؛ ثانيا؛ ثالثا.",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺮﻘﺘﺴﻣ v2.4.1 مﺎﻈﻨﻟا  راﺪﺻإ",
+       "expected": "إصدار النظام v2.4.1 مستقر",
+       "match": "exact"
+      },
+      {
+       "visual": "ةﺪﻤﻋأ 4 و ﺎﻔﺻ 12 :لوﺪﺠﻟا",
+       "expected": "الجدول: 12 صفا و 4 أعمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "ﷲ ﺔﻤﺣر  و ﻢﻜﯿﻠﻋ مﻼﺴﻟا",
+       "expected": "السلام عليكم ورحمة الله",
+       "match": "exact"
+      },
+      {
+       "visual": "ﷲ ﻻإ ﻪﻟإ  ﻻ",
+       "expected": "لا إله إلا الله",
+       "match": "exact"
+      },
+      {
+       "visual": "12345",
+       "expected": "12345",
+       "match": "exact"
+      },
+      {
+       "visual": "(2026)",
+       "expected": "(2026)",
+       "match": "exact"
+      },
+      {
+       "visual": "A-B-C 1-2-3",
+       "expected": "A-B-C 1-2-3",
+       "match": "exact"
+      },
+      {
+       "visual": "15-03-2026 :ﺦﻳرﺎﺘﻟا",
+       "expected": "التاريخ: 2026-03-15",
+       "match": "exact"
+      },
+      {
+       "visual": "2025-2020 :ةﺮﺘﻔﻟا",
+       "expected": "الفترة: 2020-2025",
+       "match": "exact"
+      },
+      {
+       "visual": "7890-456-100 :ﻒﺗﺎھ",
+       "expected": "هاتف: 100-456-7890",
+       "match": "exact"
+      },
+      {
+       "visual": "%85.5 زﺎﺠﻧﻹا ﺔﺒﺴﻧ",
+       "expected": "نسبة الإنجاز 85.5%",
+       "match": "exact"
+      },
+      {
+       "visual": "%15 ﺔﺒﻳﺮﻀﻟا",
+       "expected": "الضريبة 15%",
+       "match": "exact"
+      },
+      {
+       "visual": "v2.4.1 :راﺪﺻﻹا",
+       "expected": "الإصدار: v2.4.1",
+       "match": "exact"
+      },
+      {
+       "visual": "1,250,000.50 :ﻎﻠ  ﺒﻤﻟا",
+       "expected": "المبلغ: 1,250,000.50",
+       "match": "exact"
+      },
+      {
+       "visual": "2026/014 :ﻊﺟﺮ    ﻤﻟا  ﻢﻗر",
+       "expected": "رقم المرجع: 2026/014",
+       "match": "exact"
+      },
+      {
+       "visual": "15/03/2026 :ﺦﻳرﺎﺘﻟا",
+       "expected": "التاريخ: 15/03/2026",
+       "match": "exact"
+      },
+      {
+       "visual": "10:30 :ﺖﻗﻮﻟا",
+       "expected": "الوقت: 10:30",
+       "match": "exact"
+      },
+      {
+       "visual": ".(%15 ﺔﺒﻳﺮﻀﻟا  ﺔﻠﻣﺎﺷ)",
+       "expected": "(شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": ".(%15 ﺔﺒﻳﺮﻀﻟا  ﺔﻠﻣﺎﺷ) ﷼ 1,250,000.50",
+       "expected": "1,250,000.50 ريال (شاملة الضريبة 15%).",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": "3.2.1 اﻟﺒﻨﺪ\n(5) اﻟﻤﺎدة\n11564  اﻟﺮﻣﺰ1234 ص.ب\n5 - 3 :اﻟﻌﺪد\n17:00  إﻟﻰ9:00 ﻣﻦ\n7890 456 11 999+ :ھﺎﺗﻒ\n ﷼45,000 اﻟﺴﻌﺮ\n5 رﻗﻢ\n ﺗﺎرﻳﺦ اﻟﺘﺴﻠﯿﻢ2026-03-15\n ﻣﻦ اﻹﺟﻤﺎﻟﻲ15%\n رﻗﻢ اﻟﮫﺎﺗﻒ100-456-7890\n أﻳﺎم5\n ﻣﻠﯿﻮن ﷼3.5\nSAP S/4HANA :اﻟﻨﻈﺎم\n ھﻮ اﻟﻨﻈﺎم اﻟﻤﻌﺘﻤﺪPower BI\n ﺣﺎﻟﯿﺎWindows Server 2022 ﻳﻌﻤﻞ ﻋﻠﻰ\n اﻟﻤﻌﺘﻤﺪةIncoterms 2020 (DAP) وﻓﻖ\n أﺛﺮتCOVID-19 ﺟﺎﺋﺤﺔ\n أﻋﻠﻨﺖMicrosoft ،2026 ﻓﻲ ﻋﺎم\n ﺗﺘﻨﺎﻓﺴﺎنMicrosoft ،Google ﺷﺮﻛﺘﺎ\n ﻟﻜﻞ طﻠﺐ200ms زﻣﻦ اﻻﺳﺘﺠﺎﺑﺔ أﻗﻞ ﻣﻦ\n.JSON  ﺑﺼﯿﻐﺔAPI : دﻋﻢ واﺟﮫﺎت1 اﻟﻤﺘﻄﻠﺐ رﻗﻢ\n ﺷﺮﻛﺔABC - 5 اﻟﺒﻨﺪ\n٥١-٣٠-٦٢٠٢اﻟﺘﺎرﻳﺦ: \n ﷼٠٥٫٠٥٢٬١اﻟﻤﺒﻠﻎ \n٪ ﻓﻘﻂ٥١ﻧﺴﺒﺔ \n ﻓﻘﻂGB 5 اﻟﻤﺴﺎﺣﺔ\n ﺷﮫﺮﻳﺎUSD 500 اﻟﺴﻌﺮ",
+     "lines": [
+      {
+       "visual": "3.2.1 ﺪﻨﺒﻟا",
+       "expected": "البند 3.2.1",
+       "match": "exact"
+      },
+      {
+       "visual": "(5) ةدﺎﻤﻟا",
+       "expected": "المادة (5)",
+       "match": "exact"
+      },
+      {
+       "visual": "11564 ﺰﻣﺮﻟا  1234 ب.ص",
+       "expected": "ص.ب 1234 الرمز 11564",
+       "match": "exact"
+      },
+      {
+       "visual": "5 - 3 :دﺪﻌﻟا",
+       "expected": "العدد: 3 - 5",
+       "match": "exact"
+      },
+      {
+       "visual": "17:00 ﻰﻟإ     9:00 ﻦﻣ",
+       "expected": "من 9:00 إلى 17:00",
+       "match": "exact"
+      },
+      {
+       "visual": "7890 456 11 999+ :ﻒﺗﺎھ",
+       "expected": "هاتف: +999 11 456 7890",
+       "match": "exact"
+      },
+      {
+       "visual": "﷼ 45,000 ﺮﻌﺴﻟا",
+       "expected": "السعر 45,000 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "5 ﻢﻗر",
+       "expected": "رقم 5",
+       "match": "exact"
+      },
+      {
+       "visual": "ﻢﯿﻠﺴﺘﻟا  ﺦﻳرﺎﺗ 2026-03-15",
+       "expected": "2026-03-15 تاريخ التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "ﻲﻟﺎ    ﻤﺟﻹ  ا ﻦﻣ 15%",
+       "expected": "15% من الإجمالي",
+       "match": "exact"
+      },
+      {
+       "visual": "ﻒﺗﺎﮫﻟا  ﻢﻗر 100-456-7890",
+       "expected": "100-456-7890 رقم الهاتف",
+       "match": "exact"
+      },
+      {
+       "visual": "مﺎﻳأ 5",
+       "expected": "5 أيام",
+       "match": "exact"
+      },
+      {
+       "visual": "﷼ نﻮﯿﻠﻣ 3.5",
+       "expected": "3.5 مليون ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "SAP S/4HANA :مﺎﻈﻨﻟا",
+       "expected": "النظام: SAP S/4HANA",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺪﻤﺘﻌﻤﻟا  مﺎﻈﻨﻟا  ﻮھ Power BI",
+       "expected": "Power BI هو النظام المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺎﯿﻟﺎ ﺣ Windows Server 2022 ﻰﻠ   ﻋ ﻞﻤﻌﻳ",
+       "expected": "يعمل على Windows Server 2022 حاليا",
+       "match": "exact"
+      },
+      {
+       "visual": "ةﺪﻤﺘﻌﻤﻟا  Incoterms 2020 (DAP) ﻖﻓو",
+       "expected": "وفق Incoterms 2020 (DAP) المعتمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "تﺮﺛأ COVID-19 ﺔﺤﺋﺎﺟ",
+       "expected": "جائحة COVID-19 أثرت",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺖﻨﻠﻋأ Microsoft ،2026 مﺎﻋ ﻲﻓ",
+       "expected": "في عام 2026، Microsoft أعلنت",
+       "match": "exact"
+      },
+      {
+       "visual": "نﺎﺴﻓﺎﻨﺘﺗ Microsoft، Google ﺎﺘﻛﺮﺷ",
+       "expected": "شركتا Microsoft، Google تتنافسان",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺐﻠط ﻞﻜﻟ    200ms ﻦﻣ ﻞﻗأ ﺔﺑﺎﺠﺘﺳﻻا ﻦﻣز",
+       "expected": "زمن الاستجابة أقل من 200ms لكل طلب",
+       "match": "exact"
+      },
+      {
+       "visual": ".JSON ﺔﻐﯿﺼﺑ API تﺎﮫﺟا  و ﻢﻋد :1 ﻢﻗر ﺐﻠﻄﺘﻤﻟا",
+       "expected": "المتطلب رقم 1: دعم واجهات API بصيغة JSON.",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺔﻛﺮﺷ ABC - 5 ﺪﻨﺒﻟا",
+       "expected": "البند 5 - ABC شركة",
+       "match": "exact"
+      },
+      {
+       "visual": "١٥-٠٣-٢٠٢٦ :ﺦﻳرﺎﺘﻟا",
+       "expected": "التاريخ: ٢٠٢٦-٠٣-١٥",
+       "match": "exact"
+      },
+      {
+       "visual": "﷼ ١٬٢٥٠٫٥٠ ﻎﻠ  ﺒﻤﻟا",
+       "expected": "المبلغ ١٬٢٥٠٫٥٠ ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "ﻂﻘﻓ ٪١٥ ﺔﺒﺴﻧ",
+       "expected": "نسبة ١٥٪ فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ﻂﻘﻓ GB 5 ﺔﺣﺎ  ﺴﻤﻟا",
+       "expected": "المساحة GB 5 فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ﺎﻳﺮﮫﺷ USD 500 ﺮﻌﺴﻟا",
+       "expected": "السعر USD 500 شهريا",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_ltr_Arial",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": "The term الميزانية means budget. \nSee section 4.2 (البند الرابع )for details. \nContact: المدير at ext. 1234 \nWhat is this ؟ \nPlain English line with 42 items. \nThe budget (الميزانية )was approved on 2026-03-15. \nNorth (الشمال )and South (الجنوب )offices \nThe clause نطاق العمل والتسليم covers delivery. \nDates:  من2020-2025  as agreed \nFee:  رسوم15 % of total \nThis paragraph is plain English and makes Latin letters the majority on the page. \nA second plain line, with numbers 2026-03-15 and 85.5% in it. \nReference:  المادة5  of the policy \n ",
+     "lines": [
+      {
+       "visual": "The term ةينازيملا means budget.",
+       "expected": "The term الميزانية means budget.",
+       "match": "exact"
+      },
+      {
+       "visual": "See section 4.2 (عبارلا دنبلا) for details.",
+       "expected": "See section 4.2 (البند الرابع) for details.",
+       "match": "exact"
+      },
+      {
+       "visual": "Contact: ريدملا at ext. 1234",
+       "expected": "Contact: المدير at ext. 1234",
+       "match": "exact"
+      },
+      {
+       "visual": "What is this ؟",
+       "expected": "What is this؟",
+       "match": "letters"
+      },
+      {
+       "visual": "Plain English line with 42 items.",
+       "expected": "Plain English line with 42 items.",
+       "match": "exact"
+      },
+      {
+       "visual": "The budget (      ةينازيملا) was approved on 2026              -03-15.",
+       "expected": "The budget (الميزانية) was approved on 2026-03-15.",
+       "match": "letters"
+      },
+      {
+       "visual": "North (لامشلا) and South (بونجلا) offices",
+       "expected": "North (الشمال) and South (الجنوب) offices",
+       "match": "exact"
+      },
+      {
+       "visual": "The clause ميلستلاو لمعلا قاطن covers delivery.",
+       "expected": "The clause نطاق العمل والتسليم covers delivery.",
+       "match": "exact"
+      },
+      {
+       "visual": "Dates: 2025-2020 نم as agreed",
+       "expected": "Dates: 2025-2020 من as agreed",
+       "match": "exact"
+      },
+      {
+       "visual": "Fee: 15 موسر% of total",
+       "expected": "Fee: 15 رسوم% of total",
+       "match": "exact"
+      },
+      {
+       "visual": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "expected": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "match": "exact"
+      },
+      {
+       "visual": "A second plain line, with numbers 2026                    -03-15 and 85.5% in it.",
+       "expected": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "match": "exact"
+      },
+      {
+       "visual": "Reference:       5 ةداملا of the policy",
+       "expected": "Reference: 5 المادة of the policy",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_ltr_Calibri",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": "The term  المي زانية  means budget. \nSee section 4.2 (البند الرابع )for details. \nContact: المدير at ext. 1234 \nWhat is this؟ \nPlain English line with 42 items. \nThe budget (المي زانية  )was approved on 2026-03-15. \nNorth (الشمال )and South (الجنوب )offices \nThe clause نطاق العمل والتسليم covers delivery. \nDates:  من2020-2025  as agreed \nFee:  رسوم15 % of total \nThis paragraph is plain English and makes Latin letters the majority on the page. \nA second plain line, with numbers 2026-03-15 and 85.5% in it. \nReference:  المادة5  of the policy \n ",
+     "lines": [
+      {
+       "visual": "The term  ةيناز  يملا means budget.",
+       "expected": "The term الميزانية means budget.",
+       "match": "letters"
+      },
+      {
+       "visual": "See section 4.2 (عبارلا دنبلا) for details.",
+       "expected": "See section 4.2 (البند الرابع) for details.",
+       "match": "exact"
+      },
+      {
+       "visual": "Contact: ريدملا at ext. 1234",
+       "expected": "Contact: المدير at ext. 1234",
+       "match": "exact"
+      },
+      {
+       "visual": "What is this؟",
+       "expected": "What is this؟",
+       "match": "exact"
+      },
+      {
+       "visual": "Plain English line with 42 items.",
+       "expected": "Plain English line with 42 items.",
+       "match": "exact"
+      },
+      {
+       "visual": "The budget (ةيناز  يملا) was approved on 2026-03-15.",
+       "expected": "The budget (الميزانية) was approved on 2026-03-15.",
+       "match": "letters"
+      },
+      {
+       "visual": "North (لامشلا) and South (بونجلا) offices",
+       "expected": "North (الشمال) and South (الجنوب) offices",
+       "match": "exact"
+      },
+      {
+       "visual": "The clause ميلستلاو لمعلا قاطن covers delivery.",
+       "expected": "The clause نطاق العمل والتسليم covers delivery.",
+       "match": "exact"
+      },
+      {
+       "visual": "Dates: 2025-2020 نم as agreed",
+       "expected": "Dates: 2025-2020 من as agreed",
+       "match": "exact"
+      },
+      {
+       "visual": "Fee: 15 موسر% of total",
+       "expected": "Fee: 15 رسوم% of total",
+       "match": "exact"
+      },
+      {
+       "visual": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "expected": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "match": "exact"
+      },
+      {
+       "visual": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "expected": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "match": "exact"
+      },
+      {
+       "visual": "Reference: 5 ةداملا of the policy",
+       "expected": "Reference: 5 المادة of the policy",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_ltr_Sakkal_Majalla",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": "The term الميزانية means budget. \nSee section 4.2 (البند الرابع )for details. \nContact: المدير at ext. 1234 \nWhat is this ؟ \nPlain English line with 42 items. \nThe budget (الميزانية )was approved on 2026-03-15. \nNorth (الشمال )and South (الجنوب )offices \nThe clause نطاق العمل والتسليم covers delivery. \nDates:   من2020-2025  as agreed \nFee:  رسوم15 % of total \nThis paragraph is plain English and makes Latin letters the majority on the page. \nA second plain line, with numbers 2026-03-15 and 85.5% in it. \nReference:  المادة5  of the policy \n ",
+     "lines": [
+      {
+       "visual": "The term ةينازيملا means budget.",
+       "expected": "The term الميزانية means budget.",
+       "match": "exact"
+      },
+      {
+       "visual": "See section 4.2 (عبارلا دنبلا) for details.",
+       "expected": "See section 4.2 (البند الرابع) for details.",
+       "match": "exact"
+      },
+      {
+       "visual": "Contact: ريدملا at ext. 1234",
+       "expected": "Contact: المدير at ext. 1234",
+       "match": "exact"
+      },
+      {
+       "visual": "What is this ؟",
+       "expected": "What is this؟",
+       "match": "letters"
+      },
+      {
+       "visual": "Plain English line with 42 items.",
+       "expected": "Plain English line with 42 items.",
+       "match": "exact"
+      },
+      {
+       "visual": "The budget (     ةينازيملا) was approved on 2026            -03-15.",
+       "expected": "The budget (الميزانية) was approved on 2026-03-15.",
+       "match": "letters"
+      },
+      {
+       "visual": "North (لامشلا) and South (بونجلا) offices",
+       "expected": "North (الشمال) and South (الجنوب) offices",
+       "match": "exact"
+      },
+      {
+       "visual": "The clause ميلستلاو لمعلا قاطن covers delivery.",
+       "expected": "The clause نطاق العمل والتسليم covers delivery.",
+       "match": "exact"
+      },
+      {
+       "visual": "Dates: 2025-2020  نم as agreed",
+       "expected": "Dates: 2025-2020 من as agreed",
+       "match": "exact"
+      },
+      {
+       "visual": "Fee: 15 موسر% of total",
+       "expected": "Fee: 15 رسوم% of total",
+       "match": "exact"
+      },
+      {
+       "visual": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "expected": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "match": "exact"
+      },
+      {
+       "visual": "A second plain line, with numbers 2026                 -03-15 and 85.5% in it.",
+       "expected": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "match": "exact"
+      },
+      {
+       "visual": "Reference: 5 ةداملا of the policy",
+       "expected": "Reference: 5 المادة of the policy",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_ltr_Tahoma",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": "The term الميزانية means budget. \nSee section 4.2 (البند الرابع )for details. \nContact: المدير at ext. 1234 \nWhat is this ؟ \nPlain English line with 42 items. \nThe budget (الميزانية )was approved on 2026-03-15. \nNorth (الشمال )and South (الجنوب )offices \nThe clause نطاق العمل والتسليم covers delivery. \nDates:  من2020-2025  as agreed \nFee:  رسوم15 % of total \nThis paragraph is plain English and makes Latin letters the majority on the page. \nA second plain line, with numbers 2026-03-15 and 85.5% in it. \nReference:  المادة5  of the policy \n ",
+     "lines": [
+      {
+       "visual": "The term ةينازيملا means budget.",
+       "expected": "The term الميزانية means budget.",
+       "match": "exact"
+      },
+      {
+       "visual": "See section 4.2 (عبارلا دنبلا) for details.",
+       "expected": "See section 4.2 (البند الرابع) for details.",
+       "match": "exact"
+      },
+      {
+       "visual": "Contact: ريدملا at ext. 1234",
+       "expected": "Contact: المدير at ext. 1234",
+       "match": "exact"
+      },
+      {
+       "visual": "What is this ؟",
+       "expected": "What is this؟",
+       "match": "letters"
+      },
+      {
+       "visual": "Plain English line with 42 items.",
+       "expected": "Plain English line with 42 items.",
+       "match": "exact"
+      },
+      {
+       "visual": "The budget (      ةينازيملا  ) was approved on 2026             -03-15.",
+       "expected": "The budget (الميزانية) was approved on 2026-03-15.",
+       "match": "letters"
+      },
+      {
+       "visual": "North (لامشلا) and South (بونجلا) offices",
+       "expected": "North (الشمال) and South (الجنوب) offices",
+       "match": "exact"
+      },
+      {
+       "visual": "The clause ميلستلاو لمعلا قاطن covers delivery.",
+       "expected": "The clause نطاق العمل والتسليم covers delivery.",
+       "match": "exact"
+      },
+      {
+       "visual": "Dates: 2025-2020 نم as agreed",
+       "expected": "Dates: 2025-2020 من as agreed",
+       "match": "exact"
+      },
+      {
+       "visual": "Fee: 15 موسر% of total",
+       "expected": "Fee: 15 رسوم% of total",
+       "match": "exact"
+      },
+      {
+       "visual": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "expected": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "match": "exact"
+      },
+      {
+       "visual": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "expected": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "match": "exact"
+      },
+      {
+       "visual": "Reference:      5 ةداملا   of the policy",
+       "expected": "Reference: 5 المادة of the policy",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_ltr_Times_New_Roman",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": "The term الميزانية means budget. \nSee section 4.2 (البند الرابع )for details. \nContact: المدير at ext. 1234 \nWhat is this؟ \nPlain English line with 42 items. \nThe budget (الميزانية )was approved on 2026-03-15. \nNorth (الشمال )and South (الجنوب )offices \nThe clause نطاق العمل والتسليم covers delivery. \nDates:  من2020 -2025  as agreed \nFee:  رسوم15 % of total \nThis paragraph is plain English and makes Latin letters the majority on the page. \nA second plain line, with numbers 2026-03-15 and 85.5% in it. \nReference:   المادة5  of the policy \n ",
+     "lines": [
+      {
+       "visual": "The term ةينازيملا means budget.",
+       "expected": "The term الميزانية means budget.",
+       "match": "exact"
+      },
+      {
+       "visual": "See section 4.2 (عبارلا دنبلا) for details.",
+       "expected": "See section 4.2 (البند الرابع) for details.",
+       "match": "exact"
+      },
+      {
+       "visual": "Contact: ريدملا at ext. 1234",
+       "expected": "Contact: المدير at ext. 1234",
+       "match": "exact"
+      },
+      {
+       "visual": "What is this؟",
+       "expected": "What is this؟",
+       "match": "exact"
+      },
+      {
+       "visual": "Plain English line with 42 items.",
+       "expected": "Plain English line with 42 items.",
+       "match": "exact"
+      },
+      {
+       "visual": "The budget (ةينازيملا) was approved on 2026-03-15.",
+       "expected": "The budget (الميزانية) was approved on 2026-03-15.",
+       "match": "exact"
+      },
+      {
+       "visual": "North (لامشلا) and South (بونجلا) offices",
+       "expected": "North (الشمال) and South (الجنوب) offices",
+       "match": "exact"
+      },
+      {
+       "visual": "The clause ميلستلاو لمعلا قاطن covers delivery.",
+       "expected": "The clause نطاق العمل والتسليم covers delivery.",
+       "match": "exact"
+      },
+      {
+       "visual": "Dates: 2025     -2020 نم    as agreed",
+       "expected": "Dates: 2025-2020 من as agreed",
+       "match": "exact"
+      },
+      {
+       "visual": "Fee:  15 موسر   % of total",
+       "expected": "Fee: 15 رسوم% of total",
+       "match": "letters"
+      },
+      {
+       "visual": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "expected": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "match": "exact"
+      },
+      {
+       "visual": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "expected": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "match": "exact"
+      },
+      {
+       "visual": "Reference: 5  ةداملا of the policy",
+       "expected": "Reference: 5 المادة of the policy",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_ltr_Traditional_Arabic",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": "The term الميزانية means budget. \nSee section 4.2 (البند الرابع )for details. \nContact:  المدير at ext. 1234 \nWhat is this؟ \nPlain English line with 42 items. \nThe budget (الميزانية )was approved on 2026-03-15. \nNorth (الشمال )and South (الجنوب )offices \nThe clause نطاق العمل والتسليم covers delivery. \nDates:  من2020-2025  as agreed \nFee:  رسوم15 % of total \nThis paragraph is plain English and makes Latin letters the majority on the page. \nA second plain line, with numbers 2026-03-15 and 85.5% in it. \nReference:  المادة5  of the policy \n ",
+     "lines": [
+      {
+       "visual": "The term ةينازيملا means budget.",
+       "expected": "The term الميزانية means budget.",
+       "match": "exact"
+      },
+      {
+       "visual": "See section 4.2 (عبارلا دنبلا) for details.",
+       "expected": "See section 4.2 (البند الرابع) for details.",
+       "match": "exact"
+      },
+      {
+       "visual": "Contact:  ريدملا at ext. 1234",
+       "expected": "Contact: المدير at ext. 1234",
+       "match": "exact"
+      },
+      {
+       "visual": "What is this؟",
+       "expected": "What is this؟",
+       "match": "exact"
+      },
+      {
+       "visual": "Plain English line with 42 items.",
+       "expected": "Plain English line with 42 items.",
+       "match": "exact"
+      },
+      {
+       "visual": "The budget (ةينازيملا) was approved on 2026-03-15.",
+       "expected": "The budget (الميزانية) was approved on 2026-03-15.",
+       "match": "exact"
+      },
+      {
+       "visual": "North (لامشلا) and South (بونجلا) offices",
+       "expected": "North (الشمال) and South (الجنوب) offices",
+       "match": "exact"
+      },
+      {
+       "visual": "The clause ميلستلاو لمعلا قاطن covers delivery.",
+       "expected": "The clause نطاق العمل والتسليم covers delivery.",
+       "match": "exact"
+      },
+      {
+       "visual": "Dates: 2025-2020 نم as agreed",
+       "expected": "Dates: 2025-2020 من as agreed",
+       "match": "exact"
+      },
+      {
+       "visual": "Fee: 15 موسر% of total",
+       "expected": "Fee: 15 رسوم% of total",
+       "match": "exact"
+      },
+      {
+       "visual": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "expected": "This paragraph is plain English and makes Latin letters the majority on the page.",
+       "match": "exact"
+      },
+      {
+       "visual": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "expected": "A second plain line, with numbers 2026-03-15 and 85.5% in it.",
+       "match": "exact"
+      },
+      {
+       "visual": "Reference: 5 ةداملا of the policy",
+       "expected": "Reference: 5 المادة of the policy",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_rtl_Arial",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": " تقرير المراجعة السنوي \nنستخدم Power BI  في التقارير \nوفق معيار ISO 27001  المعتمد \nنتائج الربع Q3 2026  جاهزة \nحوكمة البيانات (Data Governance) مطلوبة \nالفترة 2020-2025 من الخطة \nللتواصل 100-456-7890  خلال الدوام \nبتاريخ 2026-03-15  تم التسليم \nبتاريخ 15/03/2026  تم التسليم \nالرابط https://www.example.com/page?id=5&lang=ar متاح \nالبريد info@example.com للاستفسار \nنسبة الإنجاز 85.5 % حتى الآن \nالمبلغ 1,250,000.50 ريال \n[ المادة3 }أ{  من النظام] \nما هو المطلوب؟ \nأولا؛ ثانيا؛ ثالثا.  \nإصدار النظام v2.4.1 مستقر \nالجدول: 12  صفا و4  أعمدة \nالسلام عليكم ورحمة الله \nلا إله إلا الله \n12345 \n(2026 ) \nA-B-C 1-2-3 \n :التاريخ2026-03-15 \n :الفترة2020-2025 \n :هاتف100-456 -7890 \n نسبة الإنجاز85.5% \n الضريبة15% \n :الإصدارv2.4.1 ",
+     "lines": [
+      {
+       "visual": "يونسلا ةعجارملا ريرقت",
+       "expected": "تقرير المراجعة السنوي",
+       "match": "exact"
+      },
+      {
+       "visual": "ريراقتلا يف Power BI مدختسن",
+       "expected": "نستخدم Power BI في التقارير",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ISO 27001 رايعم قفو",
+       "expected": "وفق معيار ISO 27001 المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ةزهاج Q3 2026 عبرلا جئاتن",
+       "expected": "نتائج الربع Q3 2026 جاهزة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةبولطم )Data Governance( تانايبلا ةمكوح",
+       "expected": "حوكمة البيانات (Data Governance) مطلوبة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةطخلا نم 2025-2020 ةرتفلا",
+       "expected": "الفترة 2020-2025 من الخطة",
+       "match": "exact"
+      },
+      {
+       "visual": "ماودلا لالخ 7890-456-100 لصاوتلل",
+       "expected": "للتواصل 100-456-7890 خلال الدوام",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 15-03-2026 خيراتب",
+       "expected": "بتاريخ 2026-03-15 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 2026/03/15 خيراتب",
+       "expected": "بتاريخ 15/03/2026 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "حاتم https://www.example.com/page?id=5&lang=ar طبارلا",
+       "expected": "الرابط https://www.example.com/page?id=5&lang=ar متاح",
+       "match": "exact"
+      },
+      {
+       "visual": "راسفتسالل info@example.com ديربلا",
+       "expected": "البريد info@example.com للاستفسار",
+       "match": "exact"
+      },
+      {
+       "visual": "نآلا ىتح %85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5% حتى الآن",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير 1,250,000.50 غلبملا",
+       "expected": "المبلغ 1,250,000.50 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "}أ{ ماظنلا نم ]3[ ةداملا",
+       "expected": "المادة [3] من النظام {أ}",
+       "match": "exact"
+      },
+      {
+       "visual": "؟بولطملا وه ام",
+       "expected": "ما هو المطلوب؟",
+       "match": "exact"
+      },
+      {
+       "visual": ".اثلاث ؛ايناث ؛الوأ",
+       "expected": "أولا؛ ثانيا؛ ثالثا.",
+       "match": "exact"
+      },
+      {
+       "visual": "رقتسم v2.4.1 ماظنلا رادصإ",
+       "expected": "إصدار النظام v2.4.1 مستقر",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمعأ 4 و افص 12 :لودجلا",
+       "expected": "الجدول: 12 صفا و 4 أعمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا ةمحرو مكيلع مالسلا",
+       "expected": "السلام عليكم ورحمة الله",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا الإ هلإ ال",
+       "expected": "لا إله إلا الله",
+       "match": "exact"
+      },
+      {
+       "visual": "12345",
+       "expected": "12345",
+       "match": "exact"
+      },
+      {
+       "visual": ")2026(",
+       "expected": "(2026)",
+       "match": "exact"
+      },
+      {
+       "visual": "A  -B -C 1   -2 -3",
+       "expected": "A-B-C 1-2-3",
+       "match": "exact"
+      },
+      {
+       "visual": "15-03-2026 :خيراتلا",
+       "expected": "التاريخ: 2026-03-15",
+       "match": "exact"
+      },
+      {
+       "visual": "2025-2020 :ةرتفلا",
+       "expected": "الفترة: 2020-2025",
+       "match": "exact"
+      },
+      {
+       "visual": "7890     -456-100 :فتاه",
+       "expected": "هاتف: 100-456-7890",
+       "match": "exact"
+      },
+      {
+       "visual": "%  85.5    زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5%",
+       "match": "letters"
+      },
+      {
+       "visual": "%15 ةبيرضلا",
+       "expected": "الضريبة 15%",
+       "match": "exact"
+      },
+      {
+       "visual": "v2.4.1 :رادصإلا",
+       "expected": "الإصدار: v2.4.1",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " :المبلغ1,250,000.50 \n :رقم المرجع2026 /014 \n :التاريخ15/03/2026 \n :الوقت10:30 \n (شاملة الضريبة15 .)% \n1,250,000.50  ريال (شاملة الضريبة15 .)% \n البند3.2.1 \n( المادة5) \n ص.ب1234  الرمز11564 \n :العدد3 - 5 \n من9:00  إلى17:00 \n+ :هاتف999 11 456 7890 \n السعر45,000 ريال \nرقم 5 \n2026-03-15  تاريخ التسليم \n15% من الإجمالي \n100-456-7890 رقم الهاتف \n5 أيام \n3.5 ريال مليون \nالنظام: SAP S/4HANA \nPower BI هو النظام المعتمد \nيعمل على Windows Server 2022  حاليا \nوفق Incoterms 2020 (DAP)  المعتمدة \nجائحة COVID-19 أثرت \nفي عام 2026 ،Microsoft  أعلنت \nشركتا Microsoft ،Google تتنافسان \nزمن الاستجابة أقل من 200ms لكل طلب \nالمتطلب رقم 1 : دعم واجهاتAPI  بصيغةJSON. \n البند5 - ABC شركة ",
+     "lines": [
+      {
+       "visual": "1,250,000.50 :غلبملا",
+       "expected": "المبلغ: 1,250,000.50",
+       "match": "exact"
+      },
+      {
+       "visual": "014 / 2026 :عجرملا مقر",
+       "expected": "رقم المرجع: 2026/014",
+       "match": "exact"
+      },
+      {
+       "visual": "2026/03/15 :خيراتلا",
+       "expected": "التاريخ: 15/03/2026",
+       "match": "exact"
+      },
+      {
+       "visual": "10:30 :تقولا",
+       "expected": "الوقت: 10:30",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش(",
+       "expected": "(شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش( لاير 1,250,000.50",
+       "expected": "1,250,000.50 ريال (شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": "3.2.1 دنبلا",
+       "expected": "البند 3.2.1",
+       "match": "exact"
+      },
+      {
+       "visual": ")5( ةداملا",
+       "expected": "المادة (5)",
+       "match": "exact"
+      },
+      {
+       "visual": "11564 زمرلا 1234 ب.ص",
+       "expected": "ص.ب 1234 الرمز 11564",
+       "match": "exact"
+      },
+      {
+       "visual": "5 - 3 :ددعلا",
+       "expected": "العدد: 3 - 5",
+       "match": "letters"
+      },
+      {
+       "visual": "17:00 ىلإ 9:00 نم",
+       "expected": "من 9:00 إلى 17:00",
+       "match": "exact"
+      },
+      {
+       "visual": "7890    456   11 999+ :فتاه",
+       "expected": "هاتف: +999 11 456 7890",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير 45,000     رعسلا",
+       "expected": "السعر 45,000 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "5  مقر",
+       "expected": "رقم 5",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا خيرات 15-03- 2026",
+       "expected": "2026-03-15 تاريخ التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "يلامجإلا نم %15",
+       "expected": "15% من الإجمالي",
+       "match": "exact"
+      },
+      {
+       "visual": "فتاهلا مقر 7890-456-100",
+       "expected": "100-456-7890 رقم الهاتف",
+       "match": "exact"
+      },
+      {
+       "visual": "مايأ 5",
+       "expected": "5 أيام",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير نويلم 3.5",
+       "expected": "3.5 مليون ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "SAP S/4HANA :ماظنلا",
+       "expected": "النظام: SAP S/4HANA",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ماظنلا وه Power BI",
+       "expected": "Power BI هو النظام المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ايلاح Windows Server 2022 ىلع لمعي",
+       "expected": "يعمل على Windows Server 2022 حاليا",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمتعملا Incoterms 2020 (DAP) قفو",
+       "expected": "وفق Incoterms 2020 (DAP) المعتمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "ترثأ COVID-19 ةحئاج",
+       "expected": "جائحة COVID-19 أثرت",
+       "match": "exact"
+      },
+      {
+       "visual": "تنلعأ Microsoft ،2026 ماع يف",
+       "expected": "في عام 2026، Microsoft أعلنت",
+       "match": "exact"
+      },
+      {
+       "visual": "ناسفانتت Google ،Microsoft اتكرش",
+       "expected": "شركتا Microsoft، Google تتنافسان",
+       "match": "exact"
+      },
+      {
+       "visual": "بلط لكل ms200 نم لقأ ةباجتسالا نمز",
+       "expected": "زمن الاستجابة أقل من ms200 لكل طلب",
+       "match": "exact"
+      },
+      {
+       "visual": ".JSON ةغيصب API تاهجاو معد :1 مقر بلطتملا",
+       "expected": "المتطلب رقم 1: دعم واجهات API بصيغة JSON.",
+       "match": "exact"
+      },
+      {
+       "visual": "ةكرش ABC - 5 دنبلا",
+       "expected": "البند 5 - ABC شركة",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " :التاريخ٦٢٠٢-٣٠-٥١ \nالمبلغ ٠٥٫٠٥٢٬١ ريال \nنسبة ٥١٪ فقط  \nالمساحة 5 GB فقط \nالسعر 500 USD  شهريا \n ",
+     "lines": [
+      {
+       "visual": "١٥-٠٣-٢٠٢٦ :خيراتلا",
+       "expected": "التاريخ: ٢٠٢٦-٠٣-١٥",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير ١٬٢٥٠٫٥٠ غلبملا",
+       "expected": "المبلغ ١٬٢٥٠٫٥٠ ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف ٪١٥ ةبسن",
+       "expected": "نسبة ١٥٪ فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف GB 5 ةحاسملا",
+       "expected": "المساحة GB 5 فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ايرهش USD 500 رعسلا",
+       "expected": "السعر USD 500 شهريا",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_rtl_Calibri",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": " تقرير المراجعة السنوي \nنستخدم Power BI  ف ي التقارير  \nوفق معيار ISO 27001   المعتمد \nنتائج الرب  ع Q3 2026  جاهزة \nحوكمة البيانات (Data Governance) مطلوبة \nالفترة 2020-2025  من الخطة \nللتواصل 100-456-7890 خلال الدوام \nبتاري    خ 2026-03-15  تم التسليم \nبتاري    خ 15 /03 /2026  تم التسليم \nالرابط  https://www.example.com/page?id=5&lang=ar  متاح \nالبريد info@example.com  للاستفسار \nنسبة الإنجاز 85.5% حتى الآن  \nالمبلغ 1,250,000.50 ريال \n[ المادة3 }أ{  من النظام] \n ما هو المطلوب؟ \nأولا؛ ثانيا؛ ثالثا.  \nإصدار النظام v2.4.1 مستقر \nالجدول: 12  صفا و4 أعمدة \nالسلام عليكم ورحمة الله \nلا إله إلا الله \n12345 \n(2026 ) \nA-B-C 1-2-3 \n :التاري    خ2026-03-15 \n :الفترة 2020-2025 \n :هاتف100-456-7890 \n نسبة الإنجاز85.5% ",
+     "lines": [
+      {
+       "visual": "يونسلا ةعجارملا ريرقت",
+       "expected": "تقرير المراجعة السنوي",
+       "match": "exact"
+      },
+      {
+       "visual": "ريراقتلا  ي ف Power BI مدختسن",
+       "expected": "نستخدم Power BI في التقارير",
+       "match": "letters"
+      },
+      {
+       "visual": "دمتعملا    ISO 27001 رايعم قفو",
+       "expected": "وفق معيار ISO 27001 المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ةزهاج   Q3 2026       ع  برلا جئاتن",
+       "expected": "نتائج الربع Q3 2026 جاهزة",
+       "match": "letters"
+      },
+      {
+       "visual": "ةبولطم )    Data Governance            ( تانايبلا ةمكوح",
+       "expected": "حوكمة البيانات (Data Governance) مطلوبة",
+       "match": "letters"
+      },
+      {
+       "visual": "ةطخلا نم 2025-2020  ة  رت ف ل ا",
+       "expected": "الفترة 2020-2025 من الخطة",
+       "match": "exact"
+      },
+      {
+       "visual": "ماودلا لالخ 7890-456-100 لصاوتلل",
+       "expected": "للتواصل 100-456-7890 خلال الدوام",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 15-03-2026 خ    يراتب",
+       "expected": "بتاريخ 2026-03-15 تم التسليم",
+       "match": "letters"
+      },
+      {
+       "visual": "ميلستلا مت 2026 /03 /15 خ    يراتب",
+       "expected": "بتاريخ 15/03/2026 تم التسليم",
+       "match": "letters"
+      },
+      {
+       "visual": "حاتم https://www.example.com/page?id=5&lang=ar  طبارلا",
+       "expected": "الرابط https://www.example.com/page?id=5&lang=ar متاح",
+       "match": "exact"
+      },
+      {
+       "visual": "راسفتسالل info@example.com دي ربلا",
+       "expected": "البريد info@example.com للاستفسار",
+       "match": "exact"
+      },
+      {
+       "visual": "نآلا  ىتح %85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5% حتى الآن",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير 1,250,000.50 غلبملا",
+       "expected": "المبلغ 1,250,000.50 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "}أ{ ماظنلا نم ]3[ ةداملا",
+       "expected": "المادة [3] من النظام {أ}",
+       "match": "exact"
+      },
+      {
+       "visual": "؟بولطملا وه ام",
+       "expected": "ما هو المطلوب؟",
+       "match": "exact"
+      },
+      {
+       "visual": ".اثلاث ؛ايناث ؛الوأ",
+       "expected": "أولا؛ ثانيا؛ ثالثا.",
+       "match": "exact"
+      },
+      {
+       "visual": "رقتسم v2.4.1 ماظنلا رادصإ",
+       "expected": "إصدار النظام v2.4.1 مستقر",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمعأ 4 و افص 12 :لودجلا",
+       "expected": "الجدول: 12 صفا و 4 أعمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا ةمحرو مكيلع مالسلا",
+       "expected": "السلام عليكم ورحمة الله",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا الإ هلإ ال",
+       "expected": "لا إله إلا الله",
+       "match": "exact"
+      },
+      {
+       "visual": "12345",
+       "expected": "12345",
+       "match": "exact"
+      },
+      {
+       "visual": ")2026(",
+       "expected": "(2026)",
+       "match": "exact"
+      },
+      {
+       "visual": "A  -B -C 1  -2 -3",
+       "expected": "A-B-C 1-2-3",
+       "match": "exact"
+      },
+      {
+       "visual": "15-03-2026  : خ         ير ا ت ل ا",
+       "expected": "التاريخ: 2026-03-15",
+       "match": "letters"
+      },
+      {
+       "visual": "2025-2020 :ة رتفلا",
+       "expected": "الفترة: 2020-2025",
+       "match": "exact"
+      },
+      {
+       "visual": "7890-456-100 :فتاه",
+       "expected": "هاتف: 100-456-7890",
+       "match": "exact"
+      },
+      {
+       "visual": "%85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5%",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " الضريبة 15 % \n :الإصدارv2.4.1 \n :المبلغ1,250,000.50 \n :رقم المرجع2026 /014 \n :التاري    خ15 /03 /2026 \n :الوقت10:30 \n (شاملة الضريبة 15 .)% \n1,250,000.50  ريال (شاملة الضريبة 15 .)% \n البند3.2.1 \n( المادة5 ) \n ص.ب1234  الرمز11564 \n :العدد3 - 5 \n من9:00  لىإ17:00 \n+ :هاتف999 11 456 7890 \n السعر45,000  ريال \nرقم 5 \n2026-03-15  تاري    خ التسليم \n15% من الإجمال ي \n100-456-7890  رقم الهاتف \n5 أيام \n3.5  مليون ريال \nالنظام: SAP S/4HANA \nPower BI  هو النظام المعتمد \nيعمل على Windows Server 2022  حاليا \nوفق Incoterms 2020 (DAP) المعتمدة \nجائحة COVID-19  أثرت \nف ي عام 2026 ،Microsoft أعلنت ",
+     "lines": [
+      {
+       "visual": "% 15 ةبي رضلا",
+       "expected": "الضريبة 15%",
+       "match": "letters"
+      },
+      {
+       "visual": "v2.4.1  :ر ا د ص إل ا",
+       "expected": "الإصدار: v2.4.1",
+       "match": "exact"
+      },
+      {
+       "visual": "1,250,000.50 :غلبملا",
+       "expected": "المبلغ: 1,250,000.50",
+       "match": "exact"
+      },
+      {
+       "visual": "014 /2026 :عجرملا مقر",
+       "expected": "رقم المرجع: 2026/014",
+       "match": "exact"
+      },
+      {
+       "visual": "2026 /03 /15 :خ    يراتلا",
+       "expected": "التاريخ: 15/03/2026",
+       "match": "letters"
+      },
+      {
+       "visual": "10:30 :تقولا",
+       "expected": "الوقت: 10:30",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبي رضلا ةلماش(",
+       "expected": "(شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبي رضلا ةلماش( لاير 1,250,000.50",
+       "expected": "1,250,000.50 ريال (شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": "3.2.1 دنبلا",
+       "expected": "البند 3.2.1",
+       "match": "exact"
+      },
+      {
+       "visual": ")5( ةداملا",
+       "expected": "المادة (5)",
+       "match": "exact"
+      },
+      {
+       "visual": "11564 زمرلا 1234  ب . ص",
+       "expected": "ص.ب 1234 الرمز 11564",
+       "match": "letters"
+      },
+      {
+       "visual": "5 - 3 :ددعلا",
+       "expected": "العدد: 3 - 5",
+       "match": "letters"
+      },
+      {
+       "visual": "17:00 ىلإ 9:00 نم",
+       "expected": "من 9:00 إلى 17:00",
+       "match": "exact"
+      },
+      {
+       "visual": "7890 456 11 999+ :فتاه",
+       "expected": "هاتف: +999 11 456 7890",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير 45,000 رعسلا",
+       "expected": "السعر 45,000 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "5 مقر",
+       "expected": "رقم 5",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا خ    يرات 15-03-2026",
+       "expected": "2026-03-15 تاريخ التسليم",
+       "match": "letters"
+      },
+      {
+       "visual": "ي لامجإلا نم %15",
+       "expected": "15% من الإجمالي",
+       "match": "letters"
+      },
+      {
+       "visual": "فتاهلا مقر 7890-456-100",
+       "expected": "100-456-7890 رقم الهاتف",
+       "match": "exact"
+      },
+      {
+       "visual": "مايأ 5",
+       "expected": "5 أيام",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير نويلم 3.5",
+       "expected": "3.5 مليون ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "SAP S/4HANA :ماظنلا",
+       "expected": "النظام: SAP S/4HANA",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ماظنلا وه Power BI",
+       "expected": "Power BI هو النظام المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ايلاح Windows Server 2022 ىلع لمعي",
+       "expected": "يعمل على Windows Server 2022 حاليا",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمتعملا Incoterms 2020 (DAP) قفو",
+       "expected": "وفق Incoterms 2020 (DAP) المعتمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "ترثأ COVID-19 ةحئاج",
+       "expected": "جائحة COVID-19 أثرت",
+       "match": "exact"
+      },
+      {
+       "visual": "تنلعأ   Microsoft     ،2026 ماع  ي ف",
+       "expected": "في عام 2026، Microsoft أعلنت",
+       "match": "letters"
+      }
+     ]
+    },
+    {
+     "plain": " شركتا Microsoft ،Google تتنافسان \nزمن الاستجابة أقل من 200ms  لكل طلب \nالمتطلب رقم 1 : دعم واجهاتAPI  بصيغةJSON. \n البند5 - ABC  شركة  \nالتاري    خ: ٦٢٠٢-٣٠-٥١ \nالمبلغ ٠٥٫٠٥٢٬١ ريال \nنسبة ٥١٪ فقط \nالمساحة 5 GB فقط \nالسعر 500 USD شهريا \n ",
+     "lines": [
+      {
+       "visual": "ناسفانتت   Google    ،Microsoft اتك رش",
+       "expected": "شركتا Microsoft، Google تتنافسان",
+       "match": "exact"
+      },
+      {
+       "visual": "بلط لكل ms200 نم لقأ ةباجتسالا نمز",
+       "expected": "زمن الاستجابة أقل من ms200 لكل طلب",
+       "match": "exact"
+      },
+      {
+       "visual": ".JSON ةغيصب API تاهجاو معد :1 مقر بلطتملا",
+       "expected": "المتطلب رقم 1: دعم واجهات API بصيغة JSON.",
+       "match": "exact"
+      },
+      {
+       "visual": "ةك رش ABC - 5 دنبلا",
+       "expected": "البند 5 - ABC شركة",
+       "match": "exact"
+      },
+      {
+       "visual": "١٥-٠٣-٢٠٢٦ :خ    يراتلا",
+       "expected": "التاريخ: ٢٠٢٦-٠٣-١٥",
+       "match": "letters"
+      },
+      {
+       "visual": "لاير ١٬٢٥٠٫٥٠ غلبملا",
+       "expected": "المبلغ ١٬٢٥٠٫٥٠ ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف ٪١٥ ةبسن",
+       "expected": "نسبة ١٥٪ فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف GB 5 ةحاسملا",
+       "expected": "المساحة GB 5 فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ايرهش USD 500 رعسلا",
+       "expected": "السعر USD 500 شهريا",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_rtl_Sakkal_Majalla",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": " تقرير المراجعة السنوي \nنستخدم Power BI في التقارير \nوفق معيار ISO 27001  المعتمد \nنتائج الربع Q3 2026 جاهزة \nحوكمة البيانات (Data Governance ) مطلوبة \nالفترة 2020-2025  من الخطة \nللتواصل 100-456-7890   خلال الدوام \nبتاريخ 2026-03 -15 تم التسليم \nبتاريخ 15/03/2026 تم التسليم \nالرابط https://www.example.com/page?id=5&lang=ar  متاح \nالبريد info@example.com  للاستفسار \nنسبة الإنجاز 85.5% حتى الآن \nالمبلغ 1,250,000.50   ريال \n [ المادة3 }أ{  من النظام] \n ما هو المطلوب؟ \nأولا؛ ثانيا؛ ثالثا.  \nإصدار النظام v2.4.1 مستقر \nالجدول: 12   صفا و4  أعمدة \nالسلام عليكم ورحمة الله \nلا إله إلا الله  \n12345 \n(2026 ) \nA-B-C 1-2-3 \n :التاريخ2026-03-15 \n :الفترة2020-2025 ",
+     "lines": [
+      {
+       "visual": "يونسلا ةعجارملا ريرقت",
+       "expected": "تقرير المراجعة السنوي",
+       "match": "exact"
+      },
+      {
+       "visual": "ريراقتلا يف Power BI مدختسن",
+       "expected": "نستخدم Power BI في التقارير",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ISO 27001 رايعم قفو",
+       "expected": "وفق معيار ISO 27001 المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ةزهاج Q3 2026 عبرلا جئاتن",
+       "expected": "نتائج الربع Q3 2026 جاهزة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةبولطم )Data Governance( تانايبلا ةمكوح",
+       "expected": "حوكمة البيانات (Data Governance) مطلوبة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةطخلا نم 2025-2020 ةرتفلا",
+       "expected": "الفترة 2020-2025 من الخطة",
+       "match": "exact"
+      },
+      {
+       "visual": "ماودلا لالخ      7890-456-100 لصاوتلل",
+       "expected": "للتواصل 100-456-7890 خلال الدوام",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 15 -     03-2026  خ ير ا ت ب",
+       "expected": "بتاريخ 2026-03-15 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 2026/03/15 خيراتب",
+       "expected": "بتاريخ 15/03/2026 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "حاتم https://www.example.com/page?id=5&lang=ar طبارلا",
+       "expected": "الرابط https://www.example.com/page?id=5&lang=ar متاح",
+       "match": "exact"
+      },
+      {
+       "visual": "راسفتسالل info@example.com ديربلا",
+       "expected": "البريد info@example.com للاستفسار",
+       "match": "exact"
+      },
+      {
+       "visual": "نآلا ىتح %85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5% حتى الآن",
+       "match": "exact"
+      },
+      {
+       "visual": "ل ا ير  1,250,000.50 غلبملا",
+       "expected": "المبلغ 1,250,000.50 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "}أ{ ماظنلا نم ]   3  [ ةداملا",
+       "expected": "المادة [3] من النظام {أ}",
+       "match": "letters"
+      },
+      {
+       "visual": "؟بولطملا وه ام",
+       "expected": "ما هو المطلوب؟",
+       "match": "exact"
+      },
+      {
+       "visual": ".اثلاث ؛ايناث ؛الوأ",
+       "expected": "أولا؛ ثانيا؛ ثالثا.",
+       "match": "exact"
+      },
+      {
+       "visual": "رقتسم     v2.4.1    ماظنلا رادصإ",
+       "expected": "إصدار النظام v2.4.1 مستقر",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمعأ 4  و افص 12  : لو د ج ل ا",
+       "expected": "الجدول: 12 صفا و 4 أعمدة",
+       "match": "letters"
+      },
+      {
+       "visual": "هللا ةمحرو مكيلع مالسلا",
+       "expected": "السلام عليكم ورحمة الله",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا الإ هلإ ال",
+       "expected": "لا إله إلا الله",
+       "match": "exact"
+      },
+      {
+       "visual": "12345",
+       "expected": "12345",
+       "match": "exact"
+      },
+      {
+       "visual": ")2026(",
+       "expected": "(2026)",
+       "match": "exact"
+      },
+      {
+       "visual": "A-  B-C 1  -2 - 3",
+       "expected": "A-B-C 1-2-3",
+       "match": "exact"
+      },
+      {
+       "visual": "15-03-2026  : خ ير ا ت ل ا",
+       "expected": "التاريخ: 2026-03-15",
+       "match": "letters"
+      },
+      {
+       "visual": "2025-2020 :ةرتفلا",
+       "expected": "الفترة: 2020-2025",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " :هاتف100-456-7890 \n نسبة الإنجاز85.5% \n الضريبة15% \n :الإصدارv2.4.1 \n :المبلغ1,250,000.50 \n :رقم المرجع2026/014 \n :التاريخ15/03/2026 \n :الوقت10:30 \n (شاملة الضريبة15 .)% \n1,250,000.50  ريال (شاملة الضريبة15 .)% \n البند3.2.1 \n( المادة5 ) \n ص.ب1234  الرمز11564 \n :العدد3 - 5 \n من9:00  إلى17:00 \n+ :هاتف999 11 456 7890 \n السعر45,000   ريال \nرقم 5 \n2026 -03-15 تاريخ التسليم \n15 % من الإجمالي \n100-456-7890   رقم الهاتف \n5  أيام \n3.5  مليون ريال \nالنظام: SAP S/4HANA \nPower BI  هو النظام المعتمد ",
+     "lines": [
+      {
+       "visual": "7890-456-100 :فتاه",
+       "expected": "هاتف: 100-456-7890",
+       "match": "exact"
+      },
+      {
+       "visual": "%85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5%",
+       "match": "exact"
+      },
+      {
+       "visual": "%15 ةبيرضلا",
+       "expected": "الضريبة 15%",
+       "match": "exact"
+      },
+      {
+       "visual": "v2.4.1 :رادصإلا",
+       "expected": "الإصدار: v2.4.1",
+       "match": "exact"
+      },
+      {
+       "visual": "1,250,000.50 :غلبملا",
+       "expected": "المبلغ: 1,250,000.50",
+       "match": "exact"
+      },
+      {
+       "visual": "014/2026 :عجرملا مقر",
+       "expected": "رقم المرجع: 2026/014",
+       "match": "exact"
+      },
+      {
+       "visual": "2026/03/15 :خيراتلا",
+       "expected": "التاريخ: 15/03/2026",
+       "match": "exact"
+      },
+      {
+       "visual": "10:30 :تقولا",
+       "expected": "الوقت: 10:30",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش(",
+       "expected": "(شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش( لاير 1,250,000.50",
+       "expected": "1,250,000.50 ريال (شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": "3.2.1 دنبلا",
+       "expected": "البند 3.2.1",
+       "match": "exact"
+      },
+      {
+       "visual": ")5( ةداملا",
+       "expected": "المادة (5)",
+       "match": "exact"
+      },
+      {
+       "visual": "11564 زمرلا 1234 ب.ص",
+       "expected": "ص.ب 1234 الرمز 11564",
+       "match": "exact"
+      },
+      {
+       "visual": "5 - 3 :ددعلا",
+       "expected": "العدد: 3 - 5",
+       "match": "letters"
+      },
+      {
+       "visual": "17:00 ىلإ 9:00 نم",
+       "expected": "من 9:00 إلى 17:00",
+       "match": "exact"
+      },
+      {
+       "visual": "7890 456 11 999+ :فتاه",
+       "expected": "هاتف: +999 11 456 7890",
+       "match": "exact"
+      },
+      {
+       "visual": "ل ا ير  45,000 رعسلا",
+       "expected": "السعر 45,000 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "5  م قر",
+       "expected": "رقم 5",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا خيرات 15-03 -       2026",
+       "expected": "2026-03-15 تاريخ التسليم",
+       "match": "letters"
+      },
+      {
+       "visual": "يلامجإلا نم %15",
+       "expected": "15% من الإجمالي",
+       "match": "exact"
+      },
+      {
+       "visual": "ف ت ا ه ل ا   م قر  7890-456-100",
+       "expected": "100-456-7890 رقم الهاتف",
+       "match": "exact"
+      },
+      {
+       "visual": "مايأ 5",
+       "expected": "5 أيام",
+       "match": "exact"
+      },
+      {
+       "visual": "ل ا ير   نو ي ل م 3.5",
+       "expected": "3.5 مليون ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "SAP S/4HANA          :ماظنلا",
+       "expected": "النظام: SAP S/4HANA",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ماظنلا وه      Power BI",
+       "expected": "Power BI هو النظام المعتمد",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " يعمل علىWindows Server 2022  حاليا \nوفق Incoterms 2020 (DAP) المعتمدة \nجائحة COVID-19  أثرت \nفي عام 2026 ،Microsoft  أعلنت \nشركتا Microsoft ،Google  تتنافسان \nزمن الاستجابة أقل من 200ms  لكل طلب \nالمتطلب رقم 1 : دعم واجهاتAPI  بصيغةJSON . \n البند5 - ABC  شركة \nالتاريخ: ٦٢٠٢-٣٠-٥١ \nالمبلغ ٠٥٫٠٥٢٬١ ريال  \nنسبة ٥١٪ فقط \nالمساحة 5 GB فقط \nالسعر 500 USD  شهريا \n ",
+     "lines": [
+      {
+       "visual": "ايلاح Windows Server 2022 ىلع لمعي",
+       "expected": "يعمل على Windows Server 2022 حاليا",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمتعملا Incoterms 2020 (DAP) قفو",
+       "expected": "وفق Incoterms 2020 (DAP) المعتمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "ترثأ COVID-19 ةحئاج",
+       "expected": "جائحة COVID-19 أثرت",
+       "match": "exact"
+      },
+      {
+       "visual": "تنلعأ Microsoft ،2026 ماع يف",
+       "expected": "في عام 2026، Microsoft أعلنت",
+       "match": "exact"
+      },
+      {
+       "visual": "ناسفانتت Google ،Microsoft اتكرش",
+       "expected": "شركتا Microsoft، Google تتنافسان",
+       "match": "exact"
+      },
+      {
+       "visual": "بلط لكل ms200 نم لقأ ةباجتسالا نمز",
+       "expected": "زمن الاستجابة أقل من ms200 لكل طلب",
+       "match": "exact"
+      },
+      {
+       "visual": ".JSON ةغيصب API تاهجاو معد :1 مقر بلطتملا",
+       "expected": "المتطلب رقم 1: دعم واجهات API بصيغة JSON.",
+       "match": "exact"
+      },
+      {
+       "visual": "ةكرش   ABC   - 5 دنبلا",
+       "expected": "البند 5 - ABC شركة",
+       "match": "exact"
+      },
+      {
+       "visual": "١٥-٠٣-٢٠٢٦  : خ ير ا ت ل ا",
+       "expected": "التاريخ: ٢٠٢٦-٠٣-١٥",
+       "match": "letters"
+      },
+      {
+       "visual": "لاير ١٬٢٥٠٫٥٠ غلبملا",
+       "expected": "المبلغ ١٬٢٥٠٫٥٠ ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف ٪١٥ ةبسن",
+       "expected": "نسبة ١٥٪ فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف GB 5 ةحاسملا",
+       "expected": "المساحة GB 5 فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ايرهش USD 500 رعسلا",
+       "expected": "السعر USD 500 شهريا",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_rtl_Tahoma",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": " تقرير المراجعة السنوي \nنستخدم Power BI  في التقارير \nوفق معيار ISO 27001  المعتمد \nنتائج الربع Q3 2026  جاهزة \nحوكمة البيانات (Data Governance ) مطلوبة \nالفترة 2020-2025 من الخطة \nللتواصل 100-456-7890 خلال الدوام \nبتاريخ 2026-03-15  تم التسليم \nبتاريخ 15/03/2026   تم التسليم \nالرابط https://www.example.com/page?id=5&lang=ar متاح \nالبريد info@example.com  للاستفسار \nنسبة الإنجاز 85.5 % حتى الآن \nالمبلغ 1,250,000.50 ريال \n[ المادة3 }أ{  من النظام] \n ما هو المطلوب؟ \nأولا؛ ثانيا؛ ثالثا. \nإصدار النظام v2.4.1 مستقر \nالجدول: 12  صفا و4  أعمدة \nالسلام عليكم ورحمة الله \nلا إله إلا الله \n12345 \n(2026) \nA-B-C 1-2-3 \n :التاريخ2026-03-15 \n :الفترة2020-2025 \n :هاتف100-456-7890 \n نسبة الإنجاز85.5% \n الضريبة15% ",
+     "lines": [
+      {
+       "visual": "يونسلا ةعجارملا ريرقت",
+       "expected": "تقرير المراجعة السنوي",
+       "match": "exact"
+      },
+      {
+       "visual": "ريراقتلا يف Power BI مدختسن",
+       "expected": "نستخدم Power BI في التقارير",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ISO 27001 رايعم قفو",
+       "expected": "وفق معيار ISO 27001 المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ةزهاج Q3 2026 عبرلا جئاتن",
+       "expected": "نتائج الربع Q3 2026 جاهزة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةبولطم )Data Governance( تانايبلا ةمكوح",
+       "expected": "حوكمة البيانات (Data Governance) مطلوبة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةطخلا نم 2025-2020 ةرتفلا",
+       "expected": "الفترة 2020-2025 من الخطة",
+       "match": "exact"
+      },
+      {
+       "visual": "ماودلا لالخ 7890-456-100 لصاوتلل",
+       "expected": "للتواصل 100-456-7890 خلال الدوام",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت          15-03-2026 خيراتب",
+       "expected": "بتاريخ 2026-03-15 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت         2026/03/15 خيراتب",
+       "expected": "بتاريخ 15/03/2026 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "حاتم    https://www.example.com/page?id=5&lang=ar                                          طبارلا",
+       "expected": "الرابط https://www.example.com/page?id=5&lang=ar متاح",
+       "match": "exact"
+      },
+      {
+       "visual": "راسفتسالل         info@example.com                  ديربلا",
+       "expected": "البريد info@example.com للاستفسار",
+       "match": "exact"
+      },
+      {
+       "visual": "نآلا ىتح %         85.5    زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5% حتى الآن",
+       "match": "letters"
+      },
+      {
+       "visual": "لاير   1,250,000.50            غلبملا",
+       "expected": "المبلغ 1,250,000.50 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "}أ{ ماظنلا نم ]        3 [ ةداملا",
+       "expected": "المادة [3] من النظام {أ}",
+       "match": "letters"
+      },
+      {
+       "visual": "؟بولطملا وه ام",
+       "expected": "ما هو المطلوب؟",
+       "match": "exact"
+      },
+      {
+       "visual": ".اثلاث ؛ايناث ؛الوأ",
+       "expected": "أولا؛ ثانيا؛ ثالثا.",
+       "match": "exact"
+      },
+      {
+       "visual": "رقتسم       v2.4.1      ماظنلا رادصإ",
+       "expected": "إصدار النظام v2.4.1 مستقر",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمعأ 4 و افص 12 :لودجلا",
+       "expected": "الجدول: 12 صفا و 4 أعمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا ةمحرو مكيلع مالسلا",
+       "expected": "السلام عليكم ورحمة الله",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا الإ هلإ ال",
+       "expected": "لا إله إلا الله",
+       "match": "exact"
+      },
+      {
+       "visual": "12345",
+       "expected": "12345",
+       "match": "exact"
+      },
+      {
+       "visual": ")2026(",
+       "expected": "(2026)",
+       "match": "exact"
+      },
+      {
+       "visual": "A-B-C 1-2-3",
+       "expected": "A-B-C 1-2-3",
+       "match": "exact"
+      },
+      {
+       "visual": "15-03-2026 :خيراتلا",
+       "expected": "التاريخ: 2026-03-15",
+       "match": "exact"
+      },
+      {
+       "visual": "2025-2020 :ةرتفلا",
+       "expected": "الفترة: 2020-2025",
+       "match": "exact"
+      },
+      {
+       "visual": "7890-456-100 :فتاه",
+       "expected": "هاتف: 100-456-7890",
+       "match": "exact"
+      },
+      {
+       "visual": "%85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5%",
+       "match": "exact"
+      },
+      {
+       "visual": "%15 ةبيرضلا",
+       "expected": "الضريبة 15%",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": "  :الإصدارv2.4.1 \n :المبلغ1,250,000.50 \n :رقم المرجع2026/014 \n :التاريخ15/03/2026 \n :الوقت10:30 \n (شاملة الضريبة15.)% \n1,250,000.50  ريال (شاملة الضريبة15.)% \n البند3.2.1 \n( المادة5 ) \n ص.ب1234  الرمز11564 \n :العدد3 - 5 \n من9:00   إلى17:00 \n+ :هاتف999 11 456 7890 \n السعر45,000 ريال \nرقم 5 \n2026-03-15  تاريخ التسليم \n15 % من الإجمالي \n100-456-7890  رقم الهاتف \n5 أيام \n3.5 مليون ريال \nالنظام: SAP S/4HANA \nPower BI  هو النظام المعتمد \nيعمل على Windows Server 2022  حاليا \nوفق Incoterms 2020 (DAP)  المعتمدة \nجائحة COVID-19  أثرت \nفي عام 2026 ،Microsoft أعلنت \nشركتا Microsoft ،Google  تتنافسان \nزمن الاستجابة أقل من 200ms لكل طلب ",
+     "lines": [
+      {
+       "visual": "v2.4.1  :رادصإلا",
+       "expected": "الإصدار: v2.4.1",
+       "match": "exact"
+      },
+      {
+       "visual": "1,250,000.50 :غلبملا",
+       "expected": "المبلغ: 1,250,000.50",
+       "match": "exact"
+      },
+      {
+       "visual": "014/2026 :عجرملا مقر",
+       "expected": "رقم المرجع: 2026/014",
+       "match": "exact"
+      },
+      {
+       "visual": "2026/03/15 :خيراتلا",
+       "expected": "التاريخ: 15/03/2026",
+       "match": "exact"
+      },
+      {
+       "visual": "10:30 :تقولا",
+       "expected": "الوقت: 10:30",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش(",
+       "expected": "(شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش( لاير 1,250,000.50",
+       "expected": "1,250,000.50 ريال (شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": "3.2.1 دنبلا",
+       "expected": "البند 3.2.1",
+       "match": "exact"
+      },
+      {
+       "visual": ")5( ةداملا",
+       "expected": "المادة (5)",
+       "match": "exact"
+      },
+      {
+       "visual": "11564 زمرلا 1234 ب.ص",
+       "expected": "ص.ب 1234 الرمز 11564",
+       "match": "exact"
+      },
+      {
+       "visual": "5 - 3 :ددعلا",
+       "expected": "العدد: 3 - 5",
+       "match": "letters"
+      },
+      {
+       "visual": "17:00    ىلإ   9:00 نم",
+       "expected": "من 9:00 إلى 17:00",
+       "match": "exact"
+      },
+      {
+       "visual": "7890 456 11 999+ :فتاه",
+       "expected": "هاتف: +999 11 456 7890",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير  45,000 رعسلا",
+       "expected": "السعر 45,000 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "5 مقر",
+       "expected": "رقم 5",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا خيرات 15-03-2026",
+       "expected": "2026-03-15 تاريخ التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "يلامجإلا نم %15",
+       "expected": "15% من الإجمالي",
+       "match": "exact"
+      },
+      {
+       "visual": "فتاهلا مقر 7890-456-100",
+       "expected": "100-456-7890 رقم الهاتف",
+       "match": "exact"
+      },
+      {
+       "visual": "مايأ 5",
+       "expected": "5 أيام",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير نويلم 3.5",
+       "expected": "3.5 مليون ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "SAP S/4HANA :ماظنلا",
+       "expected": "النظام: SAP S/4HANA",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ماظنلا وه Power BI",
+       "expected": "Power BI هو النظام المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ايلاح Windows Server 2022 ىلع لمعي",
+       "expected": "يعمل على Windows Server 2022 حاليا",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمتعملا Incoterms 2020 (DAP) قفو",
+       "expected": "وفق Incoterms 2020 (DAP) المعتمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "ترثأ COVID-19 ةحئاج",
+       "expected": "جائحة COVID-19 أثرت",
+       "match": "exact"
+      },
+      {
+       "visual": "تنلعأ Microsoft      ،2026 ماع يف",
+       "expected": "في عام 2026، Microsoft أعلنت",
+       "match": "exact"
+      },
+      {
+       "visual": "ناسفانتت   Google    ،Microsoft   اتكرش",
+       "expected": "شركتا Microsoft، Google تتنافسان",
+       "match": "exact"
+      },
+      {
+       "visual": "بلط لكل ms200 نم لقأ ةباجتسالا نمز",
+       "expected": "زمن الاستجابة أقل من ms200 لكل طلب",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " المتطلب رقم1 : دعم واجهاتAPI  بصيغةJSON. \n البند5 - ABC شركة \nالتاريخ: ٦٢٠٢-٣٠- ٥١ \nالمبلغ  ٠٥٫٠٥٢٬١ ريال \nنسبة ٥١٪ فقط \nالمساحة 5 GB فقط \nالسعر 500 USD  شهريا \n ",
+     "lines": [
+      {
+       "visual": ".JSON ةغيصب API تاهجاو معد :1 مقر بلطتملا",
+       "expected": "المتطلب رقم 1: دعم واجهات API بصيغة JSON.",
+       "match": "exact"
+      },
+      {
+       "visual": "ةكرش ABC - 5 دنبلا",
+       "expected": "البند 5 - ABC شركة",
+       "match": "exact"
+      },
+      {
+       "visual": "١٥ -٠٣-٢٠٢٦ :خيراتلا",
+       "expected": "التاريخ: ٢٠٢٦-٠٣-١٥",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير ١٬٢٥٠٫٥٠  غلبملا",
+       "expected": "المبلغ ١٬٢٥٠٫٥٠ ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف ٪١٥ ةبسن",
+       "expected": "نسبة ١٥٪ فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف GB 5 ةحاسملا",
+       "expected": "المساحة GB 5 فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ايرهش USD 500 رعسلا",
+       "expected": "السعر USD 500 شهريا",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_rtl_Times_New_Roman",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": " تقرير المراجعة السنوي \nنستخدم Power BI في التقارير \nوفق معيار ISO 27001  المعتمد \nنتائج الربع Q3 2026  جاهزة \nحوكمة البيانات (Data Governance) مطلوبة \nالفترة 2020-2025 من الخطة \nللتواصل 100-456-7890  خلال الدوام \nبتاريخ 2026-03-15 تم التسليم \nبتاريخ 15/03/2026 تم التسليم \nالرابط https://www.example.com/page?id=5&lang=ar متاح \nالبريد info@example.com للاستفسار \nنسبة الإنجاز 85.5% حتى الآن \nالمبلغ 1,250,000.50 ريال \n[ المادة3}أ{  من النظام] \nما هو المطلوب؟ \nأولا؛ ثانيا؛ ثالثا.  \nإصدار النظام v2.4.1 مستقر \nالجدول: 12    صفا و4  أعمدة \nالسلام عليكم ورحمة الله \nلا إله إلا الله \n12345 \n(2026) \nA-B-C 1-2-3 \n :التاريخ2026-03-15 \n :الفترة2020-2025 \n :هاتف100-456 -7890 \n نسبة الإنجاز85.5 % \n الضريبة15 % \n :الإصدارv2.4.1 ",
+     "lines": [
+      {
+       "visual": "يونسلا ةعجارملا ريرقت",
+       "expected": "تقرير المراجعة السنوي",
+       "match": "exact"
+      },
+      {
+       "visual": "ريراقتلا يف Power BI مدختسن",
+       "expected": "نستخدم Power BI في التقارير",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ISO 27001 رايعم قفو",
+       "expected": "وفق معيار ISO 27001 المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ةزهاج Q3 2026 عبرلا جئاتن",
+       "expected": "نتائج الربع Q3 2026 جاهزة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةبولطم )Data Governance( تانايبلا ةمكوح",
+       "expected": "حوكمة البيانات (Data Governance) مطلوبة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةطخلا نم 2025-2020 ةرتفلا",
+       "expected": "الفترة 2020-2025 من الخطة",
+       "match": "exact"
+      },
+      {
+       "visual": "ماودلا لالخ 7890-456-100 لصاوتلل",
+       "expected": "للتواصل 100-456-7890 خلال الدوام",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 15-03-2026 خيراتب",
+       "expected": "بتاريخ 2026-03-15 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 2026/03/15 خيراتب",
+       "expected": "بتاريخ 15/03/2026 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "حاتم https://www.example.com/page?id=5&lang=ar طبارلا",
+       "expected": "الرابط https://www.example.com/page?id=5&lang=ar متاح",
+       "match": "exact"
+      },
+      {
+       "visual": "راسفتسالل info@example.com ديربلا",
+       "expected": "البريد info@example.com للاستفسار",
+       "match": "exact"
+      },
+      {
+       "visual": "نآلا ىتح %85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5% حتى الآن",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير  1,250,000.50 غلبملا",
+       "expected": "المبلغ 1,250,000.50 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "}أ{ ماظنلا نم ]        3 [ ةداملا",
+       "expected": "المادة [3] من النظام {أ}",
+       "match": "letters"
+      },
+      {
+       "visual": "؟بولطملا وه ام",
+       "expected": "ما هو المطلوب؟",
+       "match": "exact"
+      },
+      {
+       "visual": ".اثلاث ؛ايناث ؛الوأ",
+       "expected": "أولا؛ ثانيا؛ ثالثا.",
+       "match": "exact"
+      },
+      {
+       "visual": "رقتسم     v2.4.1      ماظنلا رادصإ",
+       "expected": "إصدار النظام v2.4.1 مستقر",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمعأ   4   و افص     12 :لودجلا",
+       "expected": "الجدول: 12 صفا و 4 أعمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا ةمحرو مكيلع مالسلا",
+       "expected": "السلام عليكم ورحمة الله",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا الإ هلإ ال",
+       "expected": "لا إله إلا الله",
+       "match": "exact"
+      },
+      {
+       "visual": "12345",
+       "expected": "12345",
+       "match": "exact"
+      },
+      {
+       "visual": ") 2026     (",
+       "expected": "(2026)",
+       "match": "letters"
+      },
+      {
+       "visual": "A  - B  -C 1    -2  -3",
+       "expected": "A-B-C 1-2-3",
+       "match": "exact"
+      },
+      {
+       "visual": "15-03-2026 :خيراتلا",
+       "expected": "التاريخ: 2026-03-15",
+       "match": "exact"
+      },
+      {
+       "visual": "2025-2020 :ةرتفلا",
+       "expected": "الفترة: 2020-2025",
+       "match": "exact"
+      },
+      {
+       "visual": "7890      -456-100 :فتاه",
+       "expected": "هاتف: 100-456-7890",
+       "match": "letters"
+      },
+      {
+       "visual": "% 85.5      زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5%",
+       "match": "letters"
+      },
+      {
+       "visual": "%  15 ةبيرضلا",
+       "expected": "الضريبة 15%",
+       "match": "letters"
+      },
+      {
+       "visual": "v2.4.1      :رادصإلا",
+       "expected": "الإصدار: v2.4.1",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " :المبلغ1,250,000.50 \n :رقم المرجع2026/014 \n :التاريخ15/03/2026 \n :الوقت10:30 \n (شاملة الضريبة15 .)% \n1,250,000.50  ريال (شاملة الضريبة15 .)% \n البند3.2.1 \n( المادة5 ) \n ص.ب1234  الرمز11564 \n :العدد3 -  5 \n من9:00  إلى17:00 \n+ :هاتف999 11 456 7890 \n السعر45,000 ريال \nرقم  5 \n2026-03-15 تاريخ التسليم \n15 % من الإجمالي \n100 -456-7890 رقم الهاتف \n5  أيام \n3.5  ريال مليون \nالنظام: SAP S/4HANA \nPower BI  هو النظام المعتمد \nيعمل على Windows Server 2022  حاليا \nوفق Incoterms 2020 (DAP)  المعتمدة \nجائحة COVID-19 أثرت \nفي عام  2026 ،Microsoft  أعلنت \nشركتا Microsoft ،Google تتنافسان \nزمن الاستجابة أقل من  200ms  لكل طلب \nالمتطلب رقم 1 : دعم واجهاتAPI  بصيغةJSON . \n البند5 - ABC  شركة ",
+     "lines": [
+      {
+       "visual": "1,250,000.50 :غلبملا",
+       "expected": "المبلغ: 1,250,000.50",
+       "match": "exact"
+      },
+      {
+       "visual": "014/2026 :عجرملا مقر",
+       "expected": "رقم المرجع: 2026/014",
+       "match": "exact"
+      },
+      {
+       "visual": "2026/03/15 :خيراتلا",
+       "expected": "التاريخ: 15/03/2026",
+       "match": "exact"
+      },
+      {
+       "visual": "10:30 :تقولا",
+       "expected": "الوقت: 10:30",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش(",
+       "expected": "(شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش( لاير 1,250,000.50",
+       "expected": "1,250,000.50 ريال (شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": "3.2.1 دنبلا",
+       "expected": "البند 3.2.1",
+       "match": "exact"
+      },
+      {
+       "visual": ")5( ةداملا",
+       "expected": "المادة (5)",
+       "match": "exact"
+      },
+      {
+       "visual": "11564        زمرلا    1234       ب.ص",
+       "expected": "ص.ب 1234 الرمز 11564",
+       "match": "exact"
+      },
+      {
+       "visual": "5   - 3  :ددعلا",
+       "expected": "العدد: 3 - 5",
+       "match": "letters"
+      },
+      {
+       "visual": "17:00       ىلإ   9:00     نم",
+       "expected": "من 9:00 إلى 17:00",
+       "match": "exact"
+      },
+      {
+       "visual": "7890      456      11 999+ :فتاه",
+       "expected": "هاتف: +999 11 456 7890",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير   45,000        رعسلا",
+       "expected": "السعر 45,000 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "5    مقر",
+       "expected": "رقم 5",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا خيرات 15-03-            2026",
+       "expected": "2026-03-15 تاريخ التسليم",
+       "match": "letters"
+      },
+      {
+       "visual": "يلامجإلا نم %15",
+       "expected": "15% من الإجمالي",
+       "match": "exact"
+      },
+      {
+       "visual": "فتاهلا مقر       7890      -456     -100",
+       "expected": "100-456-7890 رقم الهاتف",
+       "match": "letters"
+      },
+      {
+       "visual": "مايأ 5",
+       "expected": "5 أيام",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير نويلم        3.5",
+       "expected": "3.5 مليون ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "SAP S/4HANA                    :ماظنلا",
+       "expected": "النظام: SAP S/4HANA",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ماظنلا وه         Power BI",
+       "expected": "Power BI هو النظام المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ايلاح  Windows Server 2022                        ىلع لمعي",
+       "expected": "يعمل على Windows Server 2022 حاليا",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمتعملا    Incoterms 2020 (DAP)                         قفو",
+       "expected": "وفق Incoterms 2020 (DAP) المعتمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "ترثأ COVID              - 19 ةحئاج",
+       "expected": "جائحة COVID-19 أثرت",
+       "match": "exact"
+      },
+      {
+       "visual": "تنلعأ Microsoft ،2026  ماع يف",
+       "expected": "في عام 2026، Microsoft أعلنت",
+       "match": "exact"
+      },
+      {
+       "visual": "ناسفانتت Google ،Microsoft اتكرش",
+       "expected": "شركتا Microsoft، Google تتنافسان",
+       "match": "exact"
+      },
+      {
+       "visual": "بلط لكل ms200  نم لقأ ةباجتسالا نمز",
+       "expected": "زمن الاستجابة أقل من ms200 لكل طلب",
+       "match": "exact"
+      },
+      {
+       "visual": ".JSON ةغيصب API تاهجاو معد :1 مقر بلطتملا",
+       "expected": "المتطلب رقم 1: دعم واجهات API بصيغة JSON.",
+       "match": "exact"
+      },
+      {
+       "visual": "ةكرش     ABC        -  5  دنبلا",
+       "expected": "البند 5 - ABC شركة",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " :التاريخ٦٢٠٢-٣٠-٥١ \nالمبلغ ٠٥٫٠٥٢٬١ ريال \nنسبة ٥١٪ فقط \nالمساحة 5 GB  فقط \nالسعر 500  USD  شهريا \n ",
+     "lines": [
+      {
+       "visual": "١٥-٠٣-٢٠٢٦ :خيراتلا",
+       "expected": "التاريخ: ٢٠٢٦-٠٣-١٥",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير  ١٬٢٥٠٫٥٠ غلبملا",
+       "expected": "المبلغ ١٬٢٥٠٫٥٠ ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف ٪١٥ ةبسن",
+       "expected": "نسبة ١٥٪ فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف GB 5 ةحاسملا",
+       "expected": "المساحة GB 5 فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ايرهش   USD       500 رعسلا",
+       "expected": "السعر USD 500 شهريا",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "word_rtl_Traditional_Arabic",
+   "laid_out_by_word": true,
+   "pages": [
+    {
+     "plain": " تقرير المراجعة السنوي \nنستخدم Power BI   في التقارير \nوفق معيار ISO 27001  المعتمد \nنتائج الربع  Q3 2026   جاهزة \nحوكمة البيانات ( Data Governance ) مطلوبة \nالفترة 2020-2025   من الخطة \nللتواصل 100-456-7890  خلال الدوام \nبتاريخ 2026-03-15   تم التسليم \nبتاريخ 15/03/2026  تم التسليم \nالرابط https://www.example.com/page?id=5&lang=ar متاح \nالبريد info@example.com  للاستفسار \nنسبة الإنجاز 85.5 % حتى الآن \nالمبلغ 1,250,000.50  ريال \n[ المادة3 }أ{  من النظام] \n ما هو المطلوب؟ \nأولا؛ ثانيا؛ ثالثا.  \nإصدار النظام v2.4.1  مستقر \nالجدول: 12  صفا و4  أعمدة \nالسلام عليكم ورحمة الله \nلا إله إلا الله \n12345 \n(2026) \nA-B-C 1-2-3 \n :التاريخ2026-03-15 ",
+     "lines": [
+      {
+       "visual": "يونسلا ةعجارملا ريرقت",
+       "expected": "تقرير المراجعة السنوي",
+       "match": "exact"
+      },
+      {
+       "visual": "ريراقتلا يف  Power BI مدختسن",
+       "expected": "نستخدم Power BI في التقارير",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ISO 27001             رايعم قفو",
+       "expected": "وفق معيار ISO 27001 المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ةزهاج   Q3 2026           عبرلا جئاتن",
+       "expected": "نتائج الربع Q3 2026 جاهزة",
+       "match": "exact"
+      },
+      {
+       "visual": "ةبولطم )  Data Governance                  ( تانايبلا ةمكوح",
+       "expected": "حوكمة البيانات (Data Governance) مطلوبة",
+       "match": "letters"
+      },
+      {
+       "visual": "ةطخلا نم     2025-2020 ةرتفلا",
+       "expected": "الفترة 2020-2025 من الخطة",
+       "match": "exact"
+      },
+      {
+       "visual": "ماودلا لالخ 7890-456-100 لصاوتلل",
+       "expected": "للتواصل 100-456-7890 خلال الدوام",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت  15-03-2026 خيراتب",
+       "expected": "بتاريخ 2026-03-15 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا مت 2026/03/15 خيراتب",
+       "expected": "بتاريخ 15/03/2026 تم التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "حاتم https://www.example.com/page?id=5&lang=ar طبارلا",
+       "expected": "الرابط https://www.example.com/page?id=5&lang=ar متاح",
+       "match": "exact"
+      },
+      {
+       "visual": "راسفتسالل info@example.com ديربلا",
+       "expected": "البريد info@example.com للاستفسار",
+       "match": "exact"
+      },
+      {
+       "visual": "نآلا ىتح %85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5% حتى الآن",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير 1,250,000.50 غلبملا",
+       "expected": "المبلغ 1,250,000.50 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "}أ{ ماظنلا نم ]3[ ةداملا",
+       "expected": "المادة [3] من النظام {أ}",
+       "match": "exact"
+      },
+      {
+       "visual": "؟بولطملا وه ام",
+       "expected": "ما هو المطلوب؟",
+       "match": "exact"
+      },
+      {
+       "visual": ".اثلاث ؛ايناث ؛الوأ",
+       "expected": "أولا؛ ثانيا؛ ثالثا.",
+       "match": "exact"
+      },
+      {
+       "visual": "رقتسم v2.4.1 ماظنلا رادصإ",
+       "expected": "إصدار النظام v2.4.1 مستقر",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمعأ 4 و افص 12 :لودجلا",
+       "expected": "الجدول: 12 صفا و 4 أعمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا ةمحرو مكيلع مالسلا",
+       "expected": "السلام عليكم ورحمة الله",
+       "match": "exact"
+      },
+      {
+       "visual": "هللا الإ هلإ ال",
+       "expected": "لا إله إلا الله",
+       "match": "exact"
+      },
+      {
+       "visual": "12345",
+       "expected": "12345",
+       "match": "exact"
+      },
+      {
+       "visual": ")2026(",
+       "expected": "(2026)",
+       "match": "exact"
+      },
+      {
+       "visual": "A-B-C 1-2-3",
+       "expected": "A-B-C 1-2-3",
+       "match": "exact"
+      },
+      {
+       "visual": "15-03-2026 :خيراتلا",
+       "expected": "التاريخ: 2026-03-15",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " :الفترة2020-2025 \n :هاتف100-456-7890 \n نسبة الإنجاز85.5% \n الضريبة15% \n :الإصدارv2.4.1 \n :المبلغ1,250,000.50 \n :رقم المرجع2026/014 \n :التاريخ15/03/2026 \n :الوقت10:30 \n (شاملة الضريبة15 .)% \n1,250,000.50  ريال (شاملة الضريبة15 .)% \n البند3.2.1 \n( المادة5 ) \n ص.ب1234  الرمز11564 \n :العدد3  - 5 \n من9:00  لىإ17:00 \n+ :هاتف999 11 456 7890 \n السعر45,000  ريال \nرقم 5 \n2026-03-15  تاريخ التسليم \n15لي% من الإجما \n100-456-7890  رقم الهاتف \n5  أيام \n3.5  مليون ريال ",
+     "lines": [
+      {
+       "visual": "2025-2020 :ةرتفلا",
+       "expected": "الفترة: 2020-2025",
+       "match": "exact"
+      },
+      {
+       "visual": "7890-456-100 :فتاه",
+       "expected": "هاتف: 100-456-7890",
+       "match": "exact"
+      },
+      {
+       "visual": "%85.5 زاجنإلا ةبسن",
+       "expected": "نسبة الإنجاز 85.5%",
+       "match": "exact"
+      },
+      {
+       "visual": "%15 ةبيرضلا",
+       "expected": "الضريبة 15%",
+       "match": "exact"
+      },
+      {
+       "visual": "v2.4.1 :رادصإلا",
+       "expected": "الإصدار: v2.4.1",
+       "match": "exact"
+      },
+      {
+       "visual": "1,250,000.50 :غلبملا",
+       "expected": "المبلغ: 1,250,000.50",
+       "match": "exact"
+      },
+      {
+       "visual": "014/2026 :عجرملا مقر",
+       "expected": "رقم المرجع: 2026/014",
+       "match": "exact"
+      },
+      {
+       "visual": "2026/03/15 :خيراتلا",
+       "expected": "التاريخ: 15/03/2026",
+       "match": "exact"
+      },
+      {
+       "visual": "10:30 :تقولا",
+       "expected": "الوقت: 10:30",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش(",
+       "expected": "(شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": ".)%15 ةبيرضلا ةلماش( لاير 1,250,000.50",
+       "expected": "1,250,000.50 ريال (شاملة الضريبة 15%).",
+       "match": "exact"
+      },
+      {
+       "visual": "3.2.1 دنبلا",
+       "expected": "البند 3.2.1",
+       "match": "exact"
+      },
+      {
+       "visual": ")5( ةداملا",
+       "expected": "المادة (5)",
+       "match": "exact"
+      },
+      {
+       "visual": "11564 زمرلا 1234 ب.ص",
+       "expected": "ص.ب 1234 الرمز 11564",
+       "match": "exact"
+      },
+      {
+       "visual": "5  -   3 :ددعلا",
+       "expected": "العدد: 3 - 5",
+       "match": "letters"
+      },
+      {
+       "visual": "17:00     ىلإ 9:00    نم",
+       "expected": "من 9:00 إلى 17:00",
+       "match": "exact"
+      },
+      {
+       "visual": "7890 456 11 999+ :فتاه",
+       "expected": "هاتف: +999 11 456 7890",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير 45,000 رعسلا",
+       "expected": "السعر 45,000 ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "5 مقر",
+       "expected": "رقم 5",
+       "match": "exact"
+      },
+      {
+       "visual": "ميلستلا خيرات 15-03-2026",
+       "expected": "2026-03-15 تاريخ التسليم",
+       "match": "exact"
+      },
+      {
+       "visual": "يلامجإلا نم %15",
+       "expected": "15% من الإجمالي",
+       "match": "exact"
+      },
+      {
+       "visual": "فتاهلا مقر 7890-456-100",
+       "expected": "100-456-7890 رقم الهاتف",
+       "match": "exact"
+      },
+      {
+       "visual": "مايأ 5",
+       "expected": "5 أيام",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير نويلم 3.5",
+       "expected": "3.5 مليون ريال",
+       "match": "exact"
+      }
+     ]
+    },
+    {
+     "plain": " :النظامSAP S/4HANA \nPower BI  هو النظام المعتمد \nيعمل على Windows Server 2022  حاليا \nوفق  Incoterms 2020 (DAP)  المعتمدة \nجائحة COVID-19 أثرت \nفي عام 2026 ،Microsoft  أعلنت \nشركتا  Microsoft ،Google  تتنافسان \nزمن الاستجابة أقل من 200ms  لكل طلب \nالمتطلب رقم 1 : دعم واجهاتAPI  بصيغةJSON . \n البند5  - ABC   شركة  \nالتاريخ: ٦٢٠٢-٣٠-٥١ \nالمبلغ  ٠٥٫٠٥٢٬١ ريال  \nنسبة ٥١٪ فقط  \nالمساحة 5 GB  فقط \nالسعر 500 USD شهريا \n ",
+     "lines": [
+      {
+       "visual": "SAP S/4HANA :ماظنلا",
+       "expected": "النظام: SAP S/4HANA",
+       "match": "exact"
+      },
+      {
+       "visual": "دمتعملا ماظنلا وه Power BI",
+       "expected": "Power BI هو النظام المعتمد",
+       "match": "exact"
+      },
+      {
+       "visual": "ايلاح Windows Server 2022 ىلع لمعي",
+       "expected": "يعمل على Windows Server 2022 حاليا",
+       "match": "exact"
+      },
+      {
+       "visual": "ةدمتعملا Incoterms 2020 (DAP)  قفو",
+       "expected": "وفق Incoterms 2020 (DAP) المعتمدة",
+       "match": "exact"
+      },
+      {
+       "visual": "ترثأ COVID-19 ةحئاج",
+       "expected": "جائحة COVID-19 أثرت",
+       "match": "exact"
+      },
+      {
+       "visual": "تنلعأ Microsoft ،2026 ماع يف",
+       "expected": "في عام 2026، Microsoft أعلنت",
+       "match": "exact"
+      },
+      {
+       "visual": "ناسفانتت Google ،Microsoft  اتكرش",
+       "expected": "شركتا Microsoft، Google تتنافسان",
+       "match": "exact"
+      },
+      {
+       "visual": "بلط لكل ms200 نم لقأ ةباجتسالا نمز",
+       "expected": "زمن الاستجابة أقل من ms200 لكل طلب",
+       "match": "exact"
+      },
+      {
+       "visual": ".JSON ةغيصب API تاهجاو معد :1 مقر بلطتملا",
+       "expected": "المتطلب رقم 1: دعم واجهات API بصيغة JSON.",
+       "match": "exact"
+      },
+      {
+       "visual": "ةكرش  ABC      - 5 دنبلا",
+       "expected": "البند 5 - ABC شركة",
+       "match": "exact"
+      },
+      {
+       "visual": "١٥-٠٣-     ٢٠٢٦    :خيراتلا",
+       "expected": "التاريخ: ٢٠٢٦-٠٣-١٥",
+       "match": "exact"
+      },
+      {
+       "visual": "لاير ١٬٢٥٠٫٥٠  غلبملا",
+       "expected": "المبلغ ١٬٢٥٠٫٥٠ ريال",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف ٪١٥ ةبسن",
+       "expected": "نسبة ١٥٪ فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "طقف GB 5 ةحاسملا",
+       "expected": "المساحة GB 5 فقط",
+       "match": "exact"
+      },
+      {
+       "visual": "ايرهش USD 500 رعسلا",
+       "expected": "السعر USD 500 شهريا",
+       "match": "exact"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -1,7 +1,7 @@
 # ews-mcp 4.5 — Exchange (EWS) as a safe, fast MCP tool surface
 
 An MCP server that turns an on-prem Exchange mailbox into a lean,
-safety-gated tool surface for an LLM assistant: **33 tools**, alias-only
+safety-gated tool surface for an LLM assistant: **34 tools**, alias-only
 ids, token-lean DTOs, a local cache mirror with Arabic-correct full-text
 search, and a two-phase confirm flow that makes autonomous sending
 tamper-evident.
@@ -28,7 +28,7 @@ route.
 git clone https://github.com/azizmazrou/ews-mcp && cd ews-mcp
 python -m venv .venv
 source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
-pip install ./v5
+pip install "./v5[extract]"      # or `pip install ./v5` without PDF text extraction
 ```
 
 You now have an `ewsmcp` command inside the venv:
@@ -73,7 +73,7 @@ credentials in `env`. Prefer a file? Copy [`.env.example`](.env.example)
 to `.env` in the directory you launch `ewsmcp` from — it auto-loads.
 
 That is the whole setup. The defaults are safe: capability tier `draft`
-(28 read + draft tools; nothing can send), `SEND_ENABLED=false` until
+(29 read + draft tools; nothing can send), `SEND_ENABLED=false` until
 you flip it, and mail-at-rest (aliases, audit chain, cache) goes to
 `~/.ewsmcp`. The server **refuses cloud-synced folders** for that data —
 if your home directory lives in OneDrive/Dropbox/iCloud, set `DATA_DIR`
@@ -93,21 +93,32 @@ them exactly as returned; raw Exchange ids never appear.
 
 ## What the tools cover
 
-`EWS_CAPABILITY_TIER` exposes **17** tools at `read`, **28** at `draft`
-(the default), and **33** at `full`, plus `find_similar` at `read` when
+`EWS_CAPABILITY_TIER` exposes **18** tools at `read`, **29** at `draft`
+(the default), and **34** at `full`, plus `find_similar` at `read` when
 `EWS_SEMANTIC_INDEX=pgvector`. Full parameter tables live in
 [`docs/API.md`](docs/API.md).
 
-- **Mail read** (`read`, 7 tools): `list_folders` (includes raw EWS
-  `folder_class`), `search_messages` (local FTS or live EWS, with
-  `folder="f:all"`, `recursive`, `categories`, and `flag_complete`),
-  `check_messages` (checks a list of subjects or senders against one
-  folder in one call), `get_message` and `get_attachment` (both detect
-  PKCS#7 S/MIME attachments and report `smime_type`), `get_thread`, and
+- **Mail read** (`read`, 8 tools): `list_folders` (includes raw EWS
+  `folder_class` and whole-tree `query`), `search_messages` (local FTS
+  or live EWS, with `folder="f:all"`, `recursive`, `categories`,
+  `importance`, and `flag_complete`), `check_messages` (checks a list of
+  subjects or senders against one folder in one call), `get_message`
+  (including exclusive `format="eml"` export under `DATA_DIR/attachments`
+  — a message exported from Sent Items may contain its `Bcc` header
+  because the file is the message as the mailbox holds it),
+  `get_messages` (fetches up to 20 messages in order with per-id
+  `{id, index, code, error}` `failed` isolation, `source="mixed"`
+  per-item provenance when combining mirror and live rows, and zero
+  attachment byte downloads), `get_attachment` (isolated-worker
+  in-memory text extraction and `offset` paging for PDF via
+  `ews-mcp[extract]` / `pypdf>=6.21,<7`, Word, Excel, PowerPoint, `.eml`,
+  attached Exchange messages, HTML, and plain text, plus PKCS#7 S/MIME
+  `smime_type` detection), `get_thread`, and
   `get_mailbox_overview` — plus `find_similar` when the semantic index
   is enabled.
 - **Calendar and people** (`read`, 7 tools): `list_events`, `get_event`,
-  `check_availability`, `find_people`, `get_contact`,
+  `check_availability`, `find_people` and `get_contact` (including
+  `department` and `office` when provided by the directory or contact),
   `get_oof_settings`, and `get_server_status`.
 - **Tasks** (`list_tasks` and `waiting_on` at `read`; `update_task` at
   `draft`): task inspection, sent threads awaiting a reply, and task

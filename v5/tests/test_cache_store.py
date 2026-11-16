@@ -16,7 +16,8 @@ from ewsmcp.cache.store import CacheStore
 def make_row(ews_id, *, folder="inbox", subject="Budget review",
              sender_email="a@corp.example", sender_name="Sender",
              body="please review the numbers", date_ts=None, is_read=1,
-             has_attachments=0, conv="CONV-1", imid=None, to=None):
+             has_attachments=0, conv="CONV-1", imid=None, to=None,
+             importance=None, categories=None):
     return {
         "ews_id": ews_id,
         "changekey": "CK",
@@ -30,8 +31,8 @@ def make_row(ews_id, *, folder="inbox", subject="Budget review",
         "date_iso": "2026-07-01T09:00+03:00",
         "is_read": is_read,
         "has_attachments": has_attachments,
-        "importance": None,
-        "categories_json": "[]",
+        "importance": importance,
+        "categories_json": json.dumps(list(categories or [])),
         "body_clean": body,
         "internet_message_id": imid or f"<{ews_id}@corp.example>",
         "norm_text": CacheStore.norm_for_row(subject, sender_name,
@@ -236,3 +237,44 @@ def test_schema_1_mirror_gains_folder_class_without_losing_rows(tmp_path):
         assert rows[0]["folder_class"] is None  # migrated, not yet backfilled
     finally:
         store.close()
+
+
+def test_importance_filter_and_combinations(store):
+    now = int(time.time())
+    store.upsert_messages([
+        make_row("M-HIGH-1", sender_email="alice@example.com", is_read=0,
+                 date_ts=now - 10, importance="High", categories=["Finance"]),
+        make_row("M-HIGH-2", sender_email="bob@example.com", is_read=1,
+                 date_ts=now - 200, importance=" High ", categories=["Ops"]),
+        make_row("M-NORM-EXP", sender_email="alice@example.com", is_read=0,
+                 date_ts=now - 20, importance="Normal", categories=["Finance"]),
+        make_row("M-NORM-NULL", sender_email="alice@example.com", is_read=1,
+                 date_ts=now - 30, importance=None),
+        make_row("M-NORM-BLANK", sender_email="alice@example.com", is_read=1,
+                 date_ts=now - 35, importance="   "),
+        make_row("M-LOW", sender_email="carol@example.com", is_read=0,
+                 date_ts=now - 40, importance="Low", categories=["Newsletter"]),
+    ])
+
+    rows, total = store.search_messages(importance="high")
+    assert total == 2 and [r["ews_id"] for r in rows] == ["M-HIGH-1", "M-HIGH-2"]
+
+    rows, total = store.search_messages(importance="low")
+    assert total == 1 and [r["ews_id"] for r in rows] == ["M-LOW"]
+
+    rows, total = store.search_messages(importance="normal")
+    assert total == 3
+    assert [r["ews_id"] for r in rows] == [
+        "M-NORM-EXP", "M-NORM-NULL", "M-NORM-BLANK",
+    ]
+
+    # Combined with sender, date window, unread, and categories
+    rows, total = store.search_messages(
+        importance="high",
+        sender="alice@example.com",
+        since_ts=now - 60,
+        until_ts=now,
+        is_unread=True,
+        categories=["Finance"],
+    )
+    assert total == 1 and [r["ews_id"] for r in rows] == ["M-HIGH-1"]

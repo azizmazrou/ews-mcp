@@ -7,7 +7,7 @@ COPY pyproject.toml ./
 COPY ewsmcp ./ewsmcp
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/venv/bin/pip install --no-cache-dir .
+    && /opt/venv/bin/pip install --no-cache-dir ".[extract]"
 
 FROM python:3.11-slim
 # Non-root from the first layer — no root+gosu dance. DATA_DIR points at a

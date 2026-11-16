@@ -125,9 +125,9 @@ def msg_card(item: Any, aliaser: IdAliaser, tz: str) -> Dict[str, Any]:
         card["unread"] = True
     if getattr(item, "has_attachments", False):
         card["attach"] = len(getattr(item, "attachments", None) or []) or True
-    importance = str(getattr(item, "importance", "") or "")
-    if importance.lower() == "high":
-        card["importance"] = "high"
+    importance = str(getattr(item, "importance", "") or "").strip().lower()
+    if importance in ("high", "low"):
+        card["importance"] = importance
     return card
 
 
