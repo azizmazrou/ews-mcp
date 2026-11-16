@@ -179,7 +179,10 @@ network of its host, not your workstation's VPN; see
 loopback-bound, read-tier Compose setup):
 
 ```bash
-docker build -t ews-mcp:dev .
+# from the repository root; the 4.5 image is built from v5/
+# (`docker build .` there builds the legacy 4.0 image instead)
+docker build -t ews-mcp:dev v5
+# .env is your copy of v5/.env.example
 docker run --rm -p 127.0.0.1:8000:8000 --env-file .env -v ewsmcp-data:/data ews-mcp:dev
 ```
 
@@ -403,6 +406,7 @@ connects to avoids that, and shares one warm EWS session.
 ## Development
 
 ```bash
+cd v5                              # everything below runs from v5/, not the repository root
 pip install -e .[dev]
 python -m pytest tests -q          # the full suite, no Exchange needed
 python -m ruff check .
