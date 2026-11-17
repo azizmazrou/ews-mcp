@@ -3,164 +3,217 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker Image](https://img.shields.io/badge/ghcr.io-ews--mcp-blue?logo=docker)](https://github.com/azizmazrou/ews-mcp/pkgs/container/ews-mcp)
 
-> A Model Context Protocol server that gives an LLM assistant **real,
-> typed control of a Microsoft Exchange mailbox** — mail, calendar,
-> people, tasks, inbox rules, drafts and (explicitly gated) sending — speaking EWS
-> natively. No Graph proxy, no Microsoft 365 connector. Works with
-> Claude Code, Claude Desktop, Open WebUI, and any other MCP client.
+EWS MCP Server is a Model Context Protocol (`MCP`) server that connects an AI assistant to a
+Microsoft Exchange mailbox over Exchange Web Services (`EWS`). It reads and searches mail, manages
+drafts, calendar events, contacts, tasks, and inbox rules, and places outgoing mail behind operator
+controls and two-phase confirmation. It talks to Exchange directly without Microsoft Graph or a
+Microsoft 365 connector, and works with Claude Code, Claude Desktop, Open WebUI, and other MCP
+clients.
 
 ## Two lines live in this repository
 
-| Line | Where | Status | Container image |
+Choose the 4.5 line for every new installation. The legacy 4.0 line stays on `:latest` only so
+existing deployments do not break before 4.5 is promoted.
+
+| Line | Directory | Status | Container image |
 |---|---|---|---|
-| **4.5 — current** | [`v5/`](v5/) | Active development. **Recommended for all new setups.** | `ghcr.io/azizmazrou/ews-mcp:v4.5*` |
-| 4.0 — legacy | [`src/`](src/) | Maintenance only. | `ghcr.io/azizmazrou/ews-mcp:latest` |
+| **4.5 — current** | [`v5/`](v5/) | Active development. Recommended for all new setups. | `ghcr.io/azizmazrou/ews-mcp:v4.5*` |
+| 4.0 — legacy | [`src/`](src/) | Maintenance only. Kept stable for `:latest` users. | `ghcr.io/azizmazrou/ews-mcp:latest` |
 
-The 4.5 line is a greenfield rewrite: a consolidated **34-tool** surface,
-short alias ids the model can actually copy, token-lean responses (~60-token
-result cards instead of raw Outlook HTML), a cache-first local mirror with
-Arabic-correct full-text search, and a safety model enforced in one place.
-The legacy line keeps `:latest` stable for existing deployments until 4.5
-is promoted. **If you are new here, use 4.5 and read
-[`v5/README.md`](v5/README.md).**
+The 4.5 line provides 34 tools, short alias ids such as `m12` and `e3`, cleaned text cards instead
+of raw Outlook HTML, a local SQLite mirror with Arabic-aware full-text search, and one central
+safety gate. Start with [`v5/README.md`](v5/README.md).
 
-Legacy 4.0 (`:latest`) users: stop the server before or right after an
-Exchange password change, update the password, and start it again — 4.0
-retries HTTP 401 responses as throttling and can trigger a directory
-lockout (see
-[`docs/legacy/TROUBLESHOOTING.md`](docs/legacy/TROUBLESHOOTING.md#authentication-issues);
-4.5 stops on the first rejection).
+Legacy 4.0 (`:latest`) users: stop the server before or right after an Exchange password change,
+update `EWS_PASSWORD`, and start it again. The 4.0 server retries `HTTP 401` responses as
+throttling and can trigger a directory lockout; see
+[`docs/legacy/TROUBLESHOOTING.md`](docs/legacy/TROUBLESHOOTING.md#authentication-issues). The 4.5
+line stops on the first rejection.
 
 ## Quick start — 4.5 locally over stdio (recommended)
 
-No Docker needed. The MCP client starts the server as a child process;
-it inherits your machine's network (VPNs included), and nothing listens
-on any port.
+In `stdio` mode, your MCP client launches `ewsmcp` as a local child process and talks to it over
+standard input and output. No network port opens on your machine, and the server uses your
+workstation network and VPN. Python 3.11 or newer is required.
+
+Clone the repository and install from the repository root:
 
 ```bash
-git clone https://github.com/azizmazrou/ews-mcp && cd ews-mcp
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
-pip install ./v5
+git clone https://github.com/azizmazrou/ews-mcp.git
+cd ews-mcp
+python3 -m venv .venv        # Windows: python -m venv .venv
+source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install "./v5[extract]"
 ```
 
-Then register it with Claude Code:
+This creates `.venv/bin/ewsmcp`, or `.venv\Scripts\ewsmcp.exe` on Windows. Use that absolute path
+when registering the server. On tag `v4.5.0a3`, before the `extract` extra was added on `main`,
+install with `pip install ./v5`.
+
+Register with Claude Code. Add `--scope user` to make it available in every project, or run the
+command in the project where you will use it:
 
 ```bash
 claude mcp add exchange \
   -e EWS_SERVER_URL="https://mail.example.com/EWS/Exchange.asmx" \
-  -e EWS_EMAIL="user@example.com" \
-  -e EWS_USERNAME="user" -e EWS_PASSWORD="…" \
-  -- /absolute/path/to/.venv/bin/ewsmcp
+  -e EWS_EMAIL="you@example.com" \
+  -e EWS_USERNAME="you" \
+  -e EWS_PASSWORD="change-me" \
+  -- /path/to/ews-mcp/.venv/bin/ewsmcp
 ```
 
-Claude Desktop and other clients: same command + env in a config block —
-see the [4.5 quick start](v5/README.md#quick-start--run-it-locally-over-stdio-no-docker).
-Defaults are safe: `draft` tier, sending disabled.
+For Claude Desktop (`claude_desktop_config.json`) or another MCP client, add the command and
+credentials to `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "exchange": {
+      "command": "/path/to/ews-mcp/.venv/bin/ewsmcp",
+      "env": {
+        "EWS_SERVER_URL": "https://mail.example.com/EWS/Exchange.asmx",
+        "EWS_EMAIL": "you@example.com",
+        "EWS_USERNAME": "you",
+        "EWS_PASSWORD": "change-me"
+      }
+    }
+  }
+}
+```
+
+On Windows, set `command` to `C:\\path\\to\\ews-mcp\\.venv\\Scripts\\ewsmcp.exe`. Defaults start at
+the `draft` capability tier with `SEND_ENABLED=false`, so nothing can send mail until you enable
+it. Full setup instructions and `.env` usage are in
+[`v5/README.md`](v5/README.md#quick-start--run-it-locally-over-stdio-no-docker).
 
 ## Quick start — Docker / HTTP (server deployments)
 
-When the server runs on a host that can reach Exchange directly:
+Run the container when the server lives on a host whose own network reaches Exchange directly. Copy
+[`v5/.env.example`](v5/.env.example) to `.env`, fill in your Exchange settings and `MCP_API_KEY`,
+and start the 4.5 container from the directory holding `.env`:
 
 ```bash
-# 4.5 (pin an exact tag; the 4.5 line never publishes :latest)
-docker run -d --name ews-mcp-v5 -p 8000:8000 --env-file .env \
+# 4.5 — pin an exact tag; the 4.5 line never publishes :latest
+docker run -d --name ews-mcp-v5 -p 127.0.0.1:8000:8000 --env-file .env \
   -v ewsmcp-data:/data ghcr.io/azizmazrou/ews-mcp:v4.5.0a3
+```
 
-# legacy 4.0
+To build the current `main` tree locally instead, run `docker build -t ews-mcp:dev v5` from the
+repository root.
+
+In HTTP mode, 4.5 serves Streamable HTTP at `/mcp`, JSON REST at `/api/tools/{name}`, OpenAPI at
+`/openapi.json`, Prometheus metrics at `/metrics`, and health checks at `/livez`, `/readyz`, and
+`/health`. See [`v5/docs/DEPLOYMENT.md`](v5/docs/DEPLOYMENT.md) and
+[`v5/docker-compose.example.yml`](v5/docker-compose.example.yml) for server setups.
+
+Legacy 4.0 uses different variable names. Copy the root [`.env.example`](.env.example) to `.env`,
+fill in your credentials, and start the legacy container:
+
+```bash
 docker run -d --name ews-mcp --env-file .env --network host \
   ghcr.io/azizmazrou/ews-mcp:latest
 ```
 
-4.5 serves Streamable HTTP at `/mcp`, plain REST at `/api/tools/<name>`,
-and health at `/livez` `/readyz` `/health`; see
-[`v5/docker-compose.example.yml`](v5/docker-compose.example.yml) for a
-single-service Compose example. Legacy transport docs:
+Legacy deployment and connection guides are in
+[`docs/legacy/DEPLOYMENT.md`](docs/legacy/DEPLOYMENT.md) and
 [`docs/legacy/CONNECTION_GUIDE.md`](docs/legacy/CONNECTION_GUIDE.md).
 
 ## What the assistant can do (4.5)
 
-- **Read fast** — `list_folders` (with `folder_class` and whole-tree `query`),
-  `get_mailbox_overview`, `search_messages` (local FTS with Arabic
-  normalization or live EWS; `folder="f:all"`, `recursive`,
-  `categories`, `importance`, `flag_complete`, optional `semantic` mode),
-  `check_messages`, `get_message` (including `format="eml"` save),
-  `get_messages`, and `get_attachment` (with S/MIME
-  `smime_type` detection), `get_thread` (plus `find_similar` when
-  `EWS_SEMANTIC_INDEX=pgvector`).
-- **Calendar & people** — `list_events`, `get_event`,
-  `check_availability`, `find_people`, `get_contact`,
-  `get_oof_settings`; writes: `create_event` and `update_event` (with
-  `recurrence` and `reminder_minutes`), `respond_to_event`,
-  `cancel_event`, `set_oof`.
-- **Tasks & follow-ups** — `list_tasks`, `update_task`, `waiting_on`
-  (sent threads nobody answered).
-- **Inbox rules** — `list_rules` (`read`), `save_rule` and `delete_rule`
-  (`draft`, always two-phase confirmed with Outlook rule-blob warnings;
-  mailbox-internal actions only — never sends or deletes mail).
-- **Write safely** — `create_draft` (with `attachments`),
-  `update_draft`, `add_draft_attachment` (`content_base64` or relative
-  `path` in `EWS_ATTACHMENT_DIR`), `delete_draft`, `update_messages`,
-  `move_messages`. `delete_messages` and `send_draft` exist only at the
-  `full` tier; `send_draft` sits behind the kill-switch, recipient
-  lists, an hourly cap, and a two-phase **content-bound** confirmation
-  that goes stale if the draft changes.
-- **Operate** — `get_server_status` (connection and auth-breaker state,
-  tier, cache watermarks — works even while Exchange is unreachable).
+> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
+> 4.5 tag.
 
-Capability tiers expose **18** (`read`), **29** (`draft`, default), or
-**34** (`full`) tools. The complete, generated reference — every tool
-with its parameters, envelope, error codes, and the v3→4.5 rename map —
-is [`v5/docs/API.md`](v5/docs/API.md).
+The default 4.5 registry on `main` exposes **34** tools across eight areas, plus `find_similar`
+when `EWS_SEMANTIC_INDEX=pgvector`.
+
+| Area | What you can ask for | Tools |
+|---|---|---|
+| Mail reading and search | Morning overview, folder tree search, keyword or Arabic-normalized full-text search across one folder or `f:all`, batch sender/subject checks, cleaned single or batch messages, `.eml` export, full threads, and attachment or document text reading | `get_mailbox_overview`, `list_folders`, `search_messages`, `check_messages`, `get_message`, `get_messages`, `get_thread`, `get_attachment`, `find_similar` |
+| Drafts and sending | Create text or sanitised HTML drafts, edit recipients or remove attachments, attach files or existing messages, discard drafts, and send after a content-bound preview | `create_draft`, `update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft` |
+| Mail filing and cleanup | Mark messages read or unread, add or remove categories, mark follow-up flags complete, move up to 50 messages, or delete messages | `update_messages`, `move_messages`, `delete_messages` |
+| Calendar and automatic replies | List expanded events, inspect attendance and recurrence rules, find free slots, create or update single and recurring events, accept or decline invitations, cancel meetings you organize, and read or set out-of-office replies | `list_events`, `get_event`, `check_availability`, `create_event`, `update_event`, `respond_to_event`, `cancel_event`, `get_oof_settings`, `set_oof` |
+| People and directory | Look up colleagues across the Global Address List (`GAL`) and personal contacts, or inspect one contact with mail history | `find_people`, `get_contact` |
+| Tasks and follow-ups | List tasks, mark a task complete or change its due date, and list sent threads that have no reply | `list_tasks`, `update_task`, `waiting_on` |
+| Inbox rules | Inspect server-side rules, create or replace mailbox-internal filing and tagging rules, and delete rules | `list_rules`, `save_rule`, `delete_rule` |
+| Operations | Check connection state, capability tier, kill-switch, tool count, and cache sync status even when Exchange is unreachable | `get_server_status` |
+
+Capability tiers expose **18** tools at `read`, **29** at `draft` by default, and **34** at `full`
+on `main`. Published tag `v4.5.0a3` exposes **17**, **28**, and **33** tools. Every tool, argument,
+response envelope, error code, and v3-to-4.5 rename is documented in
+[`v5/docs/API.md`](v5/docs/API.md).
 
 ## The safety model (4.5)
 
+> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
+> 4.5 tag.
+
+In `v4.5.0a3`, `SEND_ENABLED=false` does not stop `cancel_event`, the hourly cap counts only
+`send_draft`, `respond_to_event` and `set_oof`, and attendees stored on an event are not checked
+against the recipient lists; see [`v5/docs/UPGRADING.md`](v5/docs/UPGRADING.md).
+
+Every tool call passes through one central gate chain before reaching Exchange. Full details and
+non-goals are in [`v5/docs/SAFETY.md`](v5/docs/SAFETY.md).
+
 | Mechanism | What it does |
 |---|---|
-| Capability tiers | `read` (18) ⊂ `draft` (29) ⊂ `full` (34) — above-tier tools are not even registered |
-| Kill-switch | `SEND_ENABLED=false` (default) refuses every send-class call |
-| Lockout guard | Fails immediately on HTTP 401, opens for `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` (default `900` s), and stays open until restart after `EWS_AUTH_MAX_REJECTIONS` (default `3`) |
-| Recipient guards | Allow/deny globs on argument **and** draft-resolved recipients |
-| Two-phase confirm | Preview + single-use HMAC token bound to the draft's subject, recipients, body, and attachments (ids, names, sizes) |
-| Rate cap | `EWS_MAX_SENDS_PER_HOUR` |
-| Audit chain | Hash-chained log, verifier script, persists across restarts |
+| Capability tiers | `EWS_CAPABILITY_TIER` exposes `read` with 18 tools, `draft` with 29 tools by default, or `full` with 34 tools; tools above the tier are not registered. |
+| Kill-switch | `SEND_ENABLED=false` by default; refuses `send_draft`, `respond_to_event`, `set_oof`, and any `create_event`, `update_event`, or `cancel_event` call that would notify attendees, at phase one before issuing a token. |
+| Lockout guard | Stops on the first `HTTP 401`, cools down for `EWS_AUTH_FAILURE_COOLDOWN_SECONDS` at `900` s by default, and stays open until restart after `EWS_AUTH_MAX_REJECTIONS` rejections since the last successful login, `3` by default. |
+| Recipient guards | `EWS_RECIPIENT_ALLOWLIST` and `EWS_RECIPIENT_DENYLIST` check address globs on recipient arguments and on the stored recipients of `send_draft`, `update_event` when notifying attendees, and `cancel_event`. |
+| Two-phase confirm | Returns a preview and a single-use HMAC `confirm_token` bound to the target content or arguments, including draft subject, recipients, body, and attachment metadata; changes invalidate the token. |
+| Rate cap | `EWS_MAX_SENDS_PER_HOUR` caps confirmed calls that send — `send_draft`, `respond_to_event`, `set_oof`, invitations, update notices, and cancellations — at `10` per rolling hour per process in memory by default, keeping `confirm_token` unspent if capped. |
+| Audit chain | Best-effort hash-chained JSONL log of tool calls and target ids under `DATA_DIR/audit`; `v5/scripts/verify_audit_chain.py` checks single-writer directories for accidental damage. |
 
 ## Documentation
 
-| | |
+Start at [`docs/README.md`](docs/README.md) for the complete map, including legacy 4.0 guides.
+
+| Page | What you find there |
 |---|---|
-| [`docs/README.md`](docs/README.md) | **The documentation map** — start here |
-| [`v5/README.md`](v5/README.md) | 4.5 install & use: stdio, HTTP, Docker, configuration |
-| [`v5/docs/API.md`](v5/docs/API.md) | 4.5 API reference (generated from the registry) |
-| [`v5/DESIGN.md`](v5/DESIGN.md) | 4.5 architecture and rationale |
-| [`docs/legacy/`](docs/legacy/) | Legacy 4.0 documentation (`:latest` users) |
-| [`examples/skills/exchange-assistant/`](examples/skills/exchange-assistant/) | Example assistant skill on top of the tool surface |
+| [`docs/README.md`](docs/README.md) | Complete documentation map for 4.5 and legacy 4.0 |
+| [`v5/README.md`](v5/README.md) | 4.5 getting started: local `stdio` install, client config, first prompts |
+| [`v5/docs/SAFETY.md`](v5/docs/SAFETY.md) | Safety controls, HTML and document handling, and what is not promised |
+| [`v5/docs/CONFIGURATION.md`](v5/docs/CONFIGURATION.md) | Every environment variable, default, limit, and `.env` rule |
+| [`v5/docs/DEPLOYMENT.md`](v5/docs/DEPLOYMENT.md) | Running over `stdio`, shared `DATA_DIR`, HTTP, Docker, Compose, health, and updates |
+| [`v5/docs/API.md`](v5/docs/API.md) | Generated tool schemas, response envelopes, id aliases, error codes, and v3 rename map |
+| [`v5/docs/TROUBLESHOOTING.md`](v5/docs/TROUBLESHOOTING.md) | Symptoms, causes, fixes, and error code reference |
+| [`v5/docs/UPGRADING.md`](v5/docs/UPGRADING.md) | Upgrading between 4.5 tags and migrating from 3.x or 4.0 |
+| [`v5/docs/ARCHITECTURE.md`](v5/docs/ARCHITECTURE.md) | Request flow, cache mirror, alias store, isolated workers, and code map |
+| [`v5/DESIGN.md`](v5/DESIGN.md) | Architectural rules and invariants enforced by the test suite |
+| [`SECURITY.md`](SECURITY.md) | Supported versions, vulnerability reporting, and security scope |
+| [`examples/skills/exchange-assistant/SKILL.md`](examples/skills/exchange-assistant/SKILL.md) | Example assistant skill built on the 4.5 tools |
+| [`docs/legacy/`](docs/legacy/) | Legacy 4.0 setup, connection, API, deployment, and troubleshooting guides |
 
 ## Development
 
+Install the development dependencies and run all four checks from `v5/`:
+
 ```bash
-pip install -e ./v5[dev]
-python -m pytest v5/tests -q            # full 4.5 suite — no Exchange needed
-python -m ruff check v5
-python v5/scripts/boot_smoke.py full    # end-to-end boot, dead endpoint
-python v5/scripts/dump_tool_table.py --check   # docs ↔ registry drift gate
+cd v5
+pip install -e ".[dev]"
+python -m pytest tests -q
+python -m ruff check .
+python scripts/boot_smoke.py full
+python scripts/dump_tool_table.py --check
 ```
 
-CI: `v5-tests` (blocking ruff + tests on 3.11/3.12 + boot smokes + Docker
-import smoke) runs on every push touching `v5/`; `v5-publish` builds
-`ghcr.io/…:v4.5*` from tags `v4.5.*`, gated on the full test job. The
-legacy image publishes from `main` pushes and `v3.*`/`v4.0.*` tags only.
+The test suite runs offline without an Exchange server. In CI, `v5-tests` runs `ruff`, `pytest` on
+Python 3.11 and 3.12, `dump_tool_table.py --check`, `boot_smoke.py`, and a Docker import check on
+changes touching `v5/`. `v5-publish` builds `ghcr.io/azizmazrou/ews-mcp:v4.5*` on `v4.5.*` tags and
+manual `workflow_dispatch` runs, gated on `v5-tests`. Legacy images publish `:latest` on `main`
+pushes and the version tags of the legacy line.
 
 ## Repository layout
 
-```
-v5/            the 4.5 server (package `ews-mcp`, entry point `ewsmcp`)
-src/           the legacy 4.0 server (ships as :latest)
-docs/          documentation map + legacy 4.0 docs
+```text
+v5/            4.5 server (package ews-mcp, entry point ewsmcp)
+src/           legacy 4.0 server (ships as :latest)
+docs/          documentation map and legacy 4.0 guides
 examples/      example assistant skill
-.env.example   legacy 4.0 configuration template (4.5: v5/.env.example)
+.env.example   legacy 4.0 configuration template; 4.5 uses v5/.env.example
 ```
 
 ## Contributing & license
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). MIT — see [LICENSE](LICENSE).
+Contribution workflow and local setup are in [`CONTRIBUTING.md`](CONTRIBUTING.md). Security
+reporting is in [`SECURITY.md`](SECURITY.md). Licensed under MIT; see [`LICENSE`](LICENSE).

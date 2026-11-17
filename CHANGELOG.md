@@ -3,21 +3,226 @@
 ## [Unreleased]
 
 ### Added
-- `create_draft` and `update_draft` in `v5/` accept `body_format="html"` alongside the `"text"` default (`ewsmcp.htmlsafe`, custom linear-time non-raising stdlib-only tokenizer run off the event loop in under 2 s up to 200,000 chars; `update_draft` reports `body_format` only when `body` is supplied): HTML bodies are rebuilt from scratch to a fixed point as `<html><body…>…</body></html>` (carrying `dir`, `lang`, `align`, and `style` from input `<html>`/`<body>` onto `<body>`, handling omitted `</head>`, HTML5 end-tag quote rules, HTML5 raw-text elements including `noembed`, `noframes`, `xmp`, and `iframe`, ignoring `/` on non-void HTML elements, capping combining-mark runs at 30, and closing implied end tags like browsers) against strict allow-lists of formatting/list/table/link elements, element attributes (decoding numeric character references with or without `;` and named references only when terminated with `;` so `&region=sa` stays verbatim), `http`/`https` and address-only `mailto` links (removing anchors with no visible text in any descendant, table cells included, and stripping `mailto:` query/fragment/extra-recipient parts while counting them in `removed_links`), and typography/layout CSS declarations (`unicode-bidi` restricted to `normal|embed|isolate|plaintext`, `font-size` of `0` or `< 6px/pt` dropped, internal whitespace normalised; dropping bidi overrides `U+202D`/`U+202E`, `img`, scripts, styles, forms, embeds, `noembed`, `noframes`, SVG/MathML, comments, marked sections, CDATA, and event handlers). Inputs longer than 200,000 characters (applied to the input; escaped output may be longer) or with no visible non-blank text left after sanitising fail with `validation` before touching Exchange; stripped elements, attributes, or link parts from the first pass are reported in `sanitised`.
-- `send_draft` phase-1 previews inspect stored draft HTML off the event loop (under 5 s up to 2,000,000 characters, above which hosts are listed from the raw-text union scan only with `links_unverified: true`, without holding the GIL for more than ~0.2 s) across URL-bearing attributes (`href`, `xlink:href`, `action`, `formaction`, `src`, `srcset`, `background`, `poster`, `data`, `cite`) plus a parser-independent raw-text URL scan taking the union over six readings (character references: none decoded, browser rules, and 3-pass fixed point; whitespace: tab/CR/LF deleted and replaced by a space), returning `link_hosts` (mismatching link hosts first, then other link hosts, `embedded: true` non-anchor hosts, and `unparsed: true` raw-scan hosts; hosts over 253 chars cut to 80 without IDNA; capped at 50 with `link_hosts_total` and `links_unverified: true`), `links` (mismatching links first, up to 20 distinct `{text, href}` pairs with `text` capped at 120 characters, plus `links_total`), and ordered `warnings` where unverified/size notices come first, followed by the singular hosts-omitted and outside-normal-markup notices, then mismatch warnings (including dot-whitespace, mixed ASCII/non-ASCII link-text tokens, and `mailto:` multi-recipient/query links; shown up to 100 with a count line and `links_unverified: true` beyond 100), and then non-critical warnings folded beyond three per kind, while keeping the stored HTML (`_body_html`) bound into the confirmation token.
-- `update_draft` accepts `remove_attachments` (list of attachment names, `a`-alias ids reported by `add_draft_attachment` / `update_draft`, or raw EWS attachment ids): matches all selectors up front (all-or-nothing selector matching) under `_draft_lock` on items in `f:drafts` only, refuses unknown entries (cutting echoed selectors to 80 characters) and ambiguous duplicate names (listing the `a`-alias ids to choose from) with `validation` before writing, performs attachment removals before saving `to`/`cc`/`bcc`/`subject`/`body` (reporting `removed` and remaining `attachments` with no other fields changed if a multi-delete fails partway), returns the remaining `attachments`, and invalidates any previously minted `send_draft` confirmation token (attachments on `send_draft` are bound by `name`, `size`, and `id`, not a content hash).
-- `add_draft_attachment` accepts `message_id` (mutually exclusive with `content_base64` and `path`), attaching an existing mail message (refusing non-mail items and the draft itself with `validation`) as a `message/rfc822` `.eml` file: checks declared `size` against `EWS_MAX_ATTACHMENT_MB` before downloading `mime_content` (and real size after), strips `Bcc` and `Resent-Bcc` headers (folded lines included) from the attached copy, sanitises the `.eml` filename (removing format and C0/C1 control characters, prefixing `_` onto reserved Windows device stems `CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9`, and capping at 120 characters and 200 UTF-8 bytes before `.eml`, with `message.eml` fallback), reports short `a`-alias attachment `id`s, and invalidates any previously minted `send_draft` confirmation token.
-- Document text extraction and character-offset paging in `v5/` `get_attachment` (`v5/ewsmcp/toolerror.py`, `v5/ewsmcp/extract.py`, `v5/ewsmcp/extract_child.py`, `v5/ewsmcp/extract_worker.py`, `v5/ewsmcp/pdftext.py`): runs each document extraction (`pdf`, `docx`, `xlsx`, `pptx`, `eml`, `message`, `html`) in a dedicated stdlib-first child entry point (`python -m ewsmcp.extract_child`, loading only stdlib, `defusedxml`, and extraction modules — `pypdf` imported lazily only when a PDF arrives, never `exchangelib`/`mcp`/`requests`; `20` s hard wall-clock deadline with a `75%` soft deadline between pages/sheets/slides/blocks/message parts returning `partial: true`, unit counts read, and `notes`; `1,024` MB memory ceiling self-applied by the child to its own process before reading `stdin` via Win32 Job Object on Windows or `RLIMIT_AS` on Linux — reported via `get_server_status.document_memory_ceiling` when un-enforced on other platforms — plus a parent Win32 kill-on-close Job Object and POSIX `start_new_session` + process-group `SIGKILL`; parent hostile-input validation of child JSON; immediate child kill on `asyncio` cancellation while holding the concurrency slot until cleanup finishes; Linux `prctl(PR_SET_DUMPABLE, 0)` before the first worker unless `EWS_KEEP_DUMPABLE=true`; `internal` unavailable error when the server's temp folder or worker process cannot be created without opening the circuit breaker; scrubbed environment without `USERNAME`; reduced `PATH`; empty temporary `cwd` removed with retry after child exit; and at most `2` concurrent workers without holding mail gateway threads), while decoding and slicing plain-text attachments (`.txt`, `.csv`, `.md`, `.log`, `.json`, `text/*`) directly in the server process without spawning a worker (reading only as many bytes as `5,000,000` characters can need, with no per-line loop or line-ending normalisation). Note: the worker contains time, memory, and parser crashes; it is not an OS user or filesystem sandbox. Reads `.pdf` (via optional extra `ews-mcp[extract]` / `pypdf>=6.21,<7`, installed in `dev` and `v5/Dockerfile`; `layout` mode with `ewsmcp.pdftext` in-memory `/ToUnicode` multi-letter RTL ligature repair including single start-string `bfrange` expansion up to `256` codes, unpatched plain-mode text for linear split-word repair up to `12` pieces and file-order recovery when rotated text or Form `/XObject` content is invisible to `layout` mode, byte-identical passthrough on layout-visible non-RTL pages, whole-word `Word` vs Unicode reading-order conversion up to `5,000` characters per line, Arabic presentation-form and Persian-twin folding, `"no text layer"` only when both layout and plain passes are empty, and `500`-page bound), `.docx`/`.docm` (`mc:Choice`-only `mc:AlternateContent`), `.xlsx`/`.xlsm` (streamed worksheets under `--- Sheet: <name> ---` up to `5,000` rows × `50` columns per sheet so large worksheets still return their first `5,000` rows with a cut note, ISO date/time and percentage formatting from `xl/styles.xml` with a fallback note if unreadable, `2,000` characters per cell, and `≤10`-character cell references), `.pptx`/`.pptm` (`--- Slide N ---` in presentation order), `.eml` (`compat32` policy with raw 8-bit header bytes recovered as UTF-8 falling back to `Windows-1256` before the `4,000`-character header cut, and `≤50` addresses per header), attached Exchange items (`ItemAttachment`, `extracted_from: "message"`), `.html`/`.htm`, and plain text (BOM stripping and lone surrogates replaced with `U+FFFD`; Outlook `.msg` files return `mode: "info"` with a save-and-open note/hint in both `mode="auto"` and `mode="text"`), preserving `main` S/MIME (`.p7m`, `.p7s`) and `mode="auto"` behaviour.
-- Character-offset paging (`offset`, `total_chars`, `next_offset` when more follows, `extracted_from`, `partial: true` when cut, `notes` list of at most `8` notes `≤300` characters with cut notes first and repeated notes folded with a count alongside `note`, `pages`/`slides`/`sheets`, and `pages_read`/`slides_read`/`sheets_read`, repeated on every part) capped at `5,000,000` characters and backed by an in-memory-only document text cache (at most `4` documents and `8,000,000` characters total, `10`-minute TTL, keyed by `(attachment_id, size)` or an unambiguous fallback tuple, with `offset > 0` resolved strictly via the exact `(message_id, attachment)` selector binding or a single metadata-only picker lookup) plus hostile-input validation bounds (`EWS_MAX_ATTACHMENT_MB`, stored/deflated ZIP members only, `2,000` archive members checked before reading, streamed caps of `30` MiB per non-streamed member, `20` MiB per non-streamed XML part, and `100` MiB total read, iterative XML depth limit `256`, `defusedxml` DTD/entity rejection, and `≤300`-character `validation` errors/notes echoing at most `80` characters of file-supplied text without opening the circuit breaker).
-- `find_people` and `get_contact` include `department` and `office` on person results when provided by the directory or contact record (with `Contact` and `Attachment`/`ItemAttachment` field pins in `test_exchangelib_signatures.py`).
-- `search_messages(importance="high"|"normal"|"low")` filters messages by importance with identical semantics on the SQLite mirror and live EWS lanes (combinable with `sender`, `since`/`until`, `is_unread`, `categories`, `has_attachments`, `flag_complete`, `folder="f:all"`, and `recursive=true`, without calling `QuerySet.count()` on large sets); message cards and full message DTOs also emit `importance: "low"` alongside `"high"`.
-- `get_messages(ids, format="concise"|"full", fresh=false)` (`read` tier) fetches up to 20 messages in one call in the exact order requested, resolving each id individually inside the handler (rejecting non-message aliases locally without contacting Exchange, falling back to per-id fetches if batch `fetch` raises mid-stream, and reporting per-item failures in `failed` as `[{id, index, code, error}]` using the caller's exact input id without minting aliases), stamping `source: "mixed"` with per-item `source` (and `as_of` on mirror rows) when mirror and live hits mix, and never downloading attachment bytes (PKCS#7 S/MIME attachments are marked `smime_type: "candidate"` from name and MIME type only, whereas `get_message` provides the confirmed `"signed"`/`"enveloped"` classification).
-- `list_folders(query="...")` performs a case-insensitive substring match on folder name or full path across the entire folder tree (ignoring `depth` and returning full root-anchored paths even when `parent` is set, while rejecting empty or whitespace-only `query` strings with `validation`) on both the mirror and live lanes.
-- `get_message(format="eml")` writes a message's RFC-822 `mime_content` exclusively under `DATA_DIR/attachments` (shared with `get_attachment(mode="save")`: never overwrites existing files, adding `-2`, `-3`, … suffixes, caps filename stems at 200 UTF-8 bytes on a character boundary, guards reserved device stems, and reports local disk failures as `internal` without tripping the Exchange circuit breaker), enforces the `EWS_MAX_ATTACHMENT_MB` ceiling before and after fetching MIME bytes, and returns only `saved_path` and `size_bytes` (note: a message exported from Sent Items may contain its `Bcc` header because the file is the message as the mailbox holds it; `Item.importance` and `Item.mime_content` field/projection pins added in `test_exchangelib_signatures.py`).
+- **`create_draft` and `update_draft` in `v5/` accept `body_format="html"` alongside the `"text"`
+  default.**
+  - `ewsmcp.htmlsafe` runs a custom linear-time, non-raising, stdlib-only tokenizer off the event
+    loop in under 2 s for inputs up to 200,000 characters.
+  - Markup is rebuilt from scratch to a fixed point as `<html><body…>…</body></html>`, carrying
+    `dir`, `lang`, `align`, and `style` from input `<html>` or `<body>` onto `<body>`.
+  - Parsing handles omitted `</head>`, HTML5 end-tag quote rules, HTML5 raw-text elements
+    including `noembed`, `noframes`, `xmp`, and `iframe`, `/` on non-void HTML elements, implied
+    browser end tags, and combining-mark runs capped at 30.
+  - Allow-lists keep formatting, list, table, and link elements and attributes; in attribute
+    values, numeric character references decode with or without `;`, and named ones only when
+    terminated with `;` so `&region=sa` stays verbatim.
+  - Links allow only `http`, `https`, and address-only `mailto`; anchors with no visible text in
+    any descendant, table cells included, are removed, and `mailto:` query, fragment, and
+    extra-recipient parts are stripped and counted in `removed_links`.
+  - CSS keeps typography and layout declarations with normalised internal whitespace, restricts
+    `unicode-bidi` to `normal|embed|isolate|plaintext`, and drops `font-size` of `0` or
+    `< 6px/pt`.
+  - Bidi overrides `U+202D` and `U+202E`, `img`, scripts, styles, forms, embeds, `noembed`,
+    `noframes`, SVG/MathML, comments, marked sections, CDATA, and event handlers are dropped.
+  - Inputs over 200,000 characters on the input string—escaped output may be longer—or leaving no
+    visible non-blank text fail with `validation` before touching Exchange; first-pass removals
+    are reported in `sanitised`, and `update_draft` reports `body_format` only when `body` is
+    supplied.
+- **`send_draft` phase-1 previews inspect stored draft HTML and report links, destination hosts,
+  and link-mismatch warnings.**
+  - Inspection runs off the event loop in under 5 s up to 2,000,000 characters without holding
+    the GIL for more than ~0.2 s; larger bodies list hosts from the raw-text union scan only and
+    set `links_unverified: true`.
+  - Attribute scanning walks `href`, `xlink:href`, `action`, `formaction`, `src`, `srcset`,
+    `background`, `poster`, `data`, and `cite`.
+  - A parser-independent raw-text URL scan adds the union over eight readings: character
+    references with none decoded, browser rules once, browser rules to a 3-pass fixed point, and
+    all character references to a 3-pass fixed point, each with tab/CR/LF deleted and replaced by
+    a space.
+  - `link_hosts` orders mismatching link hosts first, then other link hosts, `embedded: true`
+    non-anchor hosts, and `unparsed: true` raw-scan hosts; hosts over 253 characters are cut to
+    80 without IDNA, and the list caps at 50 with `link_hosts_total` and `links_unverified: true`.
+  - `links` lists mismatching links first, up to 20 distinct `{text, href}` pairs with `text`
+    capped at 120 characters, plus `links_total`.
+  - `warnings` orders unverified and size notices first, then the singular hosts-omitted and
+    outside-normal-markup notices, then mismatch warnings—covering dot-whitespace, mixed
+    ASCII/non-ASCII link-text tokens, and `mailto:` multi-recipient or query links, shown up to
+    100 with a count line and `links_unverified: true` beyond 100—and finally non-critical
+    warnings folded beyond three per kind.
+  - Stored HTML in `_body_html` stays bound into the confirmation token.
+- **`update_draft` accepts `remove_attachments` to remove draft attachments by name or id.**
+  - Entries accept attachment names, `a`-alias ids reported by `add_draft_attachment` or
+    `update_draft`, or raw EWS attachment ids.
+  - All selectors match up front—all-or-nothing—under `_draft_lock` on items in `f:drafts` only.
+  - Unknown entries, with echoed selectors cut to 80 characters, and ambiguous duplicate names
+    fail with `validation` before writing; duplicate-name errors list the `a`-alias ids to choose
+    from.
+  - Removals run before saving `to`, `cc`, `bcc`, `subject`, or `body` and return remaining
+    `attachments`; if a multi-delete fails partway, no other fields change and the error reports
+    `removed` and remaining `attachments`.
+  - Removing an attachment invalidates any earlier `send_draft` confirmation token; `send_draft`
+    binds attachments by `name`, `size`, and `id`, not a content hash.
+- **`add_draft_attachment` accepts `message_id` to attach an existing mail message as a
+  `message/rfc822` `.eml` file.**
+  - `message_id` is mutually exclusive with `content_base64` and `path`; non-mail items and the
+    draft itself fail with `validation`.
+  - Declared `size` is checked against `EWS_MAX_ATTACHMENT_MB` before downloading `mime_content`,
+    and real size is checked again after download.
+  - `Bcc` and `Resent-Bcc` headers, folded lines included, are stripped from the attached copy.
+  - Filename sanitisation removes format and C0/C1 control characters, prefixes `_` onto reserved
+    Windows device stems `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, and `LPT1`–`LPT9`, and caps
+    stems at 120 characters and 200 UTF-8 bytes before `.eml` with `message.eml` fallback.
+  - Returns short `a`-alias attachment `id` values and invalidates any earlier `send_draft`
+    confirmation token.
+- **`get_attachment` in `v5/` extracts text in memory from PDF, Office, mail, HTML, and
+  plain-text attachments.**
+  - Implemented across `v5/ewsmcp/toolerror.py`, `v5/ewsmcp/extract.py`,
+    `v5/ewsmcp/extract_child.py`, `v5/ewsmcp/extract_worker.py`, and `v5/ewsmcp/pdftext.py`.
+  - Document formats `pdf`, `docx`, `xlsx`, `pptx`, `eml`, `message`, and `html` run in
+    `python -m ewsmcp.extract_child`, loading only stdlib, `defusedxml`, and extraction modules;
+    `pypdf` imports lazily only when a PDF arrives, never loading `exchangelib`, `mcp`, or
+    `requests`.
+  - At most `2` workers run concurrently without holding mail gateway threads, under a `20` s
+    hard wall-clock deadline and a `75%` soft deadline between pages, sheets, slides, blocks, or
+    message parts that returns `partial: true`, unit counts read, and `notes`.
+  - Each child self-applies a `1,024` MB memory ceiling before reading `stdin` via Win32 Job
+    Object on Windows or `RLIMIT_AS` on Linux, reported via
+    `get_server_status.document_memory_ceiling` with `enforced: false` when un-enforced on other
+    platforms. The parent enforces a Win32 kill-on-close Job Object or POSIX `start_new_session`
+    plus process-group `SIGKILL`, kills the child immediately on `asyncio` cancellation while
+    holding the concurrency slot until cleanup finishes, and validates child JSON as hostile
+    input.
+  - Workers use a scrubbed environment without `USERNAME`, a reduced `PATH`, and an empty
+    temporary `cwd` removed with retry after child exit; Linux marks the server process
+    non-dumpable via `prctl(PR_SET_DUMPABLE, 0)` before the first worker unless
+    `EWS_KEEP_DUMPABLE=true`, and temp-folder or worker-creation failures return `internal`
+    without opening the circuit breaker.
+  - The worker contains time, memory, and parser crashes; it is not an OS user or filesystem
+    sandbox.
+  - Plain-text files `.txt`, `.csv`, `.md`, `.log`, `.json`, and `text/*` decode and slice in the
+    server process without spawning a worker, reading only enough bytes for `5,000,000`
+    characters with no per-line loop or line-ending normalisation, stripping BOMs, and replacing
+    lone surrogates with `U+FFFD`; Outlook `.msg` files return `mode: "info"` with a
+    save-and-open note and hint in both `mode="auto"` and `mode="text"`, while `main` S/MIME
+    `.p7m` and `.p7s` handling and `mode="auto"` behaviour are preserved.
+
+  | Format | Extraction behaviour and limits |
+  |---|---|
+  | `.pdf` | Optional extra `ews-mcp[extract]` / `pypdf>=6.21,<7` in `dev` and `v5/Dockerfile`; `500`-page bound; `layout` and plain-mode text with `ewsmcp.pdftext` RTL repair |
+  | `.docx` / `.docm` | Reads `mc:Choice`-only `mc:AlternateContent` |
+  | `.xlsx` / `.xlsm` | Streamed worksheets under `--- Sheet: <name> ---` up to `5,000` rows × `50` columns per sheet, `2,000` characters per cell, and `≤10`-character cell references |
+  | `.pptx` / `.pptm` | Slides under `--- Slide N ---` in presentation order |
+  | `.eml` | `compat32` policy with raw 8-bit header bytes recovered as UTF-8 falling back to `Windows-1256` before the `4,000`-character header cut, and `≤50` addresses per header |
+  | Exchange item / HTML | Attached Exchange items via `ItemAttachment` with `extracted_from: "message"`, and `.html` / `.htm` |
+
+#### `.pdf`
+
+- Optional extra `ews-mcp[extract]` / `pypdf>=6.21,<7`, installed in `dev` and `v5/Dockerfile`,
+  with a `500`-page bound.
+- Runs `layout` mode with `ewsmcp.pdftext` in-memory `/ToUnicode` multi-letter RTL ligature
+  repair and single start-string `bfrange` expansion up to `256` codes.
+- Uses unpatched plain-mode text for linear split-word repair up to `12` pieces and file-order
+  recovery when rotated text or Form `/XObject` content is invisible to `layout` mode.
+- Preserves byte-identical passthrough on layout-visible non-RTL pages.
+- Applies whole-word `Word` vs Unicode reading-order conversion up to `5,000` characters per
+  line, plus Arabic presentation-form and Persian-twin folding.
+- Reports `"no text layer"` only when both layout and plain passes are empty.
+
+#### `.xlsx` / `.xlsm`
+
+- Streams worksheets under `--- Sheet: <name> ---` up to `5,000` rows × `50` columns per sheet so
+  large worksheets still return their first `5,000` rows with a cut note.
+- Formats ISO date/time and percentage values from `xl/styles.xml`, with a fallback note if
+  unreadable.
+- Caps cell text at `2,000` characters per cell and uses `≤10`-character cell references.
+
+- **Character-offset paging on `get_attachment` serves extracted text in slices from an in-memory
+  cache with archive and XML safety bounds.**
+  - Responses include `offset`, `total_chars`, `next_offset` when more follows, `extracted_from`,
+    `pages`/`slides`/`sheets`, and `pages_read`/`slides_read`/`sheets_read`.
+  - Every part repeats `partial: true` when cut and, when present, `note` and `notes`—a list of
+    at most `8` notes of `≤300` characters, with cut notes first and repeated notes folded with a
+    count.
+  - Cache entries are keyed by `(attachment_id, size)` or an unambiguous fallback tuple; calls
+    with `offset > 0` resolve strictly via the exact `(message_id, attachment)` selector binding
+    or a single metadata-only picker lookup.
+  - Archive and XML checks enforce `defusedxml` DTD/entity rejection and return `≤300`-character
+    `validation` errors and notes echoing at most `80` characters of file-supplied text without
+    opening the circuit breaker.
+
+  | Limit | Value |
+  |---|---|
+  | Extracted text per document | `5,000,000` characters; `20,000` characters per `get_attachment` slice |
+  | In-memory document text cache | At most `4` documents and `8,000,000` characters total, `10`-minute TTL |
+  | Attachment size ceiling | `EWS_MAX_ATTACHMENT_MB` |
+  | ZIP archive members | Stored or deflated members only; `2,000` archive members checked before reading |
+  | Streamed archive / XML reads | `30` MiB per non-streamed member, `20` MiB per non-streamed XML part, `100` MiB total read |
+  | Iterative XML depth | `256` |
+
+- **`find_people` and `get_contact` return `department` and `office` on person results when
+  provided by the directory or contact record.**
+  - Adds `Contact` and `Attachment`/`ItemAttachment` field pins in
+    `test_exchangelib_signatures.py`.
+- **`search_messages(importance="high"|"normal"|"low")` filters messages by importance with
+  identical semantics on the SQLite mirror and live EWS lanes.**
+  - Combinable with `sender`, `since`, `until`, `is_unread`, `categories`, `has_attachments`,
+    `flag_complete`, `folder="f:all"`, and `recursive=true`, without calling `QuerySet.count()`
+    on large sets.
+  - Message cards and full message DTOs also emit `importance: "low"` alongside `"high"`.
+- **`get_messages(ids, format="concise"|"full", fresh=false)` at the `read` tier fetches up to 20
+  messages in one call in the exact order requested.**
+  - Resolves each id individually inside the handler, rejecting non-message aliases locally
+    without contacting Exchange and falling back to per-id fetches if batch `fetch` raises
+    mid-stream.
+  - Reports per-item failures in `failed` as `[{id, index, code, error}]` using the caller's
+    exact input id without minting aliases.
+  - Stamps `source: "mixed"` with per-item `source`, plus `as_of` on mirror rows, when mirror and
+    live hits mix.
+  - Never downloads attachment bytes: PKCS#7 S/MIME attachments report `smime_type: "candidate"`
+    from name and MIME type only, whereas `get_message` provides the confirmed `"signed"` or
+    `"enveloped"` classification.
+- **`list_folders(query="...")` matches folder names or full paths by case-insensitive substring
+  across the folder tree on both the mirror and live lanes.**
+  - Searches the entire folder tree on the mirror or live lane when `parent` is omitted; when
+    `parent` is set, walks `parent`'s subtree live while still ignoring `depth` and returning full
+    root-anchored paths.
+  - Rejects empty or whitespace-only `query` strings with `validation`.
+- **`get_message(format="eml")` saves a message's RFC-822 `mime_content` exclusively under
+  `DATA_DIR/attachments` and returns only `saved_path` and `size_bytes`.**
+  - Shares file-writing behaviour with `get_attachment(mode="save")`: never overwrites existing
+    files, adds `-2`, `-3`, … suffixes, caps filename stems at 200 UTF-8 bytes on a character
+    boundary, guards reserved device stems, and reports local disk failures as `internal` without
+    tripping the Exchange circuit breaker.
+  - Enforces the `EWS_MAX_ATTACHMENT_MB` ceiling before and after fetching MIME bytes.
+  - A message exported from Sent Items may contain its `Bcc` header because the file is the
+    message as the mailbox holds it.
+  - Adds `Item.importance` and `Item.mime_content` field and projection pins in
+    `test_exchangelib_signatures.py`.
 
 ### Changed
-- `cancel_event` in `v5/` now inspects the calendar entry on a single projected fetch per phase and fails closed via an explicit decision table: non-`CalendarItem` items fail with `validation`; `my_response_type="Organizer"` cancels when `is_meeting` is true or any attendee list is non-empty and moves to Deleted Items (`SEND_TO_NONE`, `deleted: true`) when `is_meeting` is false and all attendee lists are empty; `Accept`/`Decline`/`Tentative`/`NoResponseReceived` fail with `validation` pointing to `respond_to_event`; and `Unknown` or missing response types delete only when `is_meeting` is explicitly false and all attendee lists are empty, compare the organizer's SMTP address against the account's own addresses when `is_meeting` is true (ours → cancel, foreign → `validation` pointing to `respond_to_event`, missing/non-SMTP → `validation`), and fail with `validation` when `is_meeting` is missing. Cancellation `attendees` pass through the dispatcher's recipient guard and external-recipient warning; recurring series masters (`type="RecurringMaster"`) are flagged in the preview (`series: true`, `scope: "series"`, warning `note`); and `start`, `end`, `type`, `series`, `action`, `is_meeting`, `attendees`, `subject`, and `message` are bound into the confirmation token (tool count, class, tier, and two-phase confirmation unchanged).
-- Default `v5/` tool surface grows from 33 to **34** tools (**18** at `read`, **29** at `draft`, **34** at `full`; **35** when the semantic tier is enabled, keeping the ≤35 design cap).
+- **`cancel_event` in `v5/` inspects the calendar entry in a single projected fetch per phase and
+  fails closed when item type or organizer ownership is not verified.**
+  - Non-`CalendarItem` items fail with `validation`.
+  - Cancellation `attendees` pass through the dispatcher's recipient guard and external-recipient
+    warning.
+  - Recurring series masters with `type="RecurringMaster"` are flagged in the preview with
+    `series: true`, `scope: "series"`, and a warning `note`.
+  - Binds `start`, `end`, `type`, `series`, `action`, `is_meeting`, `attendees`, `subject`, and
+    `message` into the confirmation token; tool count, class, tier, and two-phase confirmation
+    are unchanged.
+
+  | Response type | `is_meeting` and attendee lists | Outcome |
+  |---|---|---|
+  | `my_response_type="Organizer"` | `is_meeting` is true or any attendee list is non-empty | Cancels the meeting |
+  | `my_response_type="Organizer"` | `is_meeting` is false and all attendee lists are empty | Moves to Deleted Items with `SEND_TO_NONE` and `deleted: true` |
+  | `my_response_type="Organizer"` | `is_meeting` is missing and all attendee lists are empty | Fails with `validation` |
+  | `Accept`, `Decline`, `Tentative`, `NoResponseReceived` | Any | Fails with `validation` pointing to `respond_to_event` |
+  | `Unknown` or missing | `is_meeting` is explicitly false and all attendee lists are empty | Moves to Deleted Items with `SEND_TO_NONE` and `deleted: true` |
+  | `Unknown` or missing | `is_meeting` is true | Compares the organizer's SMTP address against the account's own addresses: ours cancels, foreign fails with `validation` pointing to `respond_to_event`, missing or non-SMTP fails with `validation` |
+  | `Unknown` or missing | `is_meeting` is missing, or `is_meeting` is false with attendees | Fails with `validation` |
+
+- **The default `v5/` tool surface grows from 33 to 34 tools with `get_messages`.**
+  - Exposes **18** tools at `read`, **29** at `draft`, and **34** at `full`.
+  - Exposes **35** tools when the semantic tier is enabled, keeping the ≤35 design cap.
 - **Notifying calendar calls in `v5/` now enforce `SEND_ENABLED` at phase one, preview stored
   attendees on `update_event`, and count toward `EWS_MAX_SENDS_PER_HOUR`.**
   - `create_event(send_invitations=true)`, `update_event(notify_attendees=true)`, and
@@ -38,8 +243,25 @@
     and `set_oof`.
 
 ### Fixed
-- `v5/README.md`: the Docker example builds the image from `v5/` (run from the repository root as the quick start leaves you, `docker build .` built the legacy 4.0 image), and the development commands say they run from `v5/`. Reported in #164.
-- The HTML-to-text step that the server uses when Exchange returns no plain-text body (message and calendar bodies, out-of-office texts) and for HTML attachments no longer depends on the interpreter's `html.parser`. On Python older than 3.11.14 / 3.12.12 (before that module's fix of October 2025) a body made of thousands of unterminated tags took seconds to minutes to convert; the conversion is now linear and returns the same text on every build. Mail without malformed markup converts as before (900 recorded cases). Outlook-written mail, whose head Exchange returns with a comment that ends inside a `<style>`, no longer gets a stray `<![endif]-->` or its title printed at the top of the text. In general the new converter ends hidden regions where a browser ends them, so text is no longer lost after an unclosed `<head>`, a `<![CDATA[` wrapper, a raw-text element such as `<textarea>` or `<iframe>`, a script containing `<!--<script>`, or style and script elements inside `<svg>` / `<math>`; markup left unterminated at the very end of a body is dropped instead of being shown as text; and the content of `<title>` is never shown. It is a reading aid, not a renderer: the limits are listed in `v5/DESIGN.md`. For HTML attachments a cut is reported only when text was really cut.
+- **Docker and development commands in `v5/README.md` now target `v5/`, reported in #164.**
+  - Running `docker build .` from the repository root, where the quick start leaves you, built
+    the legacy 4.0 image; the Docker example now builds the image from `v5/`.
+  - Development commands state that they run from `v5/`.
+- **HTML-to-text conversion for fallback message and calendar bodies, out-of-office texts, and
+  HTML attachments no longer depends on Python's `html.parser`.**
+  - On Python older than 3.11.14, 3.12.12 or 3.13.6 (the fix of that module shipped in those
+    releases), a body made of thousands of unterminated tags took seconds to minutes to convert;
+    conversion is now linear and returns the same text on every build.
+  - Mail without malformed markup converts as before across 900 recorded cases.
+  - Outlook-written mail whose head Exchange returns with a comment ending inside `<style>` no
+    longer gets a stray `<![endif]-->` or its title printed at the top of the text, and outside
+    `<svg>` and `<math>` the content of `<title>` is never shown.
+  - Hidden regions end where a browser ends them, preserving text after an unclosed `<head>`, a
+    `<![CDATA[` wrapper, a raw-text element such as `<textarea>` or `<iframe>`, a script
+    containing `<!--<script>`, or style and script elements inside `<svg>` and `<math>`.
+  - Markup left unterminated at the end of a body is dropped instead of shown as text, and HTML
+    attachments report a cut only when text was really cut.
+  - The converter is a reading aid, not a renderer; its limits are listed in `v5/DESIGN.md`.
 - **`SEND_ENABLED=false` now stops `cancel_event` from sending meeting cancellation notices.**
   - In the released 4.5 alphas, `SEND_ENABLED` did not stop a confirmed `cancel_event` from
     sending cancellation notices with the caller's `message` to attendees.

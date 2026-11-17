@@ -9,7 +9,7 @@ and how to engage with it productively.
 v5/                      the 4.5 server (current line)
   ewsmcp/                Python package (`ewsmcp` entry point)
   tests/                 offline unit, contract, and structural suite
-  scripts/               boot_smoke.py, dump_tool_table.py, verify_audit_chain.py
+  scripts/               boot_smoke.py, dump_tool_table.py, live_smoke.py, verify_audit_chain.py
   docs/                  API.md (generated tool tables + hand-written contracts)
 src/                     legacy 4.0 source (ships as :latest)
 docs/                    documentation map; docs/legacy/ = 4.0 docs
@@ -69,9 +69,9 @@ one way to solve it, and the change itself is then written by the
 maintainer. A proposal is quickest to assess when:
 - It applies cleanly on top of `main`
 - For `v5/`, all four checks from the root README's Development section
-  pass (`python -m pytest v5/tests -q`, `python -m ruff check v5`,
-  `python v5/scripts/boot_smoke.py full`, and
-  `python v5/scripts/dump_tool_table.py --check`) and new behaviour
+  pass when run from `v5/` (`python -m pytest tests -q`,
+  `python -m ruff check .`, `python scripts/boot_smoke.py full`, and
+  `python scripts/dump_tool_table.py --check`) and new behaviour
   comes with a test under `v5/tests` (for legacy `src/` changes,
   `docker-build-test.yml` passes)
 - It does not introduce a new external service dependency
@@ -83,21 +83,29 @@ maintainer. A proposal is quickest to assess when:
 
 ### 4.5 (`v5/`, current line)
 
+Clone the repository and create a virtual environment in the repository root:
+
 ```bash
-git clone https://github.com/<owner>/<repo>.git
-cd <repo>
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
-pip install -e ./v5[dev]
-python -m pytest v5/tests -q
-python -m ruff check v5
-python v5/scripts/boot_smoke.py full
-python v5/scripts/dump_tool_table.py --check
+git clone https://github.com/azizmazrou/ews-mcp.git
+cd ews-mcp
+python3 -m venv .venv        # Windows: python -m venv .venv
+source .venv/bin/activate        # Windows PowerShell: .venv\Scripts\Activate.ps1
 ```
 
-To run against a mailbox, copy `v5/.env.example` to `.env`, fill in
-credentials, and run `ewsmcp` (or build the container with
-`docker build -t ews-mcp:dev v5`).
+Install the development dependencies and run all four checks from `v5/`:
+
+```bash
+cd v5
+pip install -e ".[dev]"
+python -m pytest tests -q
+python -m ruff check .
+python scripts/boot_smoke.py full
+python scripts/dump_tool_table.py --check
+```
+
+To run against a mailbox from the repository root, copy `v5/.env.example` to `.env`, fill in
+credentials, and run `ewsmcp`. To build the 4.5 container image, run
+`docker build -t ews-mcp:dev v5` from the repository root.
 
 ### Legacy 4.0 (`src/`)
 
@@ -116,8 +124,8 @@ docker run -i --rm --env-file .env ews-mcp:legacy
 
 ## Code style
 
-- For `v5/`, `python -m ruff check v5` with the rule set pinned in
-  `v5/pyproject.toml` is a blocking CI gate. Match surrounding style in
+- For `v5/`, `python -m ruff check .` from `v5/` with the rule set pinned
+  in `v5/pyproject.toml` is a blocking CI gate. Match surrounding style in
   both trees.
 - Comments should explain *why*, not *what*.
 - Don't add docstrings that just restate the function name.
@@ -130,12 +138,10 @@ docker run -i --rm --env-file .env ews-mcp:legacy
 
 ## Security
 
-If you find a vulnerability that affects production deployments
-(credential leak, RCE, AuthZ bypass, etc.), **do not post details
-publicly**. Use the repository's Security tab ("Report a vulnerability")
-when it is offered; otherwise open an issue that states only that you
-have a security report, with no details, and a private channel will be
-arranged.
+Do not post vulnerability details in a public issue or pull request. Check the repository's
+**Security** tab and use **Report a vulnerability** if it is offered; otherwise open an issue that
+states only that you have a security report, with no details, so a private channel can be arranged.
+Supported versions and security scope are in [`SECURITY.md`](SECURITY.md).
 
 ## License
 

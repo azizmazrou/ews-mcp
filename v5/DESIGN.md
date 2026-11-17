@@ -1,5 +1,7 @@
 # Design — ews-mcp v5 (release line 4.5.x)
 
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains how the server is built; this file holds the rules.
+
 The architecture the code enforces. Module docstrings cite the sections
 below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cache).
 
@@ -18,8 +20,9 @@ below (§Tools, §Safety, §Ids, §DTOs, §Errors, §Transports, §Audit, §Cach
    `fresh:true` escape hatch); **writes go straight to EWS** and then
    write-through to the mirror.
 4. **Safety gates live ONLY in the dispatcher** (`tools/base.py`).
-   Handlers declare `side_effect_class` and `confirm`; they contain no
-   policy.
+   Handlers declare `side_effect_class`, `confirm`, `preview`, and
+   `notifies`; they contain no policy beyond second-line kill-switch checks
+   in notifying calendar handlers.
 5. **Default to auto-negotiated `auth_type`, never retry rejected credentials.**
    exchangelib auto-negotiation is the default because it adapts to the
    authentication schemes the server offers, and blank `EWS_AUTH_TYPE_FORCE`
@@ -67,21 +70,34 @@ as `folders_skipped`) and `offset + limit <= 500`.
 
 ## §Safety — one gate chain
 
-Dispatch order (policy precedes connectivity; nothing irreversible
-without two model decisions):
+Dispatch order (argument-known policy precedes connectivity, while
+content-dependent policy such as `cancel_event` runs on the preview fetch
+after connectivity; nothing irreversible without two model decisions):
 
-    kill-switch → tier → circuit → cold / auth gate → recipient guard →
-    two-phase confirm → send rate cap → alias resolution → handler → audit
+    kill-switch (from args) → tier → circuit (requires_ews=True) →
+    cold / auth gate (requires_ews=True) → recipient guard (args) →
+    two-phase confirm [preview → kill-switch & recipient guard (content) →
+    verify token → refuse used token → reserve send slot → consume token
+    (release slot if already consumed)] → send rate cap (unconfirmed sends
+    only) → alias resolution → handler → audit
 
-- **Kill-switch** `SEND_ENABLED=false` (default) refuses every send-class
-  call before anything else.
+- **Kill-switch** `SEND_ENABLED=false` (default) refuses every call that
+  sends (`sends_mail`: class `send`, and any call whose tool declares
+  `notifies` and for which it answers true — `create_event` with
+  `send_invitations`, `update_event` with `notify_attendees`, and
+  `cancel_event` when the previewed action is `"cancel"`) at phase 1,
+  before any token is issued.
 - **Tiers** `EWS_CAPABILITY_TIER=read|draft|full` (default `draft`)
   remove above-tier tools from the registry AND refuse them at dispatch.
 - **Recipient guard** (allow/denylist globs) fires on every tool whose
-  arguments carry recipients (drafts, events) and on the RESOLVED
-  recipients inside `send_draft`'s and `cancel_event`'s confirm gates
-  (cancellation `attendees` are checked and trigger external-recipient
-  warnings just like mail recipients).
+  arguments carry recipients (drafts, events; a recipient argument that is
+  neither a string nor a list of strings is refused with `validation`) and
+  on the RESOLVED recipients inside `send_draft`'s, notifying
+  `update_event`'s, and `cancel_event`'s confirm gates (stored event
+  `attendees` are checked and trigger external-recipient warnings just like
+  mail recipients; an attendee stored without any address is shown under
+  `attendees_without_address` and refused with `recipient_blocked` when a
+  list is set).
 - **Two-phase confirm**: phase 1 returns a preview + HMAC token; phase 2
   must echo it. For `send_draft` the token binds the draft's CONTENT
   (subject + sorted recipients + full text and HTML body + attachments
@@ -93,9 +109,13 @@ without two model decisions):
   series masters (`type="RecurringMaster"`) in the preview, and binds
   `event_id`, `action` (`"cancel"` vs `"delete"`), `subject`, `start`,
   `end`, `type`, `series`, `is_meeting`, sorted `attendees`, and
-  `message` into the token. Rather than chasing every client HTML parser
-  quirk on foreign markup, draft HTML sanitisation and preview make **four
-  promises, and only these**:
+  `message` into the token. For `update_event` with notification, the
+  preview hook and handler fetch the event through one helper
+  (`_fetch_update_target`) and bind the event's `subject`, `location`,
+  `start`, `end`, `type`, `attendees`, `scope`, `notify_attendees`, and
+  every change (full `body` included) into the token. Rather than chasing
+  every client HTML parser quirk on foreign markup, draft HTML sanitisation
+  and preview make **four promises, and only these**:
   1. **A body that went through `sanitise_html` is exact**: its links,
      their text, and mismatch warnings are right because we wrote that
      markup.
@@ -139,10 +159,11 @@ without two model decisions):
   hash on that object, and sends that same object, so any edit between
   preview and confirm fails with `confirm_invalid`. Draft tools
   (`update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft`)
-  are serialised per draft (`_draft_lock`). Tokens are single-use;
-  idempotent replays (same `idempotency_key` + draft) return the cached
-  receipt without a fresh token — that is what makes retry-after-timeout
-  safe (Stripe semantics).
+  are serialised per draft (`_draft_lock`). Tokens are single-use
+  (spent-token records are kept `CONSUMED_GRACE_SECONDS` past expiry);
+  idempotent replays (same `idempotency_key` + raw draft id) return the
+  cached receipt without a fresh token — that is what makes
+  retry-after-timeout safe (Stripe semantics).
 - **Draft HTML sanitisation** (`htmlsafe.py`): `create_draft` and
   `update_draft` default to `body_format="text"` (plain text escaped and
   wrapped) and also accept `body_format="html"` (calendar event bodies
@@ -173,7 +194,10 @@ without two model decisions):
   longer) or with no visible non-blank text after sanitising fail with
   `validation` before touching Exchange; any stripped elements,
   attributes, or link parts are reported in `sanitised`.
-- **Send rate cap** `EWS_MAX_SENDS_PER_HOUR`.
+- **Send rate cap** `EWS_MAX_SENDS_PER_HOUR`: in-memory, per-process cap
+  counting every confirmed call that sends (class `send` and `notifies`,
+  plus unconfirmed replays); a call refused with `rate_capped` keeps its
+  token.
 - **Inbox rules safety**: `save_rule` builds `Actions` strictly from an
   allow-list of mailbox-internal actions (`move_to_folder`,
   `copy_to_folder`, `assign_categories`, `mark_as_read`, `mark_importance`,
@@ -190,9 +214,10 @@ without two model decisions):
   confirmed with tokens bound to the planned rule (including raw target
   folder ids), the replaced or deleted rule (including its serialised XML
   SHA-256 fingerprint), and the `outlook_only_rules` flag.
-- The one documented handler-side check: `create_event`/`update_event`
-  are write-class for tier purposes, but invitations leave the org, so
-  they re-check the kill-switch when (and only when) they would notify.
+- Second-line handler check: the dispatcher enforces the kill-switch on
+  notifying calendar calls through `notifies`; the handlers of
+  `create_event`, `update_event`, and `cancel_event` keep a check of their
+  own as a second line.
 
 ## §Ids — aliases only
 
@@ -349,10 +374,14 @@ gateway's auth breaker cooldown and stops after `EWS_AUTH_MAX_REJECTIONS`).
 
 ## §Audit
 
-Hash-chained JSONL per tool call (no bodies; recipients/subject only for
-send/destructive). The chain head persists across restarts
-(`audit/chain.state`); `scripts/verify_audit_chain.py` re-derives every
-link and catches edits, deletions and truncation.
+Hash-chained JSONL per tool call (for calls of class `send` or
+`destructive` it holds the target ids of the call — `draft_id`, `event_id`,
+`ids` — and never recipients, subjects, or bodies). The chain head persists
+across restarts (`audit/chain.state`); `scripts/verify_audit_chain.py`
+re-derives every link and detects accidental damage and edits that leave
+`chain.state` alone. The chain has no key, so someone who can write
+`DATA_DIR` can recompute it; several processes sharing one `DATA_DIR` break
+it by themselves; audit writes are best effort.
 
 ## Structural guards (scar tissue, encoded)
 
