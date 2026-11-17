@@ -2185,6 +2185,8 @@ _NON_CALENDAR_FAKE_ATTRS = (
     "is_read", "is_complete", "email_addresses", "phone_numbers",
 )
 _CANCEL_EVENT_TOP_KEYS = frozenset({"event_id", "message"})
+# Exchange item_class on a modified occurrence (Exception) of a recurring series.
+_MODIFIED_OCCURRENCE_CLASS = "IPM.OLE.CLASS.{00061055-0000-0000-C000-000000000046}"
 _STALE_EVENT_HINT = (
     "The calendar entry or arguments changed since the preview — call again "
     "without confirm_token for a fresh preview."
@@ -2204,14 +2206,16 @@ def _require_calendar_item(item: Any, account: Any = None) -> None:
             "validation", "cancel_event: the item is not a calendar event"
         )
     item_class = getattr(item, "item_class", None)
-    if (
-        isinstance(item_class, str)
-        and item_class.strip()
-        and not item_class.strip().startswith("IPM.Appointment")
-    ):
-        raise ToolError(
-            "validation", "cancel_event: the item is not a calendar event"
-        )
+    if isinstance(item_class, str):
+        cls_clean = item_class.strip()
+        if (
+            cls_clean
+            and not cls_clean.startswith("IPM.Appointment")
+            and cls_clean.lower() != _MODIFIED_OCCURRENCE_CLASS.lower()
+        ):
+            raise ToolError(
+                "validation", "cancel_event: the item is not a calendar event"
+            )
     if not isinstance(item, CalendarItem):
         eff_account = account if account is not None else getattr(item, "account", None)
         fid = _item_folder_id(item)

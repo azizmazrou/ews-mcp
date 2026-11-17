@@ -4101,6 +4101,172 @@ def test_cancel_event_decision_table_validation_precedes_kill_switch(tmp_path):
     non_cal.cancel.assert_not_called()
 
 
+def test_cancel_event_modified_occurrence_class_cancel_delete_and_foreign(tmp_path):
+    mod_cls = "IPM.OLE.CLASS.{00061055-0000-0000-C000-000000000046}"
+    account = make_account()
+    ctx_on = make_ctx(
+        tmp_path / "on",
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_capability_tier="full",
+    )
+    ctx_off = make_ctx(
+        tmp_path / "off",
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=False,
+        ews_capability_tier="full",
+    )
+
+    # 1. Modified occurrence organised by us with attendees: action 'cancel' when
+    #    sending is enabled, and refused with kill_switch when SEND_ENABLED=false.
+    ours_mtg = _cal_standin(
+        id="RAW-MOD-OCC-MTG",
+        item_class=mod_cls,
+        type="Exception",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[
+            SimpleNamespace(
+                mailbox=SimpleNamespace(email_address="colleague@example.com")
+            )
+        ],
+    )
+    account._by_id["RAW-MOD-OCC-MTG"] = ours_mtg
+    e_on = ctx_on.aliaser.alias_for("RAW-MOD-OCC-MTG", "e")
+    e_off = ctx_off.aliaser.alias_for("RAW-MOD-OCC-MTG", "e")
+
+    ks = call(ctx_off, "cancel_event", {"event_id": e_off})
+    assert ks["ok"] is False
+    assert ks["error"]["code"] == "kill_switch"
+    assert "confirm_token" not in ks
+    ours_mtg.cancel.assert_not_called()
+
+    p1_mtg = call(ctx_on, "cancel_event", {"event_id": e_on, "message": "Moved"})
+    assert p1_mtg["ok"] is True and p1_mtg["requires_confirmation"] is True
+    assert p1_mtg["preview"]["action"] == "cancel"
+    assert p1_mtg["preview"]["type"] == "Exception"
+    p2_mtg = call(ctx_on, "cancel_event", {
+        "event_id": e_on,
+        "message": "Moved",
+        "confirm_token": p1_mtg["confirm_token"],
+    })
+    assert p2_mtg["ok"] is True and p2_mtg["cancelled"] is True
+    ours_mtg.cancel.assert_called_once_with(new_body="Moved")
+
+    # 2. Modified occurrence organised by someone else: foreign-organizer validation,
+    #    not "not a calendar event".
+    foreign_occ = _cal_standin(
+        id="RAW-MOD-OCC-FOREIGN",
+        item_class=mod_cls,
+        type="Exception",
+        is_meeting=True,
+        my_response_type="Accept",
+        organizer=SimpleNamespace(email_address="chair@example.org"),
+        required_attendees=[
+            SimpleNamespace(
+                mailbox=SimpleNamespace(email_address="organizer@example.com")
+            )
+        ],
+    )
+    account._by_id["RAW-MOD-OCC-FOREIGN"] = foreign_occ
+    res_foreign = call(
+        ctx_on,
+        "cancel_event",
+        {"event_id": ctx_on.aliaser.alias_for("RAW-MOD-OCC-FOREIGN", "e")},
+    )
+    assert res_foreign["ok"] is False
+    assert res_foreign["error"]["code"] == "validation"
+    assert "organized by someone else" in res_foreign["error"]["message"]
+    assert "not a calendar event" not in res_foreign["error"]["message"]
+    foreign_occ.cancel.assert_not_called()
+
+    # 3. Modified occurrence on a plain appointment without attendees: action 'delete'.
+    ours_appt = _cal_standin(
+        id="RAW-MOD-OCC-APPT",
+        item_class=mod_cls,
+        type="Exception",
+        is_meeting=False,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+    )
+    account._by_id["RAW-MOD-OCC-APPT"] = ours_appt
+    e_appt = ctx_off.aliaser.alias_for("RAW-MOD-OCC-APPT", "e")
+    p1_appt = call(ctx_off, "cancel_event", {"event_id": e_appt})
+    assert p1_appt["ok"] is True and p1_appt["requires_confirmation"] is True
+    assert p1_appt["preview"]["action"] == "delete"
+    p2_appt = call(ctx_off, "cancel_event", {
+        "event_id": e_appt,
+        "confirm_token": p1_appt["confirm_token"],
+    })
+    assert p2_appt["ok"] is True and p2_appt["deleted"] is True
+    ours_appt.move_to_trash.assert_called_once_with(
+        send_meeting_cancellations=SEND_TO_NONE
+    )
+
+    # 4. Lower-case (and whitespace-padded) class spelling is accepted.
+    lower_occ = _cal_standin(
+        id="RAW-MOD-OCC-LOWER",
+        item_class=f"  {mod_cls.lower()}  ",
+        type="Exception",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[
+            SimpleNamespace(
+                mailbox=SimpleNamespace(email_address="colleague@example.com")
+            )
+        ],
+    )
+    account._by_id["RAW-MOD-OCC-LOWER"] = lower_occ
+    e_lower = ctx_on.aliaser.alias_for("RAW-MOD-OCC-LOWER", "e")
+    p1_lower = call(ctx_on, "cancel_event", {"event_id": e_lower})
+    assert p1_lower["ok"] is True and p1_lower["requires_confirmation"] is True
+    assert p1_lower["preview"]["action"] == "cancel"
+
+
+@pytest.mark.parametrize("bad_class", [
+    "IPM.OLE.CLASS.{00000000-0000-0000-0000-000000000000}",
+    "IPM.OLE.CLASS.{00061055-0000-0000-C000-000000000046}.Extra",
+    "IPM.Note",
+    "IPM.Schedule.Meeting.Request",
+])
+def test_cancel_event_refuses_other_non_appointment_item_classes(tmp_path, bad_class):
+    account = make_account()
+    ctx = make_ctx(
+        tmp_path,
+        account,
+        ews_email="organizer@example.com",
+        send_enabled=True,
+        ews_capability_tier="full",
+    )
+    bad_item = _cal_standin(
+        id="RAW-BAD-CLASS",
+        item_class=bad_class,
+        type="Exception",
+        is_meeting=True,
+        my_response_type="Organizer",
+        organizer=SimpleNamespace(email_address="organizer@example.com"),
+        required_attendees=[
+            SimpleNamespace(
+                mailbox=SimpleNamespace(email_address="colleague@example.com")
+            )
+        ],
+    )
+    account._by_id["RAW-BAD-CLASS"] = bad_item
+    res = call(
+        ctx, "cancel_event", {"event_id": ctx.aliaser.alias_for("RAW-BAD-CLASS", "e")}
+    )
+    assert res["ok"] is False
+    assert res["error"]["code"] == "validation"
+    assert "not a calendar event" in res["error"]["message"]
+    assert "confirm_token" not in res
+    bad_item.cancel.assert_not_called()
+    bad_item.move_to_trash.assert_not_called()
+
+
 # --- round 2: unified notifying gates (update_event preview, hourly cap, handlers) ---
 
 
