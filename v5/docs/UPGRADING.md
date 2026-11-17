@@ -9,11 +9,11 @@ Two server lines share this repository:
 
 | Line | Source tree | Status | Container tags on `ghcr.io/azizmazrou/ews-mcp` |
 |---|---|---|---|
-| **4.5 — current** | `v5/`, package `ews-mcp`, command `ewsmcp`, Python `>=3.11` | Active development; recommended for all new setups | Exact release tags `:v4.5.0a3` and `:v4.5.*`, plus moving line tag `:v4.5`; never `:latest` |
+| **4.5 — current** | `v5/`, package `ews-mcp`, command `ewsmcp`, Python `>=3.11` | Active development; recommended for all new setups | Exact release tags `:v4.5.0a4` and `:v4.5.*`, plus moving line tag `:v4.5`; never `:latest` |
 | **4.0 / 3.x — legacy** | `src/`, documented in [`../../docs/legacy/`](../../docs/legacy/) | Maintenance only | `:latest` and the version tags of the legacy line |
 
 - **Pin an exact `v4.5.*` tag in Docker.** Pulling `:latest` runs the legacy 4.0 server, not 4.5.
-  Pin a release tag such as `ghcr.io/azizmazrou/ews-mcp:v4.5.0a3` in `docker run` or
+  Pin a release tag such as `ghcr.io/azizmazrou/ews-mcp:v4.5.0a4` in `docker run` or
   [`../docker-compose.example.yml`](../docker-compose.example.yml).
 - **Build from `v5/` when building locally.** From the repository root, run
   `docker build -t ews-mcp:dev v5`. Running `docker build .` at the repository root builds the
@@ -24,19 +24,15 @@ Two server lines share this repository:
 ```bash
 # Run from the repository root with your virtual environment activated
 git pull
-pip install -U "./v5[extract]"   # on main / next 4.5 tag; use `pip install -U ./v5` on tag v4.5.0a3 or without PDF extraction
+pip install -U "./v5[extract]"   # or `pip install -U ./v5` without PDF extraction
 ```
 
 Restart every running `ewsmcp` process after upgrading so new code, schemas, and dependencies take
 effect; see [DEPLOYMENT.md](DEPLOYMENT.md#updating).
 
-## To the next 4.5 release (from 4.5.0a3)
+## To 4.5.0a4 (from 4.5.0a3)
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-On `main`, `v5/pyproject.toml` still carries version `4.5.0a3` until the next tag is cut; the
-published `v4.5.0a3` tag and container image do not include the changes below.
+Changes introduced in `v4.5.0a4` on 2026-11-17:
 
 ### What is new
 
@@ -60,7 +56,7 @@ published `v4.5.0a3` tag and container image do not include the changes below.
 - **Tool counts increase by one with `get_messages`.** The default registry grows from **33** to
   **34** tools:
 
-  | Tier | `v4.5.0a3` | `main` |
+  | Tier | `v4.5.0a3` | `v4.5.0a4` |
   |---|---|---|
   | `read` | 17 | 18 |
   | `draft` | 28 | 29 |
@@ -136,11 +132,12 @@ published `v4.5.0a3` tag and container image do not include the changes below.
 
 ## From 4.5.0a2
 
-Changes introduced in `v4.5.0a3` on 2026-11-16:
+Changes introduced in `v4.5.0a3` on 2026-11-16 — apply the
+[To 4.5.0a4 (from 4.5.0a3)](#to-450a4-from-450a3) steps as well:
 
 - **Dependency update to `exchangelib==5.6.0`:** `exchangelib` moved from `5.0.3` to `5.6.0`. From
   the repository root, reinstall with `pip install -U ./v5` (or `pip install -U "./v5[extract]"`
-  when upgrading to `main` or the next 4.5 tag).
+  from `v4.5.0a4`).
 - **Inbox rules and tool counts:** `list_rules` at `read` tier plus `save_rule` and `delete_rule`
   at `draft` tier were added, raising the `4.5.0a3` default surface from `30` to **33** tools:
   **17** at `read`, **28** at `draft`, and **33** at `full`. Modifying or deleting a rule via EWS
@@ -161,7 +158,7 @@ Changes introduced in `v4.5.0a2` on 2026-11-13 — apply the [From 4.5.0a2](#fro
 well:
 
 - **Dependencies:** `mcp>=1.30,<2` is required; reinstall from the repository root with
-  `pip install -U ./v5` (or `pip install -U "./v5[extract]"` on `main` and later 4.5 tags).
+  `pip install -U ./v5` (or `pip install -U "./v5[extract]"` from `v4.5.0a4`).
 - **Default timezone:** `EWS_TZ` now defaults to `UTC`. Set `EWS_TZ` to an IANA timezone name if
   your setup relied on the earlier default.
 - **Compose and `.env` templates:** the host-specific Compose file and legacy helper scripts were
@@ -193,12 +190,12 @@ well:
 choices changed:
 
 1. **Fewer, data-plane-only tools.** The legacy surface — 70 tools in 3.x, reduced to 67 in 4.0
-   when the five LLM-reasoning tools were dropped — shrinks to **34** tools on `main` and **33** in
-   `v4.5.0a3`. Both the 3.x LLM-proxying tools and the 4.0 agent-secretary stack — memory store,
-   commitment tracking, approval queue, voice profiles, OOF policy, briefings, and meeting prep —
-   are absent because reasoning and workflow state belong in the calling assistant. Overlapping
-   search, read, and draft tools were consolidated behind uniform list envelopes and compact
-   message cards instead of full HTML or Markdown bodies.
+   when the five LLM-reasoning tools were dropped — shrinks to **34** tools (35 when semantic
+   search is active). Both the 3.x LLM-proxying tools and the 4.0 agent-secretary stack — memory
+   store, commitment tracking, approval queue, voice profiles, OOF policy, briefings, and meeting
+   prep — are absent because reasoning and workflow state belong in the calling assistant.
+   Overlapping search, read, and draft tools were consolidated behind uniform list envelopes and
+   compact message cards instead of full HTML or Markdown bodies.
 2. **Short aliases instead of raw Exchange ids.** Tool outputs emit persistent short handles — `m`,
    `d`, `a`, `e`, `t`, `p`, `k`, `f`, and `r` prefixes — stored in `DATA_DIR/memory/aliases.db` and
    rebound automatically by `move_messages`. Inputs still accept aliases or raw EWS ids.
@@ -218,7 +215,7 @@ Update your configuration and client wiring using [`../.env.example`](../.env.ex
 
 | Area | Legacy 3.x / 4.0 (`src/`) | 4.5 (`v5/`) |
 |---|---|---|
-| Image and command | `ghcr.io/azizmazrou/ews-mcp:latest`, root package | Pin `ghcr.io/azizmazrou/ews-mcp:v4.5.0a3`, never `:latest`; or `pip install "./v5[extract]"` (`pip install ./v5` on `v4.5.0a3`) and run `ewsmcp` |
+| Image and command | `ghcr.io/azizmazrou/ews-mcp:latest`, root package | Pin `ghcr.io/azizmazrou/ews-mcp:v4.5.0a4`, never `:latest`; or `pip install "./v5[extract]"` and run `ewsmcp` |
 | `EWS_SERVER_URL` | Accepted bare hostname `mail.example.com` or `EWS_AUTODISCOVER` | Full EWS endpoint URL required, such as `https://mail.example.com/EWS/Exchange.asmx`; Autodiscover is off |
 | Authentication | `EWS_AUTH_TYPE` (`oauth2`, `basic`, `ntlm`) and `EWS_CLIENT_ID`, `EWS_CLIENT_SECRET`, `EWS_TENANT_ID` | Auto-negotiated by default; optional `EWS_AUTH_TYPE_FORCE` (`basic`, `ntlm`, `digest`); OAuth2 dropped |
 | Timezone | `TIMEZONE` | `EWS_TZ`, default `UTC` |

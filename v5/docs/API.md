@@ -1,31 +1,13 @@
 # API reference — ews-mcp 4.5
 
 This page specifies the exact inputs, outputs, limits, and error codes of every tool in `ews-mcp`
-4.5. Both the summary table under [Tools](#tools) and the parameter tables under
-[Tool reference](#tool-reference) are generated from the code registry. From `v5/`, run
-`python scripts/dump_tool_table.py --write` to refresh them; CI verifies them with
+`v4.5.0a4`. The default registry exposes `18` / `29` / `34` tools at `read` / `draft` / `full`
+(`35` with the semantic index). Both the summary table under [Tools](#tools) and the parameter
+tables under [Tool reference](#tool-reference) are generated from the code registry. From `v5/`,
+run `python scripts/dump_tool_table.py --write` to refresh them; CI verifies them with
 `python scripts/dump_tool_table.py --check`. For environment variables see
-[CONFIGURATION.md](CONFIGURATION.md), and for policy design see [SAFETY.md](SAFETY.md).
-
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-On `main`, the default registry exposes `18` / `29` / `34` tools at `read` / `draft` / `full`;
-`v4.5.0a3` exposed `17` / `28` / `33`. Unreleased mail and draft additions on `main` are
-`get_messages` (and its `failed` envelope field), `get_message(format="eml")`,
-`list_folders(query=…)`, `search_messages(importance=…)`, `body_format="html"` on `create_draft`
-and `update_draft`, the link preview on `send_draft`, `update_draft(remove_attachments=…)`, and
-`add_draft_attachment(message_id=…)`. Document and people additions on `main` are in-memory
-document text extraction, `offset` paging, and `a`-id selection in `get_attachment` (with the
-`[extract]` extra installed locally via `pip install "./v5[extract]"` from the repository root),
-`EWS_KEEP_DUMPABLE`, and `department` and `office` on `find_people` and `get_contact`. Safety and
-status additions on `main` are the stricter `cancel_event` check, the send gates on calendar
-notices, `rate_capped` keeping its token, and `get_server_status` during an open circuit. In
-`v4.5.0a3`, `SEND_ENABLED=false` does not stop `cancel_event`, invitations and update notices are
-refused only at phase 2, `EWS_MAX_SENDS_PER_HOUR` counts only `send_draft`, `respond_to_event`,
-and `set_oof` (`rate_capped` loses its token), stored event attendees skip recipient lists,
-`get_server_status` fails during an open circuit, and `get_attachment` reads `a<digits>` as an
-index; see [UPGRADING.md](UPGRADING.md).
+[CONFIGURATION.md](CONFIGURATION.md), for policy design see [SAFETY.md](SAFETY.md), and for
+upgrade notes see [UPGRADING.md](UPGRADING.md).
 
 ## Tools
 
@@ -588,7 +570,7 @@ Result:
 }
 ```
 
-`get_messages` (on `main`) resolves each id independently so one bad id goes into `failed` instead
+`get_messages` resolves each id independently so one bad id goes into `failed` instead
 of aborting the batch:
 
 `get_messages` arguments:
@@ -659,7 +641,7 @@ list tool (such as `search_messages` or `list_rules`) to obtain fresh ids.
 | `a` | draft attachment (`a1`) | `create_draft`, `add_draft_attachment`, `update_draft` | `update_draft(remove_attachments=…)`, `get_attachment(attachment=…)` | Resolved after case-insensitive file name and before raw attachment id or zero-based index; rejects `a` ids issued for another message. |
 | `e` | calendar event (`e1`) | `list_events`, `get_mailbox_overview`, `create_event` | `get_event`, `update_event`, `respond_to_event`, `cancel_event` | `list_events` mints occurrence ids for recurring series; `update_event(scope="series")` resolves the series master. |
 | `t` | thread (`t1`) | `search_messages`, `get_message`, `get_messages`, `get_thread`, `waiting_on` | Display / correlation handle (`get_thread` takes any `m`-alias in the conversation as `id`) | Bound to Exchange `conversation_id`. |
-| `p` | person (`p1`) | `find_people`, `get_contact` | `get_contact` (also accepts a raw contact id or plain email address) | GAL rows bind `p` to the SMTP address; personal contacts bind `p` to the contact item id. |
+| `p` | person (`p1`) | `find_people`, `get_contact` | `get_contact` (also accepts a raw contact id or plain email address) | GAL rows bind `p` to the SMTP address; personal contacts bind `p` to the contact item id (both tools return `department` and `office` where known). |
 | `k` | task (`k1`) | `list_tasks` | `update_task` | Bound to the Exchange task `ItemId`. |
 | `f` | folder (`f7`, `f:inbox`, …) | `list_folders`, rule target fallback | `list_folders(parent=…)`, `search_messages(folder=…)`, `check_messages(folder=…)`, `move_messages(to_folder=…)`, `save_rule` (`move_to_folder`, `copy_to_folder`) | Accepts `f` aliases, stable `f:` well-known names, bare names like `inbox`, and paths like `Archive/2026`; `f:all` is only for `search_messages(folder="f:all")`. |
 | `r` | Inbox rule (`r1`) | `list_rules`, `save_rule` | `save_rule(rule_id=…)`, `delete_rule(rule_id=…)` | Never minted for nonexistent rule ids. |
@@ -893,7 +875,7 @@ returns a preview plus a single-use HMAC token; repeating the call with identica
 - **Token binds**: `rule_id`, planned `rule`, raw `target_folder_ids`, `current`, SHA-256 XML `target_fingerprint` of the replaced rule, and `outlook_only_rules` (changes to unrelated rules do not invalidate it).
 - **At phase two**: Runs under in-process `_rules_lock` and re-verifies before mutating Exchange.
 
-### `cancel_event` decision table (on `main`)
+### `cancel_event` decision table
 
 | item / `my_response_type` | `is_meeting` and attendees (`required_attendees`, `optional_attendees`, `resources`) | outcome |
 |---|---|---|
@@ -1128,8 +1110,8 @@ Limits, failure rules, and multi-folder response fields:
 ## Draft attachments
 
 `create_draft` attaches files when creating a draft, `add_draft_attachment` adds one file or
-existing mail message (`message_id`, on `main`), and `update_draft(remove_attachments=[…])` (on
-`main`) detaches attachments by name or id. `update_draft`, `add_draft_attachment`, `delete_draft`,
+existing mail message (`message_id`), and `update_draft(remove_attachments=[…])` detaches
+attachments by name or id. `update_draft`, `add_draft_attachment`, `delete_draft`,
 and `send_draft` only accept items currently in `f:drafts`; anything else fails with `validation`.
 Every attachment change alters the draft's bound state, so any earlier `send_draft` `confirm_token`
 is refused with `confirm_invalid`.
@@ -1165,7 +1147,7 @@ Caps, returned fields, and token binding:
   attachment is bound into `confirm_token` by `name`, `size`, and `id` (not by a hash of its byte
   content).
 
-### Removing attachments (`update_draft(remove_attachments=[…])`, on `main`)
+### Removing attachments (`update_draft(remove_attachments=[…])`)
 
 | stage | behaviour |
 |---|---|
@@ -1186,7 +1168,7 @@ Caps, returned fields, and token binding:
 ## Draft bodies
 
 `create_draft` and `update_draft` accept `body_format="text"` (the default) or `body_format="html"`
-(on `main`, for formatted or right-to-left mail; calendar event bodies remain plain text only).
+(for formatted or right-to-left mail; calendar event bodies remain plain text only).
 Plain text is HTML-escaped with `<p>` per blank-line paragraph and `<br/>` for single line breaks;
 HTML is tokenised in one linear-time pass off the event loop (`ewsmcp.htmlsafe.sanitise_html`,
 custom stdlib-only tokenizer, never `html.parser`) and rebuilt from an allow-list as
@@ -1269,7 +1251,7 @@ When `body_format="html"` succeeds on `create_draft` (or `update_draft` with `bo
 includes `body_format: "html"` and — **only** when at least one element, attribute/style, or link
 part was stripped — `sanitised: {removed_elements, removed_attributes, removed_links}`.
 
-### `send_draft` link preview (on `main`)
+### `send_draft` link preview
 
 During phase 1 of `send_draft`, `inspect_draft_links` inspects URL-bearing attributes (`href`,
 `xlink:href`, `action`, `formaction`, `src`, `srcset`, `background`, `poster`, `data`, and `cite`)
@@ -1371,10 +1353,10 @@ Result:
 ## Reading attachments
 
 `get_attachment` inspects attachment metadata, extracts readable text in memory, or writes raw
-bytes under `DATA_DIR/attachments`; document extraction and `offset` paging are on `main`. No
-attachment is ever executed, opened in an external helper program, or written to disk unless you
-request `mode="save"`. When a message has more than one attachment, `attachment` is required and
-omitting it fails with `validation`. `get_attachment` reads `attachment` in this order:
+bytes under `DATA_DIR/attachments`. No attachment is ever executed, opened in an external helper
+program, or written to disk unless you request `mode="save"`. When a message has more than one
+attachment, `attachment` is required and omitting it fails with `validation`. `get_attachment`
+reads `attachment` in this order:
 
 1. **File name** matched case-insensitively; a matching file name always wins.
 2. **`a<digits>` id** returned by the draft tools, resolved to the attachment it was issued for. An
@@ -1394,7 +1376,7 @@ omitting it fails with `validation`. `get_attachment` reads `attachment` in this
 | `"text"` | Extracts up to `20,000` chars (`_TEXT_CAP`) from `offset`. | Fails with `validation` + `hint` listing supported types. | Returns `mode: "info"` + `note` and `hint` advising `mode='save'`. |
 | `"save"` | Writes raw bytes as Exchange delivers them under `DATA_DIR/attachments` and returns `saved_path` (attached Exchange items have no file bytes and fail with `validation`). | Writes bytes and returns `saved_path`. | Writes `.msg` bytes and returns `saved_path`. |
 
-### Supported types (`mode="auto"` and `mode="text"`, on `main`)
+### Supported types (`mode="auto"` and `mode="text"`)
 
 Attachment bytes and attached-item fields are fetched on the Exchange gateway and the gateway
 thread is released before parsing starts:

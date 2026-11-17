@@ -6,15 +6,6 @@ doing harm, how to configure each control, and where the server's guarantees sto
 
 ## What the server protects
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, `SEND_ENABLED=false` does not stop `cancel_event`, invitations and update notices
-are refused only at phase two, `EWS_MAX_SENDS_PER_HOUR` counts only `send_draft`,
-`respond_to_event`, and `set_oof` while spending a `rate_capped` token, and stored event attendees
-are not checked against the recipient lists; see
-[UPGRADING.md](UPGRADING.md#to-the-next-45-release-from-450a3).
-
 Tools above the server's capability tier are omitted when the registry is built, so clients do not
 see them and cannot call them. Every registered call then passes through one central gate chain in
 `ewsmcp/tools/base.py::dispatch` before reaching Exchange. Each `ToolSpec` declares its
@@ -65,11 +56,11 @@ hash-chained local audit log. Each mechanism is detailed below.
 Capability tiers limit which tools exist on the server. Each tool declares one side-effect class:
 `read`, `write`, `send`, or `destructive`.
 
-| Tier | Allowed classes | Tools on `main` | Tools in `v4.5.0a3` | What it adds |
-|---|---|---|---|---|
-| `read` | `read` | 18, plus `find_similar` when semantic search is active | 17, plus `find_similar` | Mail, calendar, contacts, tasks, inbox rule listing, server status |
-| `draft` | `read`, `write` | 29 | 28 | Drafts, message flags/categories/moves, task updates, inbox rules, and calendar edits (can notify attendees when requested and `SEND_ENABLED=true`) |
-| `full` | `read`, `write`, `send`, `destructive` | 34 | 33 | `send_draft`, `respond_to_event`, `set_oof`, `cancel_event`, `delete_messages` |
+| Tier | Allowed classes | Tools | What it adds |
+|---|---|---|---|
+| `read` | `read` | 18, plus `find_similar` when semantic search is active | Mail, calendar, contacts, tasks, inbox rule listing, server status |
+| `draft` | `read`, `write` | 29 | Drafts, message flags/categories/moves, task updates, inbox rules, and calendar edits (can notify attendees when requested and `SEND_ENABLED=true`) |
+| `full` | `read`, `write`, `send`, `destructive` | 34 | `send_draft`, `respond_to_event`, `set_oof`, `cancel_event`, `delete_messages` |
 
 A tool above the server's tier is not registered: it is absent from the tool list, and calling it
 returns `validation` with `Unknown tool: <name>`, mapped to HTTP `404` over REST. `tier_blocked`,
@@ -87,13 +78,9 @@ restart `ewsmcp`; see [CONFIGURATION.md](CONFIGURATION.md#safety).
 
 ## The kill-switch
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, `SEND_ENABLED=false` does not stop a confirmed `cancel_event` from sending
-cancellation notices, and invitations and update notices are refused only at phase two. If you run
-that tag, keep the server below tier `full` or upgrade; see
-[UPGRADING.md](UPGRADING.md#to-the-next-45-release-from-450a3).
+Releases before `v4.5.0a4` do not stop a confirmed `cancel_event` from sending cancellation notices
+while `SEND_ENABLED=false`, and refuse invitations and update notices only at phase two. Upgrade;
+see [UPGRADING.md](UPGRADING.md#to-450a4-from-450a3).
 
 The kill-switch stops outbound traffic from leaving the mailbox. One-shot mail send tools do not
 exist in 4.5: ordinary mail leaves the mailbox only through `create_draft` followed by
@@ -134,13 +121,6 @@ Calling `create_event(send_invitations=true)`, `update_event(notify_attendees=tr
 ```
 
 ## Recipients
-
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, attendees stored on an existing calendar event are not checked against
-`EWS_RECIPIENT_ALLOWLIST` or `EWS_RECIPIENT_DENYLIST` during `update_event` or `cancel_event`; see
-[UPGRADING.md](UPGRADING.md#to-the-next-45-release-from-450a3).
 
 Recipient lists restrict who the assistant can address. `to`, `cc`, `bcc`, and `attendees` must be
 a string or a list of strings, or the call fails with `validation`. Each address is normalised from
@@ -297,13 +277,6 @@ Example refusal: modifying `d1` with `update_draft` after previewing `send_draft
 
 ## The hourly cap
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, `EWS_MAX_SENDS_PER_HOUR` counts only `send_draft`, `respond_to_event`, and `set_oof`
-(not calendar invitations, update notices, or cancellations), and a call refused with `rate_capped`
-loses its `confirm_token`; see [UPGRADING.md](UPGRADING.md#to-the-next-45-release-from-450a3).
-
 The hourly cap counts every confirmed call that sends in a rolling 3,600-second window:
 `send_draft`, `respond_to_event`, `set_oof`, invitations (`create_event` with
 `send_invitations=true`), update notices (`update_event` with `notify_attendees=true`), and
@@ -363,9 +336,6 @@ fails locally without contacting Exchange, returning `auth_failed` with message
 
 ## HTML drafts
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
 `create_draft` and `update_draft` default to `body_format="text"`, which HTML-escapes plain text.
 With `body_format="html"`, `ewsmcp.htmlsafe` scans the markup in one linear pass with a custom
 stdlib tokenizer rather than `html.parser`. It rebuilds `<html><body…>…</body></html>` to a fixed
@@ -417,10 +387,6 @@ whitespace readings of the raw body text. It holds to four promises:
 Full allow-lists, field caps, and preview rules are in [API.md](API.md#draft-bodies).
 
 ## Attachments and message bodies
-
-Document text extraction in `get_attachment`, `EWS_KEEP_DUMPABLE`, and the custom HTML-to-text
-converter described below are on `main` for the next 4.5 tag; see
-[UPGRADING.md](UPGRADING.md#to-the-next-45-release-from-450a3).
 
 - **Message and calendar bodies.** The server reads the plain-text `text_body` Exchange provides,
   and background mirror sync fetches `text_body` only. Only when `text_body` is empty on a live

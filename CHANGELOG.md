@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [4.5.0a4] - 2026-11-17
+
 ### Added
 - **`create_draft` and `update_draft` in `v5/` accept `body_format="html"` alongside the `"text"`
   default.**
@@ -102,7 +104,7 @@
     server process without spawning a worker, reading only enough bytes for `5,000,000`
     characters with no per-line loop or line-ending normalisation, stripping BOMs, and replacing
     lone surrogates with `U+FFFD`; Outlook `.msg` files return `mode: "info"` with a
-    save-and-open note and hint in both `mode="auto"` and `mode="text"`, while `main` S/MIME
+    save-and-open note and hint in both `mode="auto"` and `mode="text"`, while existing S/MIME
     `.p7m` and `.p7s` handling and `mode="auto"` behaviour are preserved.
 
   | Format | Extraction behaviour and limits |
@@ -263,27 +265,27 @@
     attachments report a cut only when text was really cut.
   - The converter is a reading aid, not a renderer; its limits are listed in `v5/DESIGN.md`.
 - **`SEND_ENABLED=false` now stops `cancel_event` from sending meeting cancellation notices.**
-  - In the released 4.5 alphas, `SEND_ENABLED` did not stop a confirmed `cancel_event` from
-    sending cancellation notices with the caller's `message` to attendees.
+  - Through `v4.5.0a3`, `SEND_ENABLED` did not stop a confirmed `cancel_event` from sending
+    cancellation notices with the caller's `message` to attendees.
   - `ToolSpec.sends_mail` via `notifies` now refuses `cancel_event` with `kill_switch` at phase
     one when the previewed `action` is `"cancel"`, backed by a second check in `_cancel_event`.
     Appointments without attendees where `action` is `"delete"` still move to Deleted Items.
 - **`update_event(notify_attendees=true)` now checks stored attendees against the recipient allow
   and deny lists.**
-  - In the released 4.5 alphas, update notices went to the attendees stored on the event without
-    checking `EWS_RECIPIENT_ALLOWLIST` or `EWS_RECIPIENT_DENYLIST` and without external-recipient
+  - Through `v4.5.0a3`, update notices went to the attendees stored on the event without checking
+    `EWS_RECIPIENT_ALLOWLIST` or `EWS_RECIPIENT_DENYLIST` and without external-recipient
     `warnings`.
   - Phase one now fetches required, optional, and resource attendees from the event, refuses
     disallowed addresses with `recipient_blocked` before saving, and lists external recipients in
     `warnings`.
 - **Invitations, update notices, and meeting cancellations are now counted by
   `EWS_MAX_SENDS_PER_HOUR`.**
-  - In the released 4.5 alphas, invitations from `create_event`, update notices from
-    `update_event`, and cancellations from `cancel_event` were not counted by the hourly cap.
+  - Through `v4.5.0a3`, invitations from `create_event`, update notices from `update_event`, and
+    cancellations from `cancel_event` were not counted by the hourly cap.
   - Every confirmed call that sends mail now shares the per-process hourly window and fails with
     `rate_capped` and `retry_after_s` of at least `1` when the hour is full.
 - **A confirmed sending call refused with `rate_capped` now keeps its `confirm_token`.**
-  - In the released 4.5 alphas, phase two consumed `confirm_token` before checking
+  - Through `v4.5.0a3`, phase two consumed `confirm_token` before checking
     `EWS_MAX_SENDS_PER_HOUR`, spending the token of the refused call.
   - Phase two now verifies the token, rejects spent tokens with `confirm_invalid`, reserves the
     send-cap slot, and consumes the token last, releasing the slot if a concurrent call spent the
@@ -292,15 +294,15 @@
     stays refused through the end of its lifetime.
 - **`get_server_status`, `waiting_on`, and `find_similar` now answer while the circuit breaker is
   open.**
-  - In the released 4.5 alphas, an open circuit breaker refused every tool with
-    `upstream_unavailable`, `get_server_status` included.
+  - Through `v4.5.0a3`, an open circuit breaker refused every tool with `upstream_unavailable`,
+    `get_server_status` included.
   - The breaker gate now refuses only tools with `requires_ews=true`. While open,
     `get_server_status.connection` adds `circuit_open: true` and `retry_after_s`, and omits both
     keys otherwise.
 - **Attachment `a`-alias ids from the draft tools now select the right attachment in
   `get_attachment`.**
-  - The released 4.5 alphas read `a<digits>` as a zero-based index, and their draft tools
-    returned no attachment ids. With the `a` ids the draft tools return on `main`,
+  - Through `v4.5.0a3`, `get_attachment` read `a<digits>` as a zero-based index, and the draft
+    tools returned no attachment ids. With the `a` ids the draft tools return in this release,
     `get_attachment` resolves the id to the attachment it was issued for.
   - `get_attachment` now resolves `attachment` in order: case-insensitive file name, minted
     `a<digits>` alias resolved to the attachment it was issued for, raw Exchange attachment `id`,
@@ -310,7 +312,7 @@
 - **Stored attendees without an address on `update_event(notify_attendees=true)` and
   `cancel_event` are now shown in `attendees_without_address` and refused with
   `recipient_blocked` when a recipient list is configured.**
-  - In the released 4.5 alphas neither tool listed or checked the attendees stored on the event.
+  - Through `v4.5.0a3` neither tool listed or checked the attendees stored on the event.
   - Phase-one previews on meetings with attendees now list stored attendees that have only a
     display name, such as personal distribution lists, under `attendees_without_address` next to
     `attendees`.

@@ -4,7 +4,7 @@
 
 services:
   ews-mcp:
-    # Pin an exact immutable release tag (for example v4.5.0a3), never :latest.
+    # Pin an exact immutable release tag (for example v4.5.0a4), never :latest.
     image: ${EWS_MCP_IMAGE:?set EWS_MCP_IMAGE to a pinned v4.5.x image reference}
     restart: unless-stopped
     ports:

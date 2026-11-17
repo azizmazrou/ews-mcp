@@ -131,24 +131,14 @@ breaker is open once their local mirror or semantic index is ready. Over HTTP, `
 
 ## A tool call is refused
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, `SEND_ENABLED=false` does not stop `cancel_event`, invitations and update notices
-are refused only at phase two, `EWS_MAX_SENDS_PER_HOUR` counts only `send_draft`,
-`respond_to_event`, and `set_oof` while spending a `rate_capped` token, and stored event attendees
-are not checked against the recipient lists; see
-[UPGRADING.md](UPGRADING.md#to-the-next-45-release-from-450a3).
-
 ### Tool is missing or unknown above the server's tier
 
 - **Symptom:** A write, send, or delete tool is absent from `tools/list` and `GET /api/tools`, and
   calling it returns `code: "validation"` with `"Unknown tool: <name>"` — for example
   `"Unknown tool: create_draft"` at `read` tier — mapped to HTTP `404` over REST.
-- **Cause:** A tool above `EWS_CAPABILITY_TIER` is not registered: `read` exposes 18 tools on
-  `main` and 17 in `v4.5.0a3`, `draft` exposes 29 and 28, and `full` exposes 34 and 33.
-  `tier_blocked`, mapped to HTTP `403`, is a second check inside the dispatcher that a client does
-  not normally reach.
+- **Cause:** A tool above `EWS_CAPABILITY_TIER` is not registered: `read` exposes 18 tools, `draft`
+  exposes 29, and `full` exposes 34 (35 when semantic search is active). `tier_blocked`, mapped to
+  HTTP `403`, is a second check inside the dispatcher that a client does not normally reach.
 - **Fix:** Set `EWS_CAPABILITY_TIER=draft` for drafts, moves, flags, tasks, calendar edits, and
   inbox rules, or `EWS_CAPABILITY_TIER=full` for `send_draft`, `respond_to_event`, `set_oof`,
   `cancel_event`, and `delete_messages`, then restart `ewsmcp`. See
@@ -333,9 +323,6 @@ are not checked against the recipient lists; see
 
 ## Attachments and documents
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
 ### Reading a PDF fails without the `extract` extra
 
 - **Symptom:** `get_attachment` on a `.pdf` returns `code: "validation"` with `"PDF text extraction
@@ -410,9 +397,6 @@ are not checked against the recipient lists; see
   `DATA_DIR/attachments` and open it in an external mail client.
 
 ## HTML drafts
-
-`body_format="html"` on `create_draft` and `update_draft` is on `main` for the next 4.5 tag; see
-[UPGRADING.md](UPGRADING.md#to-the-next-45-release-from-450a3).
 
 ### HTML draft is refused (`validation`)
 

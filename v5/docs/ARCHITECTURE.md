@@ -7,15 +7,8 @@ layout, and connection guards. For the invariant rules that govern changes to th
 [SAFETY.md](SAFETY.md), for environment variables see [CONFIGURATION.md](CONFIGURATION.md), and
 for running the server see [DEPLOYMENT.md](DEPLOYMENT.md).
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-On `main`, the default registry exposes `18` / `29` / `34` tools across `read` / `draft` / `full`
-tiers rather than the `17` / `28` / `33` counts in `v4.5.0a3`. Unreleased pieces covered on this
-page are `ewsmcp/htmlsafe.py` for HTML draft bodies and `send_draft` link previews, the isolated
-document worker in `ewsmcp/extract_worker.py` and `ewsmcp/extract_child.py` with
-`EWS_KEEP_DUMPABLE`, the stdlib HTML-to-text tokenizer in `ewsmcp/bodyclean.py`, `get_messages`,
-and `get_message(format="eml")`.
+The default registry exposes `18` / `29` / `34` tools across the `read` / `draft` / `full` tiers,
+and `35` when `find_similar` is enabled with the semantic index.
 
 ## The shape in one picture
 

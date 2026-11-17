@@ -47,8 +47,7 @@ pip install "./v5[extract]"
 ```
 
 This creates `.venv/bin/ewsmcp`, or `.venv\Scripts\ewsmcp.exe` on Windows. Use that absolute path
-when registering the server. On tag `v4.5.0a3`, before the `extract` extra was added on `main`,
-install with `pip install ./v5`.
+when registering the server.
 
 Register with Claude Code. Add `--scope user` to make it available in every project, or run the
 command in the project where you will use it:
@@ -95,11 +94,11 @@ and start the 4.5 container from the directory holding `.env`:
 ```bash
 # 4.5 — pin an exact tag; the 4.5 line never publishes :latest
 docker run -d --name ews-mcp-v5 -p 127.0.0.1:8000:8000 --env-file .env \
-  -v ewsmcp-data:/data ghcr.io/azizmazrou/ews-mcp:v4.5.0a3
+  -v ewsmcp-data:/data ghcr.io/azizmazrou/ews-mcp:v4.5.0a4
 ```
 
-To build the current `main` tree locally instead, run `docker build -t ews-mcp:dev v5` from the
-repository root.
+To build from a local checkout instead, run `docker build -t ews-mcp:dev v5` from the repository
+root.
 
 In HTTP mode, 4.5 serves Streamable HTTP at `/mcp`, JSON REST at `/api/tools/{name}`, OpenAPI at
 `/openapi.json`, Prometheus metrics at `/metrics`, and health checks at `/livez`, `/readyz`, and
@@ -120,11 +119,8 @@ Legacy deployment and connection guides are in
 
 ## What the assistant can do (4.5)
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-The default 4.5 registry on `main` exposes **34** tools across eight areas, plus `find_similar`
-when `EWS_SEMANTIC_INDEX=pgvector`.
+The default 4.5 registry exposes **34** tools across eight areas, plus `find_similar` when
+`EWS_SEMANTIC_INDEX=pgvector`.
 
 | Area | What you can ask for | Tools |
 |---|---|---|
@@ -137,19 +133,14 @@ when `EWS_SEMANTIC_INDEX=pgvector`.
 | Inbox rules | Inspect server-side rules, create or replace mailbox-internal filing and tagging rules, and delete rules | `list_rules`, `save_rule`, `delete_rule` |
 | Operations | Check connection state, capability tier, kill-switch, tool count, and cache sync status even when Exchange is unreachable | `get_server_status` |
 
-Capability tiers expose **18** tools at `read`, **29** at `draft` by default, and **34** at `full`
-on `main`. Published tag `v4.5.0a3` exposes **17**, **28**, and **33** tools. Every tool, argument,
-response envelope, error code, and v3-to-4.5 rename is documented in
-[`v5/docs/API.md`](v5/docs/API.md).
+Capability tiers expose **18** tools at `read`, **29** at `draft` by default, and **34** at `full`,
+or **35** when the semantic index is enabled. Every tool, argument, response envelope, error code,
+and v3-to-4.5 rename is documented in [`v5/docs/API.md`](v5/docs/API.md).
 
 ## The safety model (4.5)
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, `SEND_ENABLED=false` does not stop `cancel_event`, the hourly cap counts only
-`send_draft`, `respond_to_event` and `set_oof`, and attendees stored on an event are not checked
-against the recipient lists; see [`v5/docs/UPGRADING.md`](v5/docs/UPGRADING.md).
+Releases before `v4.5.0a4` have gaps in these gates; see
+[`v5/docs/UPGRADING.md`](v5/docs/UPGRADING.md).
 
 Every tool call passes through one central gate chain before reaching Exchange. Full details and
 non-goals are in [`v5/docs/SAFETY.md`](v5/docs/SAFETY.md).

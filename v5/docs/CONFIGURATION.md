@@ -112,16 +112,6 @@ These settings enforce what the assistant is allowed to see, write, attach, and 
 runs in the central dispatcher before a tool handler executes; full details live in
 [`SAFETY.md`](SAFETY.md).
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In this section, the note above applies to `EWS_KEEP_DUMPABLE`, to the tool counts per tier (18,
-29, and 34 on `main`, up from 17, 28, and 33 in `v4.5.0a3`), and to the send gates on calendar
-notices. In `v4.5.0a3`: `SEND_ENABLED=false` does not stop `cancel_event`; invitations and update
-notices are refused only at phase two; `EWS_MAX_SENDS_PER_HOUR` counts only `send_draft`,
-`respond_to_event` and `set_oof`, and a `rate_capped` call loses its token; attendees stored on an
-event are not checked against the recipient lists. See [`UPGRADING.md`](UPGRADING.md).
-
 | setting | default | limits | what it does |
 |---|---|---|---|
 | `EWS_CAPABILITY_TIER` | `'draft'` | - | One of `read` (18 tools), `draft` (29 tools), or `full` (34 tools), plus `find_similar` (+1) when semantic search is enabled; tools above the tier are not registered. |

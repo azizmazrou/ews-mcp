@@ -108,13 +108,8 @@ initial startup it reports `"connecting"`, and if Exchange rejects the password 
 
 ## What the tools cover
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-On `main`, `EWS_CAPABILITY_TIER` exposes **18** tools at `read`, **29** at `draft`, and **34** at
-`full`. Tag `v4.5.0a3` exposed 17, 28, and 33; `main` adds `get_messages` and the
-`ews-mcp[extract]` extra for PDF text. Full parameter and response details live in
-[`docs/API.md`](docs/API.md).
+`EWS_CAPABILITY_TIER` exposes **18** tools at `read`, **29** at `draft`, and **34** at `full`. Full
+parameter and response details live in [`docs/API.md`](docs/API.md).
 
 | Area | Count | Tier needed | Tools |
 |---|---|---|---|
@@ -131,14 +126,6 @@ Setting `EWS_SEMANTIC_INDEX=pgvector` with `EWS_SEMANTIC_PG_DSN` registers one e
 tool, `find_similar`, and enables semantic ranking in `search_messages`.
 
 ## The send flow (two-phase, content-bound)
-
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, `SEND_ENABLED=false` does not stop `cancel_event`, invitations and update notices
-are refused only at phase two, `EWS_MAX_SENDS_PER_HOUR` counts only `send_draft`,
-`respond_to_event`, and `set_oof` while spending the token on `rate_capped`, and stored event
-attendees are not checked against recipient lists; see [`docs/UPGRADING.md`](docs/UPGRADING.md).
 
 Ordinary mail leaves the mailbox only through `send_draft`. Meeting mail — invitations, update
 notices, responses, and cancellations — is sent by the calendar tools. While `SEND_ENABLED` is
@@ -284,8 +271,9 @@ plane; priorities, tone, and judgment live in the calling assistant.
 
 `4.5.0a3` requires `exchangelib==5.6.0`, adds the Inbox rule tools `list_rules`, `save_rule`, and
 `delete_rule`, and elects one background sync leader when several processes share `DATA_DIR`;
-reinstall from the repository root with `pip install -U ./v5`. Full notes, including changes after
-`4.5.0a3`, live in [`docs/UPGRADING.md#from-450a2`](docs/UPGRADING.md#from-450a2).
+reinstall from the repository root with `pip install -U ./v5`. Full notes, including changes in
+`v4.5.0a4`, live in [`docs/UPGRADING.md#from-450a2`](docs/UPGRADING.md#from-450a2) and
+[`docs/UPGRADING.md#to-450a4-from-450a3`](docs/UPGRADING.md#to-450a4-from-450a3).
 
 ## Upgrading from 4.5.0a1
 

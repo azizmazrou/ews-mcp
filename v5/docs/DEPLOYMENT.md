@@ -22,13 +22,8 @@ In `stdio` mode, your MCP client launches `ewsmcp` as a child process and talks 
 `stdin`/`stdout`. Nothing listens on a network port, no `MCP_API_KEY` is needed, and Exchange
 traffic uses your workstation's normal network routes and VPN.
 
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-On `main`, `pip install "./v5[extract]"` installs `pypdf` for PDF text extraction (`ews-mcp` is not
-published on PyPI, so always install from the local `./v5` directory), and
-`get_message(format="eml")` writes `.eml` exports under `DATA_DIR/attachments`. On tag `v4.5.0a3`,
-install with `pip install ./v5`.
+`pip install "./v5[extract]"` installs `pypdf` for PDF text extraction; `ews-mcp` is not published
+on PyPI, so always install from the local `./v5` directory.
 
 Clone the repository and install into a virtual environment from the **repository root**:
 
@@ -143,7 +138,7 @@ From the **repository root**:
 
 ```bash
 python3 -m venv .venv        # Windows: python -m venv .venv
-.venv/bin/pip install "./v5[extract]"   # or "./v5" on tag v4.5.0a3
+.venv/bin/pip install "./v5[extract]"   # or "./v5" without PDF extraction
 cp v5/.env.example .env
 chmod 600 .env                          # on Linux/macOS
 ```
@@ -241,7 +236,7 @@ directory that contains your `.env` file:
 
 ```bash
 docker run --rm -p 127.0.0.1:8000:8000 --env-file .env \
-  -v ewsmcp-data:/data ghcr.io/azizmazrou/ews-mcp:v4.5.0a3
+  -v ewsmcp-data:/data ghcr.io/azizmazrou/ews-mcp:v4.5.0a4
 ```
 
 **What to check afterwards:**
@@ -269,7 +264,7 @@ Create `.env` in the **repository root** with the variables required by
 `v5/docker-compose.example.yml`:
 
 ```ini
-EWS_MCP_IMAGE=ghcr.io/azizmazrou/ews-mcp:v4.5.0a3
+EWS_MCP_IMAGE=ghcr.io/azizmazrou/ews-mcp:v4.5.0a4
 EWS_SERVER_URL=https://mail.example.com/EWS/Exchange.asmx
 EWS_EMAIL=you@example.com
 EWS_USERNAME=you
@@ -294,17 +289,10 @@ curl -i http://127.0.0.1:8000/readyz
 ```
 
 Confirm the `ews-mcp` service reaches `healthy` and `/readyz` answers HTTP `200` once Exchange
-connects, with `"tools": 18` on `main` or `"tools": 17` on image `v4.5.0a3` at the Compose file's
-default `read` tier (if `.env` also sets `EWS_CAPABILITY_TIER=draft`, `"tools"` is `29` or `28`).
+connects, with `"tools": 18` at the Compose file's default `read` tier (or `"tools": 29` if `.env`
+sets `EWS_CAPABILITY_TIER=draft`).
 
 ## Health, readiness and metrics
-
-> **On `main`, not yet in a release.** The newest tag is `v4.5.0a3`; this arrives with the next
-> 4.5 tag.
-
-In `v4.5.0a3`, `get_server_status` is refused with `upstream_unavailable` while the circuit breaker
-is open and `connection` omits `circuit_open` and `retry_after_s`; see
-[`UPGRADING.md`](UPGRADING.md).
 
 In `http` mode (`ewsmcp/http.py`), health and readiness routes stay public so orchestrators can
 probe the process without carrying `MCP_API_KEY`. Operational and tool routes require `MCP_API_KEY`
@@ -432,7 +420,7 @@ secrets manager, never in git.
 Container images are published to `ghcr.io/azizmazrou/ews-mcp` on `v4.5.*` tags and manual
 `workflow_dispatch` runs when the `v5-tests` suite passes:
 
-- **Always pin an exact `v4.5.*` tag**, such as `ghcr.io/azizmazrou/ews-mcp:v4.5.0a3`.
+- **Always pin an exact `v4.5.*` tag**, such as `ghcr.io/azizmazrou/ews-mcp:v4.5.0a4`.
 - **Never use `:latest` for 4.5.** The 4.5 line never publishes `:latest`; `:latest` and the
   version tags of the legacy line belong to the legacy 4.0 server (now in `Maintenance only`
   status). A moving `:v4.5` tag exists on GHCR, and production deployments should pin an immutable
@@ -447,13 +435,13 @@ From the **repository root**:
 
 ```bash
 git fetch --tags origin
-git checkout v4.5.0a3                # replace with the target v4.5.* tag
-.venv/bin/pip install -U "./v5"      # "./v5[extract]" from the next 4.5 tag onward
+git checkout v4.5.0a4                       # replace with the target v4.5.* tag
+.venv/bin/pip install -U "./v5[extract]"    # or "./v5" without PDF extraction
 ```
 
-On Windows PowerShell, run `.venv\Scripts\pip install -U "./v5"`. Restart your MCP client for
-`stdio` or your `ewsmcp` service for `http`, then check `get_server_status.version` or
-`GET /version`.
+On Windows PowerShell, run `.venv\Scripts\pip install -U "./v5[extract]"` (or `"./v5"` without PDF
+extraction). Restart your MCP client for `stdio` or your `ewsmcp` service for `http`, then check
+`get_server_status.version` or `GET /version`.
 
 ### Docker Compose
 
