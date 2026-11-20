@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`list_events` returns only events inside the window.**
+  - EWS CalendarView also returns an event that ends exactly when the window starts, so a query for
+    one day listed an all-day event of the day before as an event of that day.
+  - An all-day event ends at the midnight after its last day; an event without duration at the
+    start of the window stays in. `total_available` counts the remaining events.
+
 ## [4.5.0a4] - 2026-11-17
 
 ### Added

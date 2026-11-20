@@ -132,6 +132,27 @@ def test_list_events_pagination_caps_the_view_server_side(tmp_path):
     assert res2["next_offset"] is None
 
 
+def test_list_events_drops_events_that_end_at_the_window_start(tmp_path):
+    """CalendarView also returns an event ending exactly when the window
+    starts; an all-day event of the day before ends at that midnight."""
+    day_before = _event("RAW-ALLDAY", "Info", start=date(2026, 6, 13), end=date(2026, 6, 14))
+    day_before.is_all_day = True
+    same_day = _event("RAW-DAY", "Holiday", start=date(2026, 6, 15), end=date(2026, 6, 15))
+    same_day.is_all_day = True
+    ended = _event("RAW-LATE", "Late call", start=_dt(23, day=14), end=_dt(0, day=15))
+    instant = _event("RAW-0", "Reminder", start=_dt(0), end=_dt(0))
+    meeting = _event("RAW-1", "Standup")
+    next_day = _event("RAW-NEXT", "Next", start=date(2026, 6, 16), end=date(2026, 6, 16))
+    next_day.is_all_day = True
+    account = MagicMock()
+    account.calendar.view.return_value = [day_before, ended, same_day, instant, meeting, next_day]
+    ctx = _ctx(tmp_path, account)
+    res = _run(ctx, "list_events", {"start": "2026-06-15", "end": "2026-06-16"})
+    assert res["ok"] is True
+    assert [item["subject"] for item in res["items"]] == ["Holiday", "Reminder", "Standup"]
+    assert res["total_available"] == 3
+
+
 def test_list_events_rejects_absurd_windows(tmp_path):
     account = MagicMock()
     ctx = _ctx(tmp_path, account)

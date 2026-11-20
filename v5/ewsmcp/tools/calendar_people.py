@@ -22,6 +22,7 @@ import time
 from datetime import datetime, time as dtime, timedelta
 from itertools import islice
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from exchangelib import EWSTimeZone
 from exchangelib.fields import WEEKDAY_NAMES
@@ -130,6 +131,28 @@ def merge_busy_and_find_slots(
     return slots
 
 
+def _in_window(item: Any, start_dt: datetime, end_dt: datetime, tz: str) -> bool:
+    """Whether an event overlaps [start_dt, end_dt). EWS CalendarView also
+    returns events that end exactly at the start of the window, such as an
+    all-day event of the day before. exchangelib hands back all-day start
+    and end as dates, the end as the last day (inclusive): its exclusive end
+    is the following midnight."""
+    start, end = getattr(item, "start", None), getattr(item, "end", None)
+    if start is None or end is None:
+        return True
+    zone = ZoneInfo(tz)
+
+    def aware(value: Any, is_end: bool) -> datetime:
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=zone)
+        midnight = datetime.combine(value, dtime(0), tzinfo=zone)
+        return midnight + timedelta(days=1) if is_end else midnight
+
+    item_start, item_end = aware(start, False), aware(end, True)
+    # an event without duration at the start of the window lies inside it
+    return item_start < end_dt and (item_end > start_dt or item_start >= start_dt)
+
+
 # -------------------------------------------------------------- handlers
 
 
@@ -150,8 +173,9 @@ async def _list_events(ctx: Context, start: str = "today", end: str = "+7d",
         return list(account.calendar.view(start=start_dt, end=end_dt,
                                           max_items=cap))
 
-    items = await ctx.gateway.call(work)
-    truncated = len(items) >= cap
+    viewed = await ctx.gateway.call(work)
+    truncated = len(viewed) >= cap
+    items = [item for item in viewed if _in_window(item, start_dt, end_dt, tz)]
     total = None if truncated else len(items)
     page = items[offset:offset + limit]
     next_offset = offset + limit if truncated or offset + limit < len(items) else None
