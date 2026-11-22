@@ -285,6 +285,18 @@ def test_get_event_reports_invitation_status_to_the_organizer(tmp_path, sent):
     assert _get(tmp_path, ev)["invitations_sent"] is sent
 
 
+def test_get_event_leaves_attendee_responses_out_of_an_attendee_copy(tmp_path):
+    # Exchange keeps attendee responses only on the organizer's copy; on an
+    # attendee's copy a stale value must not contradict my_response.
+    ev = _series_event("Single")
+    ev.required_attendees = [SimpleNamespace(
+        mailbox=SimpleNamespace(name="Me", email_address="me@corp.example"), response_type="Decline")]
+    ev.my_response_type = "Accept"
+    event = _get(tmp_path, ev)
+    assert event["attendees"] == [{"email": "me@corp.example", "name": "Me"}]
+    assert event["my_response"] == "Accept"
+
+
 def test_get_event_hides_invitation_status_from_an_attendee(tmp_path):
     ev = _series_event("Single")
     ev.required_attendees = [SimpleNamespace(
