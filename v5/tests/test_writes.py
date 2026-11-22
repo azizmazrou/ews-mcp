@@ -64,7 +64,7 @@ from exchangelib.version import EXCHANGE_2016, Version
 from conftest import FIXED_OFFSET_TZ, TIME_MARGIN, make_settings
 from ewsmcp.audit import AuditLog
 from ewsmcp.confirm import reset_consumed_tokens
-from ewsmcp.dates import parse_when
+from ewsmcp.dates import parse_until, parse_when
 from ewsmcp.htmlsafe import MAX_INSPECT_HTML_CHARS
 from ewsmcp.ids import get_aliaser
 from ewsmcp.tools import writes
@@ -1752,6 +1752,16 @@ def test_per_draft_lock_serializes_mutations_with_send_and_stays_bounded(tmp_pat
         assert len(writes._DRAFT_LOCKS) == 0
 
     asyncio.run(scenario())
+
+
+def test_parse_until_takes_a_day_to_its_end_and_keeps_a_datetime():
+    tz = ZoneInfo("UTC")
+    assert parse_until("2026-07-31", "until", "UTC") == datetime(
+        2026, 7, 31, 23, 59, 59, 999999, tzinfo=tz)
+    today = parse_when("today", "until", "UTC")
+    assert parse_until("today", "until", "UTC") == today + timedelta(days=1, microseconds=-1)
+    assert parse_until("+2d", "until", "UTC") == today + timedelta(days=3, microseconds=-1)
+    assert parse_until("2026-07-31T12:00", "until", "UTC") == datetime(2026, 7, 31, 12, 0, tzinfo=tz)
 
 
 def test_parse_when_converts_aware_offsets_to_configured_zoneinfo():
