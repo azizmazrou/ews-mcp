@@ -161,15 +161,17 @@ async def _list_events(ctx: Context, start: str = "today", end: str = "+7d",
     return envelope(cards, total, offset, next_offset=next_offset)
 
 
-def _attendee_entries(item: Any) -> List[Dict[str, Any]]:
+def _attendee_entries(item: Any, with_response: bool = True) -> List[Dict[str, Any]]:
+    """The attendees of an event. Exchange tracks their responses only on the
+    organizer's copy; on an attendee's copy the values are not maintained, so
+    callers leave them out there (with_response=False)."""
     out: List[Dict[str, Any]] = []
     for att in [*(getattr(item, "required_attendees", None) or []),
                 *(getattr(item, "optional_attendees", None) or [])]:
         mailbox = getattr(att, "mailbox", None)
-        entry: Dict[str, Any] = {
-            "email": getattr(mailbox, "email_address", None) or "",
-            "response": str(getattr(att, "response_type", None) or "Unknown"),
-        }
+        entry: Dict[str, Any] = {"email": getattr(mailbox, "email_address", None) or ""}
+        if with_response:
+            entry["response"] = str(getattr(att, "response_type", None) or "Unknown")
         name = getattr(mailbox, "name", None)
         if name and name != entry["email"]:
             entry["name"] = name
@@ -236,7 +238,10 @@ async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
 
     item, rule = await ctx.gateway.call(work)
     event = event_card(item, ctx.aliaser, tz)
-    event["attendees"] = _attendee_entries(item)
+    my_response = getattr(item, "my_response_type", None)
+    # Attendee responses are tracked on the organizer's copy only; an
+    # attendee's own answer is my_response.
+    event["attendees"] = _attendee_entries(item, with_response=my_response == "Organizer")
     source = getattr(item, "text_body", None) or ""
     if not source:
         body_obj = getattr(item, "body", None)
@@ -250,7 +255,6 @@ async def _get_event(ctx: Context, id: str) -> Dict[str, Any]:
     kind = getattr(item, "type", None)
     if isinstance(kind, str):
         event["type"] = kind
-    my_response = getattr(item, "my_response_type", None)
     if my_response:
         event["my_response"] = str(my_response)
     if getattr(item, "reminder_is_set", None) is True:
@@ -626,8 +630,9 @@ TOOLS: List[ToolSpec] = [
         description=(
             "Fetch one calendar event in full by id (a short alias like 'e3' "
             "from list_events, or a raw EWS id). Returns organizer, every "
-            "attendee with their response (Accept/Decline/Tentative/…), the "
-            "cleaned body text, a recurring flag, the rule of a series, the reminder "
+            "attendee (with their response (Accept/Decline/Tentative/…) only for an "
+            "event you organize: Exchange tracks responses on the organizer's copy "
+            "only), the cleaned body text, a recurring flag, the rule of a series, the reminder "
             "(null if none), your own response and, for an event you organize, whether "
             "invitations were sent."
         ),

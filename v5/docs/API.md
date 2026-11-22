@@ -180,7 +180,7 @@ List calendar events overlapping a time window (default: today through +7d, serv
 
 #### `get_event` — read (min tier: read)
 
-Fetch one calendar event in full by id (a short alias like 'e3' from list_events, or a raw EWS id). Returns organizer, every attendee with their response (Accept/Decline/Tentative/…), the cleaned body text, a recurring flag, the rule of a series, the reminder (null if none), your own response and, for an event you organize, whether invitations were sent.
+Fetch one calendar event in full by id (a short alias like 'e3' from list_events, or a raw EWS id). Returns organizer, every attendee (with their response (Accept/Decline/Tentative/…) only for an event you organize: Exchange tracks responses on the organizer's copy only), the cleaned body text, a recurring flag, the rule of a series, the reminder (null if none), your own response and, for an event you organize, whether invitations were sent.
 
 | parameter | type | required | description |
 |---|---|---|---|
