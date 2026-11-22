@@ -40,3 +40,17 @@ def parse_when(value, field: str, tz_name: str) -> datetime:
             hint=GRAMMAR_HINT,
         ) from None
     return dt.astimezone(tz) if dt.tzinfo is not None else dt.replace(tzinfo=tz)
+
+
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_until(value, field: str, tz_name: str) -> datetime:
+    """The end of a window, inclusive. A day without a time ('today', '+Nd',
+    YYYY-MM-DD) covers that whole day: the result is its last microsecond, so
+    `until="2026-07-31"` keeps the mails of 31 July. A datetime stays as given."""
+    dt = parse_when(value, field, tz_name)
+    v = value.strip()
+    if v.lower() == "today" or _REL_RE.match(v) or _DATE_ONLY_RE.match(v):
+        return dt + timedelta(days=1) - timedelta(microseconds=1)
+    return dt

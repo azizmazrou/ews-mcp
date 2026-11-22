@@ -31,7 +31,7 @@ from exchangelib.attachments import FileAttachment, ItemAttachment
 from exchangelib.errors import UnauthorizedError
 
 from ..bodyclean import clean_body
-from ..dates import parse_when
+from ..dates import parse_until, parse_when
 from ..dto import (
     envelope,
     event_card,
@@ -1150,7 +1150,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
                  "or search one folder.",
         )
     since_dt = parse_when(since, "since", tz) if since else None
-    until_dt = parse_when(until, "until", tz) if until else None
+    until_dt = parse_until(until, "until", tz) if until else None
 
     # ---- cache-first: local FTS + SQL filters, exact COUNT(*) total -------
     # Multi-folder fan-out (`f:all`, `recursive`) and `flag_complete` (not
@@ -1408,7 +1408,7 @@ async def _check_messages(ctx: Context, values: Any, field: str = "subject",
 
     tz = ctx.settings.ews_tz if ctx is not None else "UTC"
     since_dt = parse_when(since, "since", tz) if since else None
-    until_dt = parse_when(until, "until", tz) if until else None
+    until_dt = parse_until(until, "until", tz) if until else None
     folder_key = _cache_folder_key(ctx, norm_folder) if ctx is not None else None
     mirror_as_of = (
         _cache_watermark(ctx, folder_key)
@@ -2832,8 +2832,8 @@ TOOLS: List[ToolSpec] = [
             },
             "until": {
                 "type": "string",
-                "description": "Window end: 'today', '+Nd', YYYY-MM-DD, or "
-                               "ISO datetime (server timezone).",
+                "description": "Window end, inclusive: 'today', '+Nd', YYYY-MM-DD "
+                               "(the whole day), or ISO datetime (server timezone).",
             },
             "is_unread": {"type": "boolean"},
             "has_attachments": {"type": "boolean"},
@@ -2906,7 +2906,7 @@ TOOLS: List[ToolSpec] = [
                                "scopes are not supported).",
             },
             "since": {"type": "string", "description": "Received at or after (ISO date)."},
-            "until": {"type": "string", "description": "Received at or before (ISO date)."},
+            "until": {"type": "string", "description": "Received on or before (ISO date: the whole day, or ISO datetime)."},
             "only_missing": {"type": "boolean",
                              "description": "Return only the values without a match."},
             "fresh": dict(_FRESH_PROPERTY),

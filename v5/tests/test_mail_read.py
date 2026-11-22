@@ -314,6 +314,17 @@ def test_search_structured_filters_become_lookups(tmp_path):
     assert inbox.order_calls and inbox.only_calls  # projection applied
 
 
+def test_search_until_date_covers_the_whole_day(tmp_path):
+    # A date without a time is the last day of the window, not its midnight:
+    # until="2026-07-31" must keep the mails of 31 July.
+    inbox = _Query([_msg("RAW-1=")])
+    ctx = _ctx(tmp_path, _account(inbox=inbox))
+    res = _run(ctx, "search_messages", subject="rfp", since="2026-07-01", until="2026-07-31")
+    assert res["ok"] is True
+    _, kwargs = inbox.filter_calls[0]
+    assert kwargs["datetime_received__lte"] == datetime(2026, 7, 31, 23, 59, 59, 999999, tzinfo=TZ)
+
+
 def test_search_from_is_a_client_side_postfilter(tmp_path):
     inbox = _Query([
         _msg("RAW-1=", sender="alice@corp.example"),
