@@ -821,6 +821,43 @@ def _sender_matches_substring(item: Any, needle: str) -> bool:
     return needle in email or needle in name
 
 
+# Exchange cannot restrict a FindItem on the sender (message:Sender is not a
+# queryable path, and AQS `from:` does not match an address of an internal
+# sender), so the sender is matched here. The scan runs newest first through
+# the folder's rows (already restricted by since/until on the server) and
+# stops once the page and a lookahead are found, the window ends or this many
+# rows per folder were read.
+SENDER_SCAN_MAX = 5000
+SENDER_SCAN_CHUNK = 250
+
+
+def _scan_for_sender(qs: Any, needle: str, *, offset: int,
+                     limit: int) -> Tuple[List[Any], bool, int, bool]:
+    """Items of ``qs`` whose sender contains ``needle``, matches[offset:offset+limit].
+
+    Returns ``(page, more, scanned, capped)``: ``more`` is True when a match
+    beyond the page exists, ``capped`` when the scan stopped at
+    SENDER_SCAN_MAX rows with part of the folder unread.
+    """
+    wanted = max(0, offset) + max(0, limit)
+    matches: List[Any] = []
+    cursor = 0
+    exhausted = False
+    while len(matches) <= wanted and cursor < SENDER_SCAN_MAX:
+        batch = list(qs[cursor:cursor + SENDER_SCAN_CHUNK])
+        if not batch:
+            exhausted = True
+            break
+        cursor += len(batch)
+        matches.extend(it for it in batch if _sender_matches_substring(it, needle))
+        if len(batch) < SENDER_SCAN_CHUNK:
+            exhausted = True
+            break
+    more = len(matches) > wanted
+    capped = not exhausted and not more
+    return matches[offset:wanted], more, cursor, capped
+
+
 def _build_queryset(
     target: Any,
     *,
@@ -1021,9 +1058,15 @@ async def _search_all_folders(
     skipped = len(all_in_scope) - len(folders)
     wanted = offset + limit
 
-    async def one(target: Any) -> Tuple[List[Any], Optional[int]]:
-        def work(_account: Any) -> Tuple[List[Any], Optional[int]]:
-            return paginate(_project(build_qs(target)), offset=0, limit=wanted)
+    async def one(target: Any) -> Tuple[List[Any], Optional[int], int, bool]:
+        def work(_account: Any) -> Tuple[List[Any], Optional[int], int, bool]:
+            qs = _project(build_qs(target))
+            if sender_needle:
+                page, more, scanned, capped = _scan_for_sender(
+                    qs, sender_needle, offset=0, limit=wanted)
+                return page, (wanted if more or capped else None), scanned, capped
+            page, more = paginate(qs, offset=0, limit=wanted)
+            return page, more, len(page), False
         return await ctx.gateway.call(work)
 
     results = await asyncio.gather(*(one(f) for _, f in folders),
@@ -1050,26 +1093,28 @@ async def _search_all_folders(
         raise errors[0]
     hits: List[Tuple[str, Any]] = []
     failed: List[str] = []
+    capped_folders: List[str] = []
+    scanned_total = 0
     truncated = False
     for (path, _), result in zip(folders, results):
         if isinstance(result, Exception):
             logger.warning("search failed in a folder: %s", type(result).__name__)
             failed.append(path)
             continue
-        page, more = result
+        page, more, scanned, capped = result
         truncated = truncated or more is not None
+        scanned_total += scanned
+        if capped:
+            capped_folders.append(path)
         hits.extend((path, item) for item in page)
     hits.sort(key=lambda hit: getattr(hit[1], "datetime_received", None)
               or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     next_offset = wanted if truncated or len(hits) > wanted else None
     page_hits = hits[offset:wanted]
-    if sender_needle:
-        page_hits = [
-            h for h in page_hits
-            if _sender_matches_substring(h[1], sender_needle)
-        ]
     return {
         "hits": page_hits,
+        "scanned": scanned_total,
+        "scan_capped": capped_folders,
         "total": (None if (truncated or failed or skipped or sender_needle)
                   else len(hits)),
         "next_offset": next_offset,
@@ -1223,10 +1268,16 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
             except Exception:
                 total = None
         qs = _project(qs)
+        if sender_needle:
+            page, more, scanned, capped = _scan_for_sender(
+                qs, sender_needle, offset=offset, limit=limit)
+            scan.update(scanned=scanned, capped=capped)
+            return page, (offset + limit if more or capped else None), None
         page, next_off = paginate(qs, offset=offset, limit=limit)
         return page, next_off, total
 
     sender_needle = sender.strip().lower() if sender else None
+    scan: Dict[str, Any] = {}
     found: Dict[str, Any] = {}
     if fan_out:
         root_ref = None if whole_mailbox else folder
@@ -1240,9 +1291,7 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
         single_items, next_offset, total = await ctx.gateway.call(work)
         paired = [("", it) for it in single_items]
         if sender_needle:
-            paired = [(path, it) for path, it in paired
-                      if _sender_matches_substring(it, sender_needle)]
-            total = None  # client-side post-filter: upstream total no longer applies
+            total = None  # matched here: the upstream total no longer applies
     items = [it for _, it in paired]
     cards = await _cards_off_loop(ctx, items, tz)
     if fan_out:
@@ -1256,6 +1305,17 @@ async def _search_messages(ctx: Context, query: Optional[str] = None,
             out["folders_failed"] = found["failed"]
         if found["skipped"]:
             out["folders_skipped"] = found["skipped"]
+    if sender_needle:
+        scanned = found["scanned"] if fan_out else scan.get("scanned", 0)
+        capped = found["scan_capped"] if fan_out else (
+            [folder] if scan.get("capped") else [])
+        out["scanned"] = scanned
+        if capped:
+            out["scan_capped"] = capped
+            out["scan_hint"] = (
+                f"{', '.join(capped)}: only the newest {SENDER_SCAN_MAX} messages of the "
+                "period were read for the sender; narrow the period with since/until "
+                "to read further back.")
     return _stamp(out, "live")
 
 
@@ -2813,11 +2873,14 @@ TOOLS: List[ToolSpec] = [
             },
             "sender": {
                 "type": "string",
-                "description": "Sender email or display-name substring, "
-                               "matched within each page; keep paging while "
-                               "next_offset is set (a page may hold fewer "
-                               "than `limit` items or none, and "
-                               "total_available is null on live searches).",
+                "description": "Sender email or display-name substring. "
+                               "Matched in the server by reading the "
+                               "period newest first (at most 5000 messages "
+                               "per folder, see `scan_capped`), so a page "
+                               "holds up to `limit` matches; keep paging "
+                               "while next_offset is set. total_available "
+                               "is null on live searches. Narrow with "
+                               "since/until for a long period.",
             },
             "from_": {
                 "type": "string",

@@ -367,6 +367,12 @@
 - README, API reference, design notes and the contributor guide brought up to date for 4.5.0a2 (operator notes for `auth_failed`, upgrade notes, a caution for the 4.0 line).
 
 ### Fixed
+- `search_messages` with `sender` on a multi-folder search (`f:all`, `recursive`) or an uncached folder
+  matched the sender only within the newest `offset + limit` messages (at most 500 on a multi-folder
+  search), so mails further back were never found. Exchange cannot restrict a FindItem on the sender, so
+  the server now reads the period newest first per folder (at most 5000 messages, `scan_capped` and
+  `scan_hint` name a folder that hit the limit, `scanned` counts the messages read) and a page holds up
+  to `limit` matches.
 - `send_draft` sends exactly what was previewed: the confirm gate hands the handler the hash it verified, the handler fetches the draft once, re-checks the hash on that object and sends that object; a draft changed after the preview is refused with `confirm_invalid`. Draft tools (`update_draft`, `add_draft_attachment`, `delete_draft`, `send_draft`) are serialised per draft. Before, a change landing between verification and sending went out unreviewed.
 - `update_draft` refuses items outside Drafts, like the other draft tools.
 - A tool call that completed is no longer reported as `auth_failed` because another call saw a 401 at the same time.
