@@ -83,7 +83,7 @@ Search mail. TWO ENGINES, mutually exclusive: pass `query` (an Exchange AQS stri
 |---|---|---|---|
 | `query` | string | no | AQS query string — cannot be combined with the structured filters below. |
 | `folder` | string | no | Folder alias (f:inbox, f:sent, f7), path, raw id, or f:all for the whole mailbox: all mail folders with their subfolders, without deleted items, junk, drafts and outbox; each hit then names its folder. (default `f:inbox`) |
-| `sender` | string | no | Sender email or display-name substring, matched within each page; keep paging while next_offset is set (a page may hold fewer than `limit` items or none, and total_available is null on live searches). |
+| `sender` | string | no | Sender email or display-name substring. Matched in the server by reading the period newest first (at most 5000 messages per folder, see `scan_capped`), so a page holds up to `limit` matches; keep paging while next_offset is set. total_available is null on live searches. Narrow with since/until for a long period. |
 | `from_` | string | no | DEPRECATED alias of `sender` — do not combine the two. |
 | `subject` | string | no | Subject substring. |
 | `since` | string | no | Window start: 'today', '+Nd', YYYY-MM-DD, or ISO datetime (server timezone). |

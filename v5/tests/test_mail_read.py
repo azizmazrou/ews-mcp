@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import zlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from types import SimpleNamespace
@@ -1244,8 +1244,7 @@ def test_search_fanout_propagates_cancelled_and_fails_on_throttle(tmp_path):
 def test_search_fanout_slices_page_before_sender_filter_and_matches_single_folder(tmp_path):
     props = SPECS["search_messages"].input_schema["properties"]
     assert (
-        "matched within each page; keep paging while next_offset is set"
-        in props["sender"]["description"]
+        "keep paging while next_offset is set" in props["sender"]["description"]
     )
     assert "contains" in props["categories"]["description"]
     assert "exact" in props["categories"]["description"]
@@ -1300,16 +1299,51 @@ def test_search_fanout_slices_page_before_sender_filter_and_matches_single_folde
     fanout_pages, fanout_seen = collect_pages(
         ctx_fanout, folder="f:all", sender="target",
     )
-    # Pages 0 and 1 hold only newer noise items, yet next_offset keeps advancing.
-    assert fanout_pages[0]["items"] == [] and fanout_pages[0]["next_offset"] == 2
-    assert fanout_pages[1]["items"] == [] and fanout_pages[1]["next_offset"] == 4
+    # The sender is matched before paging: page 0 is full although the newest
+    # messages of the folder are noise.
+    assert len(fanout_pages[0]["items"]) == 2 and fanout_pages[0]["next_offset"] == 2
+    assert len(fanout_pages[1]["items"]) == 1 and fanout_pages[1]["next_offset"] is None
     assert fanout_seen == single_seen
 
     rec_pages, rec_seen = collect_pages(
         ctx_fanout, folder="Inbox", recursive=True, sender="target",
     )
-    assert rec_pages[0]["items"] == [] and rec_pages[0]["next_offset"] == 2
+    assert len(rec_pages[0]["items"]) == 2 and rec_pages[0]["next_offset"] == 2
     assert rec_seen == single_seen
+
+
+def test_search_sender_reads_past_the_old_window(tmp_path):
+    def make_mail(n, role):
+        return _msg(
+            f"ID-{n}=", subject=f"{role}-{n}", sender=f"{role}@example.com",
+            dt=datetime(2026, 7, 1, tzinfo=TZ) - timedelta(minutes=n),
+            message_id=f"<{n}@example.com>",
+        )
+
+    # 700 newer messages of someone else, then 3 of the sender: all lie beyond
+    # offset + limit = 500, the old window of a multi-folder search.
+    items = [make_mail(n, "noise") for n in range(700)]
+    items += [make_mail(700 + n, "target") for n in range(3)]
+    ctx = _whole_mailbox(tmp_path, {"Inbox": _Query(items)})
+    res = _run(ctx, "search_messages", folder="f:all", sender="target", limit=10)
+    assert [i["subject"] for i in res["items"]] == ["target-700", "target-701", "target-702"]
+    assert res["next_offset"] is None
+    assert res["scanned"] == 703 and "scan_capped" not in res
+
+
+def test_search_sender_reports_a_capped_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(mail_read, "SENDER_SCAN_MAX", 500)
+    monkeypatch.setattr(mail_read, "SENDER_SCAN_CHUNK", 100)
+    items = [
+        _msg(f"ID-{n}=", subject=f"noise-{n}", sender="noise@example.com",
+             dt=datetime(2026, 7, 1, tzinfo=TZ) - timedelta(minutes=n))
+        for n in range(900)
+    ]
+    ctx = _whole_mailbox(tmp_path, {"Inbox": _Query(items)})
+    res = _run(ctx, "search_messages", folder="f:all", sender="target")
+    assert res["items"] == [] and res["scanned"] == 500
+    assert res["scan_capped"] == ["Inbox"] and "newest 500" in res["scan_hint"]
+    assert res["next_offset"] is not None
 
 
 def test_check_messages_rejects_f_all_and_recursive_scopes(tmp_path):
